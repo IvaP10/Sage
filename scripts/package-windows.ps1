@@ -29,6 +29,11 @@ dotnet publish apps/windows/Sage.Windows/Sage.Windows.csproj `
     -o $output
 if ($LASTEXITCODE -ne 0) { throw ".NET Windows publish failed with exit code $LASTEXITCODE." }
 
+$appExecutable = Join-Path $output "Sage.Windows.exe"
+if (-not (Test-Path $appExecutable)) {
+    throw ".NET Windows publish completed without Sage.Windows.exe; refusing to package an incomplete installer."
+}
+
 $rustOutput = Join-Path $repositoryRoot "target/x86_64-pc-windows-msvc/release"
 Copy-Item "$rustOutput/sage-core.exe" $output
 Copy-Item "$rustOutput/sage-browser-worker.exe" $output
