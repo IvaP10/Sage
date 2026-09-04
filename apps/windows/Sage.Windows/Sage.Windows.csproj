@@ -39,13 +39,15 @@
        protoc is checked into the repository.  Calling protoc directly keeps
        this deterministic when WinUI's design-time build changes the normal
        Grpc.Tools target ordering. -->
-  <Target Name="GenerateSageProtocol" BeforeTargets="CoreCompile">
+  <Target Name="GenerateSageProtocol"
+          BeforeTargets="BeforeCompile;Compile;CoreCompile;MarkupCompilePass1;XamlPreCompile">
     <Error Condition="!Exists('$(SageProtocolSource)')"
            Text="Sage IPC schema was not found at $(SageProtocolSource)." />
     <Error Condition="!Exists('$(SageProtocPath)')"
            Text="Grpc.Tools protoc was not found at $(SageProtocPath)." />
     <MakeDir Directories="$(SageProtocolOutputDir)" />
     <Exec Command="&quot;$(SageProtocPath)&quot; --proto_path=&quot;$(SageProtocolRoot)&quot; --csharp_out=&quot;$(SageProtocolOutputDir)&quot; &quot;$(SageProtocolSource)&quot;" />
+    <Message Importance="high" Text="Generated Sage IPC bindings in $(SageProtocolOutputDir)." />
     <ItemGroup>
       <Compile Include="$(SageProtocolOutputDir)\**\*.cs" Visible="false" />
     </ItemGroup>
