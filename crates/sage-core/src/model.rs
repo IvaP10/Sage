@@ -242,6 +242,9 @@ impl OpenAICompatibleProvider {
     ) -> CoreResult<ActionGraph> {
         let endpoint = Self::endpoint_for(settings)?;
         let client = reqwest::Client::builder()
+            // Provider credentials must never be sent through ambient proxy
+            // configuration that Sage cannot validate or disclose to users.
+            .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(std::time::Duration::from_secs(15))
             .timeout(std::time::Duration::from_secs(REQUEST_TIMEOUT_SECONDS))
@@ -738,6 +741,8 @@ mod tests {
         let address = listener.local_addr().unwrap();
         tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = vec![0_u8; 8 * 1024];
+            let _ = tokio::io::AsyncReadExt::read(&mut stream, &mut request).await;
             let body = r#"{"choices":[{"message":{"content":"not-json"}}]}"#;
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -790,6 +795,8 @@ mod tests {
         let address = listener.local_addr().unwrap();
         tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = vec![0_u8; 8 * 1024];
+            let _ = tokio::io::AsyncReadExt::read(&mut stream, &mut request).await;
             let response = "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:9/redirect-target\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
             stream.write_all(response.as_bytes()).await.unwrap();
         });
