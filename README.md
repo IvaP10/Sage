@@ -69,7 +69,7 @@ Shared:
 macOS:
 
 - macOS 14 or newer
-- Xcode/Swift 6.2 or newer
+- Xcode/Swift 6.1 or newer
 - protoc-gen-swift 1.38.1 only when regenerating the checked-in Swift binding
 
 Windows:
