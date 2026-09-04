@@ -15,6 +15,8 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <PublishSingleFile>false</PublishSingleFile>
     <SelfContained>true</SelfContained>
+    <Protobuf_Generator>CSharp</Protobuf_Generator>
+    <DisableProtobufDesignTimeBuild>false</DisableProtobufDesignTimeBuild>
   </PropertyGroup>
 
   <ItemGroup>
@@ -26,6 +28,7 @@
       Include="..\..\..\proto\sage\ipc\v1\sage.proto"
       GrpcServices="None"
       ProtoRoot="..\..\..\proto"
+      CompileOutputs="true"
       Link="Protocol\sage.proto" />
     <Content Include="..\..\..\assets\icon-source-bg.png" Link="Assets\sage-logo.png">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
