@@ -20,12 +20,14 @@ if (Test-Path $output) { Remove-Item -Recurse -Force $output }
 New-Item -ItemType Directory -Force -Path $output | Out-Null
 
 cargo build --release --workspace --target x86_64-pc-windows-msvc
+if ($LASTEXITCODE -ne 0) { throw "Rust Windows build failed with exit code $LASTEXITCODE." }
 dotnet publish apps/windows/Sage.Windows/Sage.Windows.csproj `
     -c Release `
     -r $runtime `
     --self-contained true `
     -p:Platform=x64 `
     -o $output
+if ($LASTEXITCODE -ne 0) { throw ".NET Windows publish failed with exit code $LASTEXITCODE." }
 
 $rustOutput = Join-Path $repositoryRoot "target/x86_64-pc-windows-msvc/release"
 Copy-Item "$rustOutput/sage-core.exe" $output

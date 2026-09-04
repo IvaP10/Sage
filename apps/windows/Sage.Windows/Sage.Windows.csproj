@@ -22,7 +22,11 @@
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.26100.4654" />
     <PackageReference Include="Google.Protobuf" Version="3.36.0" />
     <PackageReference Include="Grpc.Tools" Version="2.83.0" PrivateAssets="All" />
-    <Protobuf Include="..\..\..\proto\sage\ipc\v1\sage.proto" GrpcServices="None" Link="Protocol\sage.proto" />
+    <Protobuf
+      Include="..\..\..\proto\sage\ipc\v1\sage.proto"
+      GrpcServices="None"
+      ProtoRoot="..\..\..\proto"
+      Link="Protocol\sage.proto" />
     <Content Include="..\..\..\assets\icon-source-bg.png" Link="Assets\sage-logo.png">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
