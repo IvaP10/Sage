@@ -81,7 +81,7 @@ Application, browser, and semantic element observation are explicit extension po
 
 ### Models and speech
 
-**model.rs** defines vendor-neutral traits for reasoning, ASR, TTS, and vision. The default executable installs UnconfiguredModelProvider, which fails closed until provider configuration is connected. Model absence never weakens policy or enables a direct command path.
+**model.rs** defines vendor-neutral traits for reasoning, ASR, TTS, and vision. The default executable installs `OpenAICompatibleProvider`, which fails closed until a supported OpenAI or OpenAI-compatible endpoint is configured. Model absence never weakens policy or enables a direct command path.
 
 ## macOS application
 

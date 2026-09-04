@@ -308,7 +308,8 @@ struct SettingsView: View {
     }
 
     private var selectedProviderLabel: String {
-        providers.first(where: { $0.0 == provider })?.1 ?? provider
+        providers.first(where: { $0.0 == provider })?.1
+            ?? (provider.isEmpty ? "Unconfigured provider" : "Unconfigured legacy provider (\(provider))")
     }
 
     private func settingsField<Content: View>(

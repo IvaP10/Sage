@@ -453,10 +453,14 @@ public sealed partial class MainWindow : Window
 
     private async void Settings_Click(object sender, RoutedEventArgs e)
     {
+        var hasUnsupportedLegacyProvider = _providerSettings is not null
+            && _providerSettings.Provider is not ("openai" or "openai-compatible");
         var provider = new ComboBox
         {
             ItemsSource = new[] { "openai", "openai-compatible" },
-            PlaceholderText = "Provider",
+            PlaceholderText = hasUnsupportedLegacyProvider
+                ? "Unconfigured legacy provider — choose one"
+                : "Provider",
         };
         provider.SelectedItem = _providerSettings?.Provider is "openai" or "openai-compatible"
             ? _providerSettings.Provider
