@@ -1,0 +1,174 @@
+name: Sage preview release
+
+on:
+  push:
+    tags:
+      - "v1.0.1-preview.*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  SAGE_VERSION: 1.0.1
+
+jobs:
+  macos:
+    name: macOS ${{ matrix.architecture }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            architecture: arm64
+          - runner: macos-15-intel
+            architecture: x86_64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.85.1
+      - name: Install protobuf compiler
+        run: brew install protobuf
+      - name: Package unsigned preview
+        env:
+          SAGE_MACOS_ARCH: ${{ matrix.architecture }}
+          SAGE_MACOS_SIGN_IDENTITY: ${{ secrets.SAGE_MACOS_SIGN_IDENTITY }}
+          SAGE_NOTARY_PROFILE: ${{ secrets.SAGE_NOTARY_PROFILE }}
+        run: ./scripts/package-macos.sh
+      - name: Inspect architecture and signature
+        run: |
+          file "dist/macos/${{ matrix.architecture }}/Sage.app/Contents/MacOS/Sage"
+          codesign --verify --deep --strict --verbose=2 "dist/macos/${{ matrix.architecture }}/Sage.app"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Sage-macos-${{ matrix.architecture }}
+          path: dist/macos/${{ matrix.architecture }}
+          if-no-files-found: error
+
+  macos-universal:
+    name: macOS Universal 2 DMG
+    needs: macos
+    runs-on: macos-15
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download ARM64 package
+        uses: actions/download-artifact@v4
+        with:
+          name: Sage-macos-arm64
+          path: dist/macos/arm64
+      - name: Download Intel package
+        uses: actions/download-artifact@v4
+        with:
+          name: Sage-macos-x86_64
+          path: dist/macos/x86_64
+      - name: Assemble Universal 2 app and DMG
+        env:
+          SAGE_MACOS_SIGN_IDENTITY: ${{ secrets.SAGE_MACOS_SIGN_IDENTITY }}
+          SAGE_NOTARY_PROFILE: ${{ secrets.SAGE_NOTARY_PROFILE }}
+        run: |
+          set -euo pipefail
+          rm -rf dist/macos/universal dist/macos/Sage.app
+          mkdir -p dist/macos/universal/Sage.app/Contents/{MacOS,Helpers,Resources}
+          cp dist/macos/arm64/Sage.app/Contents/Info.plist dist/macos/universal/Sage.app/Contents/Info.plist
+          cp -R dist/macos/arm64/Sage.app/Contents/Resources/. dist/macos/universal/Sage.app/Contents/Resources/
+          lipo -create \
+            dist/macos/arm64/Sage.app/Contents/MacOS/Sage \
+            dist/macos/x86_64/Sage.app/Contents/MacOS/Sage \
+            -output dist/macos/universal/Sage.app/Contents/MacOS/Sage
+          for helper in sage-core sage-browser-worker sage-sandbox-worker sage-privileged-helper; do
+            lipo -create \
+              "dist/macos/arm64/Sage.app/Contents/Helpers/$helper" \
+              "dist/macos/x86_64/Sage.app/Contents/Helpers/$helper" \
+              -output "dist/macos/universal/Sage.app/Contents/Helpers/$helper"
+          done
+          identity="${SAGE_MACOS_SIGN_IDENTITY:--}"
+          if [ "$identity" = "-" ]; then
+            for helper in sage-core sage-browser-worker sage-sandbox-worker sage-privileged-helper; do
+              codesign --force --sign - "dist/macos/universal/Sage.app/Contents/Helpers/$helper"
+            done
+            codesign --force --sign - --entitlements apps/macos/Sage.entitlements dist/macos/universal/Sage.app
+          else
+            for helper in sage-core sage-browser-worker sage-sandbox-worker sage-privileged-helper; do
+              codesign --force --timestamp --options runtime --sign "$identity" "dist/macos/universal/Sage.app/Contents/Helpers/$helper"
+            done
+            codesign --force --timestamp --options runtime --entitlements apps/macos/Sage.entitlements --sign "$identity" dist/macos/universal/Sage.app
+          fi
+          codesign --verify --deep --strict --verbose=2 dist/macos/universal/Sage.app
+          lipo -info dist/macos/universal/Sage.app/Contents/MacOS/Sage
+          hdiutil create -volname Sage -srcfolder dist/macos/universal/Sage.app -ov -format UDZO dist/macos/Sage-1.0.1-macos-universal-preview.dmg
+          hdiutil verify dist/macos/Sage-1.0.1-macos-universal-preview.dmg
+          if [ -n "${SAGE_NOTARY_PROFILE:-}" ]; then
+            if [ "$identity" = "-" ]; then echo "Notarization requires a signing identity" >&2; exit 1; fi
+            xcrun notarytool submit dist/macos/Sage-1.0.1-macos-universal-preview.dmg --keychain-profile "$SAGE_NOTARY_PROFILE" --wait
+            xcrun stapler staple dist/macos/Sage-1.0.1-macos-universal-preview.dmg
+            xcrun stapler validate dist/macos/Sage-1.0.1-macos-universal-preview.dmg
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Sage-macos-universal
+          path: dist/macos/Sage-1.0.1-macos-universal-preview.dmg
+          if-no-files-found: error
+
+  windows:
+    name: Windows x64 installer
+    runs-on: windows-2025
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.85.1
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - name: Install build tools
+        shell: powershell
+        run: choco install protoc innosetup --no-progress -y
+      - name: Package unsigned preview installer
+        shell: pwsh
+        run: ./scripts/package-windows.ps1
+      - name: Verify installer exists
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "dist/windows/Sage-1.0.1-windows-x64-preview.exe")) { throw "installer missing" }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Sage-windows-x64
+          path: dist/windows/Sage-1.0.1-windows-x64-preview.exe
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub prerelease
+    if: startsWith(github.ref_name, 'v1.0.1-preview.')
+    needs: [macos-universal, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: Sage-macos-universal
+          path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: Sage-windows-x64
+          path: dist
+      - name: Create checksums
+        run: sha256sum dist/Sage-1.0.1-macos-universal-preview.dmg dist/Sage-1.0.1-windows-x64-preview.exe > dist/SHA256SUMS.txt
+      - name: Publish prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cat > release-notes.md <<'EOF'
+          ## Sage 1.0.1 preview
+
+          This is an explicitly unsigned preview release. The macOS DMG is ad-hoc signed and unnotarized; Gatekeeper may reject it. The Windows x64 EXE is unsigned and unverified on real Windows; SmartScreen may warn.
+
+          Stable release remains gated on Developer ID notarization, Authenticode signing, a real cloud-provider test, and real Windows install/runtime acceptance. Do not put API keys in this repository or in GitHub Actions.
+          EOF
+          gh release create "${GITHUB_REF_NAME}" \
+            dist/Sage-1.0.1-macos-universal-preview.dmg \
+            dist/Sage-1.0.1-windows-x64-preview.exe \
+            dist/SHA256SUMS.txt \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "Sage ${GITHUB_REF_NAME}" \
+            --notes-file release-notes.md \
+            --prerelease

@@ -1,0 +1,43 @@
+.DS_Store
+.idea/
+.vscode/
+
+# Rust
+/target/
+
+# Swift Package Manager / Xcode
+/apps/macos/.build/
+/apps/macos/.swiftpm/
+/apps/macos/Package.resolved
+*.xcuserstate
+xcuserdata/
+
+# Visual Studio / .NET
+.vs/
+/apps/windows/**/bin/
+/apps/windows/**/obj/
+*.user
+*.suo
+
+# Native packages and generated release material
+/dist/
+*.dmg
+*.msix
+*.msixbundle
+*.appinstaller
+*.pfx
+*.cer
+
+# Runtime data and credentials never belong in source
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+.env
+.env.*
+!.env.example
+*.pem
+*.p12
+*.key
+*.log

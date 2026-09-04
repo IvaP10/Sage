@@ -1,0 +1,77 @@
+name: Native architecture CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  macos:
+    strategy:
+      matrix:
+        include:
+          - runner: macos-15
+            architecture: arm64
+          - runner: macos-15-intel
+            architecture: x86_64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@1.85.1
+        with:
+          components: rustfmt, clippy
+
+      - name: Install protobuf compiler
+        run: brew install protobuf
+
+      - name: Check Rust formatting
+        run: cargo fmt --all -- --check
+
+      - name: Lint Rust workspace
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test Rust workspace
+        run: cargo test --workspace
+
+      - name: Build native macOS client
+        run: swift build --package-path apps/macos
+
+      - name: Check architecture and credentials
+        run: ./scripts/check-repository.sh
+
+  windows:
+    runs-on: windows-2025
+    timeout-minutes: 40
+    strategy:
+      matrix:
+        platform: [x64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@1.85.1
+        with:
+          components: clippy
+
+      - name: Install .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Install protobuf compiler
+        shell: powershell
+        run: choco install protoc --no-progress -y
+
+      - name: Check Rust workspace
+        run: cargo check --workspace --all-targets
+
+      - name: Test Rust workspace
+        run: cargo test --workspace
+
+      - name: Build WinUI client
+        run: dotnet build apps/windows/Sage.Windows/Sage.Windows.csproj -c Release -p:Platform=${{ matrix.platform }}

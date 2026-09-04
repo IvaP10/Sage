@@ -1,0 +1,283 @@
+syntax = "proto3";
+
+package sage.ipc.v1;
+
+// The protocol version is also carried in every frame. Breaking changes use a
+// new package and version; additive changes retain unknown fields.
+
+enum ClientKind {
+  CLIENT_KIND_UNSPECIFIED = 0;
+  CLIENT_KIND_MACOS = 1;
+  CLIENT_KIND_WINDOWS = 2;
+  CLIENT_KIND_DIAGNOSTIC = 3;
+}
+
+enum InputSource {
+  INPUT_SOURCE_UNSPECIFIED = 0;
+  INPUT_SOURCE_TYPED = 1;
+  INPUT_SOURCE_VOICE = 2;
+  INPUT_SOURCE_SHORTCUT = 3;
+  INPUT_SOURCE_AUTOMATION = 4;
+}
+
+enum ApprovalDecision {
+  APPROVAL_DECISION_UNSPECIFIED = 0;
+  APPROVAL_DECISION_APPROVE_ONCE = 1;
+  APPROVAL_DECISION_DENY = 2;
+}
+
+enum RiskLevel {
+  RISK_LEVEL_UNSPECIFIED = 0;
+  RISK_LEVEL_SAFE = 1;
+  RISK_LEVEL_SENSITIVE = 2;
+  RISK_LEVEL_CONSEQUENTIAL = 3;
+  RISK_LEVEL_DESTRUCTIVE = 4;
+  RISK_LEVEL_PRIVILEGED = 5;
+  RISK_LEVEL_PROHIBITED = 6;
+}
+
+enum TaskStatus {
+  TASK_STATUS_UNSPECIFIED = 0;
+  TASK_STATUS_PENDING = 1;
+  TASK_STATUS_PLANNING = 2;
+  TASK_STATUS_RUNNING = 3;
+  TASK_STATUS_WAITING_FOR_APPROVAL = 4;
+  TASK_STATUS_WAITING_FOR_USER = 5;
+  TASK_STATUS_PAUSED = 6;
+  TASK_STATUS_SUCCEEDED = 7;
+  TASK_STATUS_FAILED = 8;
+  TASK_STATUS_CANCELLED = 9;
+  TASK_STATUS_INTERRUPTED = 10;
+}
+
+message Frame {
+  uint32 protocol_version = 1;
+  uint64 sequence = 2;
+  oneof payload {
+    ServerChallenge server_challenge = 10;
+    ClientAuthenticate client_authenticate = 11;
+    AuthenticationResult authentication_result = 12;
+    UiCommand ui_command = 13;
+    CoreEvent core_event = 14;
+    Ping ping = 15;
+    Pong pong = 16;
+  }
+}
+
+message ServerChallenge {
+  bytes nonce = 1;
+  uint32 minimum_protocol_version = 2;
+  uint32 maximum_protocol_version = 3;
+  string core_instance_id = 4;
+}
+
+message ClientAuthenticate {
+  ClientKind client_kind = 1;
+  string client_version = 2;
+  bytes client_nonce = 3;
+  bytes proof = 4;
+}
+
+message AuthenticationResult {
+  bool accepted = 1;
+  string session_id = 2;
+  string error_code = 3;
+  string message = 4;
+}
+
+message UiCommand {
+  string request_id = 1;
+  oneof command {
+    SubmitTask submit_task = 10;
+    ControlTask control_task = 11;
+    ApprovalResponse approval_response = 12;
+    GetState get_state = 13;
+    UpdatePermission update_permission = 14;
+    UndoLastAction undo_last_action = 15;
+    UserAnswer user_answer = 16;
+    SaveProviderSettings save_provider_settings = 17;
+    TestProviderConnection test_provider_connection = 18;
+  }
+}
+
+message SubmitTask {
+  string text = 1;
+  InputSource source = 2;
+}
+
+message ControlTask {
+  enum Operation {
+    OPERATION_UNSPECIFIED = 0;
+    OPERATION_PAUSE = 1;
+    OPERATION_RESUME = 2;
+    OPERATION_CANCEL = 3;
+  }
+  string task_id = 1;
+  Operation operation = 2;
+}
+
+message ApprovalResponse {
+  string task_id = 1;
+  string action_id = 2;
+  string approval_id = 3;
+  string approval_digest = 4;
+  ApprovalDecision decision = 5;
+  bool native_authentication_satisfied = 6;
+}
+
+message GetState {
+  bool include_completed_tasks = 1;
+}
+
+message UpdatePermission {
+  string permission = 1;
+  bool granted = 2;
+}
+
+message UndoLastAction {
+  string task_id = 1;
+}
+
+message UserAnswer {
+  string task_id = 1;
+  string action_id = 2;
+  string question_id = 3;
+  string answer = 4;
+}
+
+message SaveProviderSettings {
+  string role = 1;
+  string provider = 2;
+  string model = 3;
+  string endpoint = 4;
+  string api_key = 5;
+  bool remove_saved_key = 6;
+  bool native_authentication_satisfied = 7;
+}
+
+message TestProviderConnection {
+  string role = 1;
+  string provider = 2;
+  string model = 3;
+  string endpoint = 4;
+  string api_key = 5;
+}
+
+message CoreEvent {
+  string event_id = 1;
+  int64 occurred_at_unix_ms = 2;
+  oneof event {
+    StateSnapshot state_snapshot = 10;
+    TaskUpdate task_update = 11;
+    AgentEvent agent_event = 12;
+    ApprovalRequest approval_request = 13;
+    ModelResponseDelta model_response_delta = 14;
+    ErrorEvent error = 15;
+    NotificationEvent notification = 16;
+    PermissionRequest permission_request = 17;
+    QuestionRequest question_request = 18;
+    ProviderConnectionResult provider_connection_result = 19;
+  }
+}
+
+message ProviderConnectionResult {
+  string request_id = 1;
+  bool success = 2;
+  string provider = 3;
+  string model = 4;
+  string message = 5;
+}
+
+message StateSnapshot {
+  repeated TaskUpdate tasks = 1;
+  repeated ApprovalRequest pending_approvals = 2;
+  string core_version = 3;
+  uint32 protocol_version = 4;
+  repeated ProviderSettings provider_settings = 5;
+}
+
+message ProviderSettings {
+  string role = 1;
+  string provider = 2;
+  string model = 3;
+  string endpoint = 4;
+  bool has_api_key = 5;
+}
+
+message TaskUpdate {
+  string task_id = 1;
+  string request = 2;
+  TaskStatus status = 3;
+  string summary = 4;
+  uint32 completed_actions = 5;
+  uint32 total_actions = 6;
+  string current_action = 7;
+  string final_outcome = 8;
+  bool undo_available = 9;
+}
+
+message AgentEvent {
+  string task_id = 1;
+  string action_id = 2;
+  string kind = 3;
+  string title = 4;
+  string detail = 5;
+  RiskLevel risk = 6;
+}
+
+message ApprovalRequest {
+  string approval_id = 1;
+  string approval_digest = 2;
+  string task_id = 3;
+  string action_id = 4;
+  string title = 5;
+  string explanation = 6;
+  string resource = 7;
+  RiskLevel risk = 8;
+  int64 expires_at_unix_ms = 9;
+  bool reversible = 10;
+  bool requires_native_authentication = 11;
+}
+
+message ModelResponseDelta {
+  string task_id = 1;
+  string text = 2;
+  bool finished = 3;
+}
+
+message ErrorEvent {
+  string request_id = 1;
+  string task_id = 2;
+  string code = 3;
+  string message = 4;
+  bool recoverable = 5;
+}
+
+message NotificationEvent {
+  string title = 1;
+  string body = 2;
+  string task_id = 3;
+}
+
+message PermissionRequest {
+  string permission = 1;
+  string reason = 2;
+  string task_id = 3;
+  string action_id = 4;
+}
+
+message QuestionRequest {
+  string question_id = 1;
+  string task_id = 2;
+  string action_id = 3;
+  string question = 4;
+  int64 expires_at_unix_ms = 5;
+}
+
+message Ping {
+  uint64 value = 1;
+}
+
+message Pong {
+  uint64 value = 1;
+}

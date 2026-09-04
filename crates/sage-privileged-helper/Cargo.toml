@@ -1,0 +1,12 @@
+[package]
+name = "sage-privileged-helper"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+sage-core = { path = "../sage-core" }
+sage-worker-common = { path = "../sage-worker-common" }
+tokio.workspace = true

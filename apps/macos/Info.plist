@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleDevelopmentRegion</key>
+  <string>en</string>
+  <key>CFBundleDisplayName</key>
+  <string>Sage</string>
+  <key>CFBundleExecutable</key>
+  <string>Sage</string>
+  <key>CFBundleIconFile</key>
+  <string>sage.icns</string>
+  <key>CFBundleIdentifier</key>
+  <string>com.ivanpadeliya.sage</string>
+  <key>CFBundleInfoDictionaryVersion</key>
+  <string>6.0</string>
+  <key>CFBundleName</key>
+  <string>Sage</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+  <key>CFBundleShortVersionString</key>
+  <string>1.0.1</string>
+  <key>CFBundleVersion</key>
+  <string>1</string>
+  <key>LSMinimumSystemVersion</key>
+  <string>14.0</string>
+  <key>LSUIElement</key>
+  <false/>
+  <key>NSHighResolutionCapable</key>
+  <true/>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>Sage uses the microphone only when you activate voice input, push-to-talk, or wake-word listening.</string>
+  <key>NSSpeechRecognitionUsageDescription</key>
+  <string>Sage transcribes voice commands on this Mac after you start voice input or enable the wake word.</string>
+  <key>NSHumanReadableCopyright</key>
+  <string>Copyright © 2026 Sage. All rights reserved.</string>
+</dict>
+</plist>

@@ -1,0 +1,11 @@
+[product]
+name = "Sage"
+version = "1.0.1"
+bundle_identifier = "com.ivanpadeliya.sage"
+protocol_version = 1
+
+[runtime]
+core_executable = "sage-core"
+database = "sage.db"
+macos_socket = "sage-core.sock"
+windows_pipe = "sage-core-v1"

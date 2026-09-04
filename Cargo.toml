@@ -1,0 +1,44 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/sage-protocol",
+  "crates/sage-worker-common",
+  "crates/sage-core",
+  "crates/sage-browser-worker",
+  "crates/sage-sandbox-worker",
+  "crates/sage-privileged-helper",
+]
+
+[workspace.package]
+version = "1.0.1"
+edition = "2024"
+rust-version = "1.85"
+license = "LicenseRef-Proprietary"
+publish = false
+
+[workspace.dependencies]
+anyhow = "1.0"
+async-trait = "0.1"
+base64 = "0.22"
+bytes = "1.10"
+chrono = { version = "0.4", features = ["serde"] }
+directories = "6.0"
+getrandom = "0.3"
+hmac = "0.12"
+keyring = { version = "3.6", default-features = false, features = ["apple-native", "windows-native"] }
+prost = "0.14"
+prost-build = "0.14"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+rusqlite = { version = "0.37", features = ["bundled", "chrono", "uuid"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+subtle = "2.6"
+tempfile = "3.20"
+thiserror = "2.0"
+tokio = { version = "1.47", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+uuid = { version = "1.18", features = ["serde", "v4"] }
+url = "2.5"
+zeroize = { version = "1.8", features = ["derive"] }
