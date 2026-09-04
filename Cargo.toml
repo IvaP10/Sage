@@ -40,5 +40,6 @@ tokio = { version = "1.47", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 uuid = { version = "1.18", features = ["serde", "v4"] }
-url = "2.5"
+# Keep the URL/IDNA graph compatible with the Rust 1.85 preview CI toolchain.
+url = "=2.5.0"
 zeroize = { version = "1.8", features = ["derive"] }

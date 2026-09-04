@@ -783,4 +783,42 @@ mod tests {
         assert!(error.contains("malformed Sage structured output"));
         assert!(!error.contains("do-not-echo"));
     }
+
+    #[tokio::test]
+    async fn provider_redirects_are_rejected_without_following_location() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let response = "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:9/redirect-target\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let provider = OpenAICompatibleProvider::default();
+        provider
+            .configure(
+                Some(ProviderSettings {
+                    role: "reasoning".into(),
+                    provider: "openai-compatible".into(),
+                    model: "mock-model".into(),
+                    endpoint: format!("http://{address}/v1"),
+                    has_api_key: false,
+                }),
+                Arc::new(MemorySecretStore::default()),
+            )
+            .unwrap();
+        let error = provider
+            .create_plan(PlanningContext {
+                task_id: Uuid::new_v4(),
+                user_request: "redirect test".into(),
+                current_state: serde_json::json!({}),
+                available_tools: Vec::new(),
+                trusted_constraints: Vec::new(),
+                untrusted_context: Vec::new(),
+            })
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("HTTP 302"));
+    }
 }
