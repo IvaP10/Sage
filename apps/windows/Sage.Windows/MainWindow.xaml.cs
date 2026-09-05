@@ -10,6 +10,7 @@ using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Sage.Ipc.V1;
 using Windows.System;
+using Windows.UI;
 using Windows.UI.Core;
 using WireTaskStatus = Sage.Ipc.V1.TaskStatus;
 
