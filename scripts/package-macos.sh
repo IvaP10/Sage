@@ -70,7 +70,19 @@ hdiutil create \
   -ov \
   -format UDZO \
   "$disk_image"
-hdiutil verify "$disk_image"
+sync
+verified=0
+for attempt in 1 2 3 4 5; do
+  if hdiutil verify "$disk_image"; then
+    verified=1
+    break
+  fi
+  sleep 2
+done
+if [ "$verified" -ne 1 ]; then
+  echo "hdiutil could not verify $disk_image after five attempts" >&2
+  exit 1
+fi
 
 if [ -n "${SAGE_NOTARY_PROFILE:-}" ]; then
   if [ "$signing_identity" = "-" ]; then

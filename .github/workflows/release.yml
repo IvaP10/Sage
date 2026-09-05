@@ -98,7 +98,19 @@ jobs:
           codesign --verify --deep --strict --verbose=2 dist/macos/universal/Sage.app
           lipo -info dist/macos/universal/Sage.app/Contents/MacOS/Sage
           hdiutil create -volname Sage -srcfolder dist/macos/universal/Sage.app -ov -format UDZO dist/macos/Sage-1.0.1-macos-universal-preview.dmg
-          hdiutil verify dist/macos/Sage-1.0.1-macos-universal-preview.dmg
+          sync
+          verified=0
+          for attempt in 1 2 3 4 5; do
+            if hdiutil verify dist/macos/Sage-1.0.1-macos-universal-preview.dmg; then
+              verified=1
+              break
+            fi
+            sleep 2
+          done
+          if [ "$verified" -ne 1 ]; then
+            echo "hdiutil could not verify the Universal 2 DMG after five attempts" >&2
+            exit 1
+          fi
           if [ -n "${SAGE_NOTARY_PROFILE:-}" ]; then
             if [ "$identity" = "-" ]; then echo "Notarization requires a signing identity" >&2; exit 1; fi
             xcrun notarytool submit dist/macos/Sage-1.0.1-macos-universal-preview.dmg --keychain-profile "$SAGE_NOTARY_PROFILE" --wait
