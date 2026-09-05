@@ -164,11 +164,25 @@ jobs:
 
           Stable release remains gated on Developer ID notarization, Authenticode signing, a real cloud-provider test, and real Windows install/runtime acceptance. Do not put API keys in this repository or in GitHub Actions.
           EOF
-          gh release create "${GITHUB_REF_NAME}" \
-            dist/Sage-1.0.1-macos-universal-preview.dmg \
-            dist/Sage-1.0.1-windows-x64-preview.exe \
-            dist/SHA256SUMS.txt \
-            --repo "${GITHUB_REPOSITORY}" \
-            --title "Sage ${GITHUB_REF_NAME}" \
-            --notes-file release-notes.md \
-            --prerelease
+          if gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release edit "${GITHUB_REF_NAME}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --title "Sage ${GITHUB_REF_NAME}" \
+              --notes-file release-notes.md \
+              --prerelease
+            gh release upload "${GITHUB_REF_NAME}" \
+              dist/Sage-1.0.1-macos-universal-preview.dmg \
+              dist/Sage-1.0.1-windows-x64-preview.exe \
+              dist/SHA256SUMS.txt \
+              --repo "${GITHUB_REPOSITORY}" \
+              --clobber
+          else
+            gh release create "${GITHUB_REF_NAME}" \
+              dist/Sage-1.0.1-macos-universal-preview.dmg \
+              dist/Sage-1.0.1-windows-x64-preview.exe \
+              dist/SHA256SUMS.txt \
+              --repo "${GITHUB_REPOSITORY}" \
+              --title "Sage ${GITHUB_REF_NAME}" \
+              --notes-file release-notes.md \
+              --prerelease
+          fi
