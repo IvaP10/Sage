@@ -67,28 +67,34 @@ impl ActionCompiler {
         proposal: ActionProposal,
         availability: &ExecutorAvailability,
     ) -> CoreResult<CompiledAction> {
+        crate::features::validate(&proposal.action)?;
+        if !crate::features::manifests()
+            .iter()
+            .any(|manifest| manifest.enabled && manifest.id == proposal.action.kind())
+        {
+            return Err(CoreError::ExecutorUnavailable(
+                "This operation has no enabled feature contract".into(),
+            ));
+        }
         let mut candidates = Vec::new();
         match &proposal.action {
-            Action::ClickElement { .. } | Action::TypeText { .. } => {
-                if availability.structured_integrations {
+            Action::ClickElement { .. } | Action::TypeText { .. }
+                if proposal.action.domain() == ExecutionDomain::Browser =>
+            {
+                if availability.browser_dom {
                     candidates.push(candidate(
-                        InteractionTier::StructuredIntegration,
-                        ExecutionDomain::Native,
-                        "application integration",
+                        InteractionTier::BrowserDom,
+                        ExecutionDomain::Browser,
+                        "paired semantic DOM element",
                     ));
                 }
+            }
+            Action::ClickElement { .. } | Action::TypeText { .. } => {
                 if availability.accessibility {
                     candidates.push(candidate(
                         InteractionTier::Accessibility,
                         ExecutionDomain::Native,
                         "semantic accessibility element",
-                    ));
-                }
-                if availability.keyboard {
-                    candidates.push(candidate(
-                        InteractionTier::KeyboardShortcut,
-                        ExecutionDomain::Native,
-                        "validated keyboard interaction",
                     ));
                 }
                 if availability.vision {
@@ -106,11 +112,8 @@ impl ActionCompiler {
                     ));
                 }
             }
-            Action::NavigateUrl { .. }
-            | Action::DownloadFile { .. }
-            | Action::UploadFile { .. }
-            | Action::SubmitForm { .. } => {
-                if availability.structured_integrations {
+            Action::NavigateUrl { .. } => {
+                if availability.browser_dom {
                     candidates.push(candidate(
                         InteractionTier::StructuredIntegration,
                         ExecutionDomain::Browser,
@@ -124,13 +127,6 @@ impl ActionCompiler {
                         "DOM operation",
                     ));
                 }
-                if availability.accessibility {
-                    candidates.push(candidate(
-                        InteractionTier::Accessibility,
-                        ExecutionDomain::Browser,
-                        "browser accessibility fallback",
-                    ));
-                }
                 if availability.vision {
                     candidates.push(candidate(
                         InteractionTier::Vision,
@@ -139,28 +135,34 @@ impl ActionCompiler {
                     ));
                 }
             }
-            Action::RunCommand { .. } if availability.sandbox => candidates.push(candidate(
-                InteractionTier::SandboxedProcess,
-                ExecutionDomain::Sandbox,
-                "isolated command worker",
-            )),
-            Action::InstallApplication { .. } if availability.privileged_helper => {
-                candidates.push(candidate(
-                    InteractionTier::PrivilegedOperation,
-                    ExecutionDomain::Privileged,
-                    "allowlisted privileged helper operation",
-                ));
-            }
             Action::AskUser { .. } => candidates.push(candidate(
                 InteractionTier::UserInteraction,
                 ExecutionDomain::UserInteraction,
-                "native approval or question surface",
+                "native question",
             )),
-            _ => candidates.push(candidate(
-                InteractionTier::StructuredIntegration,
-                proposal.action.domain(),
-                "native structured operation",
-            )),
+            Action::ReadFile { .. }
+            | Action::FetchPublic { .. }
+            | Action::WriteFile { .. }
+            | Action::MoveFile { .. }
+            | Action::DeleteFile { .. }
+            | Action::CreateFolder { .. }
+            | Action::WaitForCondition { .. } => {
+                candidates.push(candidate(
+                    InteractionTier::StructuredIntegration,
+                    ExecutionDomain::Native,
+                    "scoped filesystem operation",
+                ));
+            }
+            Action::OpenApplication { .. } if availability.accessibility => {
+                candidates.push(candidate(
+                    InteractionTier::Accessibility,
+                    ExecutionDomain::Native,
+                    "identified application",
+                ));
+            }
+            // No generic fallback: installed worker binaries are not proof of
+            // supported, isolated, independently verifiable operations.
+            _ => {}
         }
 
         if candidates.is_empty() {
@@ -170,6 +172,7 @@ impl ActionCompiler {
             )));
         }
 
+        candidates.sort_by_key(|candidate| candidate.tier);
         Ok(CompiledAction {
             proposal,
             candidates,

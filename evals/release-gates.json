@@ -1,0 +1,144 @@
+{
+  "schema_version": 2,
+  "release": "Sage v2 desktop",
+  "gates": [
+    {
+      "id": "core_regressions",
+      "proof_type": "automated_tests",
+      "status": "pending",
+      "reason": "Current Rust and browser contract tests pass; record reproducible CI artifacts for the final source digest."
+    },
+    {
+      "id": "typed_authority",
+      "proof_type": "security_review",
+      "status": "pending",
+      "reason": "Complete typed approval, result, settings and data-release contracts and validate native migrations."
+    },
+    {
+      "id": "process_isolation",
+      "proof_type": "security_review",
+      "status": "pending",
+      "reason": "Extract the native/credential services and agent/model networking from shared broker authority; verify signed peers."
+    },
+    {
+      "id": "native_macos",
+      "proof_type": "device_acceptance",
+      "status": "pending",
+      "reason": "Live installation, scoped native operations, cancellation and OS lock acceptance remain unmeasured."
+    },
+    {
+      "id": "native_windows",
+      "proof_type": "device_acceptance",
+      "status": "pending",
+      "reason": "A Windows host and SDK run are required; Mac compilation is not Windows evidence."
+    },
+    {
+      "id": "browser_live",
+      "proof_type": "device_acceptance",
+      "status": "pending",
+      "reason": "Contract mocks pass; actual Chrome pairing and document/navigation race acceptance are pending."
+    },
+    {
+      "id": "encrypted_migration",
+      "proof_type": "fault_injection",
+      "status": "pending",
+      "reason": "SQLCipher canary and rollback tests pass; legacy recovery files and crash/backup lifecycle need completion."
+    },
+    {
+      "id": "file_races",
+      "proof_type": "fault_injection",
+      "status": "pending",
+      "reason": "Third-party compare-and-replace races and Windows reparse, ADS and power-loss acceptance remain."
+    },
+    {
+      "id": "local_model_offline",
+      "proof_type": "model_evaluation",
+      "status": "pending",
+      "reason": "No qualified runtime/model assets are installed; complete managed inference and offline hardware acceptance."
+    },
+    {
+      "id": "quantization_quality",
+      "proof_type": "model_evaluation",
+      "status": "pending",
+      "reason": "No FP16/BF16 versus Q4/Q5/Q8 workflow measurements are available."
+    },
+    {
+      "id": "retrieval_100k",
+      "proof_type": "performance",
+      "status": "pending",
+      "reason": "Pinned vector storage, embeddings and tokenizer budgets are not implemented or measured."
+    },
+    {
+      "id": "vm_macos",
+      "proof_type": "device_acceptance",
+      "status": "pending",
+      "reason": "Apple Virtualization guest, pinned image, isolation checks and artifact exchange are not implemented."
+    },
+    {
+      "id": "vm_windows",
+      "proof_type": "device_acceptance",
+      "status": "pending",
+      "reason": "Signed QEMU/WHPX backend and guest isolation acceptance are not implemented."
+    },
+    {
+      "id": "voice_devices",
+      "proof_type": "device_acceptance",
+      "status": "pending",
+      "reason": "Keyword/VAD, ASR and physical microphone/interruption acceptance are incomplete."
+    },
+    {
+      "id": "connectors_isolation",
+      "proof_type": "security_review",
+      "status": "pending",
+      "reason": "WASM/MCP isolation, schema pinning and credential/destination conformance are not implemented."
+    },
+    {
+      "id": "recovery_crashes",
+      "proof_type": "fault_injection",
+      "status": "pending",
+      "reason": "Durable action/schedule journals exist; complete fault injection at all dispatch/Undo boundaries."
+    },
+    {
+      "id": "memory_forget",
+      "proof_type": "automated_tests",
+      "status": "pending",
+      "reason": "Scoped retrieval and lineage deletion tests pass; record current evidence and complete future vector/cache invalidation."
+    },
+    {
+      "id": "workflow_suite",
+      "proof_type": "workflow_evaluation",
+      "status": "pending",
+      "reason": "Run the fixed 100-workflow suite five times per reference configuration; do not count unavailable workflows as passed."
+    },
+    {
+      "id": "adversarial_evaluation",
+      "proof_type": "security_evaluation",
+      "status": "pending",
+      "reason": "Real-model AgentDojo and computer-use attack evaluation are pending."
+    },
+    {
+      "id": "performance_16gb",
+      "proof_type": "performance",
+      "status": "pending",
+      "reason": "This development Mac has 8 GiB RAM; the required 16 GB Mac/Windows reference measurements are absent."
+    },
+    {
+      "id": "signed_distribution",
+      "proof_type": "distribution",
+      "status": "pending",
+      "reason": "Signing, notarization and verified installation artifacts are unavailable."
+    },
+    {
+      "id": "updates_tuf",
+      "proof_type": "distribution",
+      "status": "pending",
+      "reason": "Trusted roots, expiration/rollback protection and offline root rotation are not implemented."
+    },
+    {
+      "id": "supply_chain",
+      "proof_type": "security_review",
+      "status": "pending",
+      "reason": "Pinned dependencies/actions exist; SBOM, advisory scanning, provenance and distribution review remain."
+    }
+  ]
+}

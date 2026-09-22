@@ -1,5 +1,5 @@
 use prost::Message;
-use sage_protocol::{MAX_FRAME_BYTES, sage::ipc::v1::Frame};
+use sage_protocol::{MAX_FRAME_BYTES, sage::ipc::v2::Frame};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::error::{CoreError, CoreResult};

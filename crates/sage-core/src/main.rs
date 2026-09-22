@@ -5,7 +5,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use sage_core::config::{CoreConfig, IpcEndpoint};
 use sage_core::ipc::{IpcAuthenticator, serve};
-use sage_core::model::OpenAICompatibleProvider;
+use sage_core::model::{ModelProvider, OpenAICompatibleProvider};
 use sage_core::secrets::{OsSecretStore, SecretBytes, SecretStore, load_or_create_ipc_secret};
 use sage_core::{CoreError, CoreResult, SageCore};
 use tracing_subscriber::EnvFilter;
@@ -27,12 +27,39 @@ async fn main() -> anyhow::Result<()> {
     } else {
         load_or_create_ipc_secret(Arc::clone(&secret_store))?
     };
-    let authenticator = Arc::new(IpcAuthenticator::new(secret));
-    let core = SageCore::new_with_secret_store(
-        config.clone(),
-        Arc::new(OpenAICompatibleProvider::default()),
-        secret_store,
+    sage_core::secrets::install_browser_ipc_secret(
+        &config.data_dir,
+        &secret,
+        secret_store.as_ref(),
     )?;
+    let authenticator = Arc::new(IpcAuthenticator::new(secret));
+    let model: Arc<dyn ModelProvider> = match (launch.model_profile, launch.model_trust_key) {
+        (Some(profile), Some(key)) => {
+            config
+                .protected_paths
+                .extend([profile.canonicalize()?, key.canonicalize()?]);
+            let bytes =
+                sage_core::execution::files::PinnedPath::open(&key.canonicalize()?)?.read(32)?;
+            let key: [u8; 32] = bytes.try_into().map_err(|_| {
+                CoreError::Model("Catalog public key must contain exactly 32 bytes".into())
+            })?;
+            let profile = sage_core::inference::ModelProfile::load_signed(&profile, &key)?;
+            config.protected_paths.extend(profile.protected_paths());
+            Arc::new(sage_core::inference::ManagedLocalProvider::new(
+                profile,
+                sage_core::inference::ResourceGovernor::default(),
+            )?)
+        }
+        (None, None) => Arc::new(OpenAICompatibleProvider::default()),
+        _ => {
+            return Err(CoreError::InvalidAction(
+                "Use --model-profile with --model-trust-key".into(),
+            )
+            .into());
+        }
+    };
+    let core = SageCore::new_with_secret_store(config.clone(), model, secret_store)?;
+    core.start_scheduler();
     serve(core, config.ipc_endpoint, authenticator).await?;
     Ok(())
 }
@@ -40,6 +67,8 @@ async fn main() -> anyhow::Result<()> {
 #[derive(Debug, Default)]
 struct LaunchOptions {
     bootstrap_stdin: bool,
+    model_profile: Option<PathBuf>,
+    model_trust_key: Option<PathBuf>,
 }
 
 fn apply_arguments(config: &mut CoreConfig) -> CoreResult<LaunchOptions> {
@@ -47,6 +76,22 @@ fn apply_arguments(config: &mut CoreConfig) -> CoreResult<LaunchOptions> {
     let mut arguments = std::env::args_os().skip(1);
     while let Some(argument) = arguments.next() {
         match argument.to_str() {
+            Some("--model-profile") => {
+                launch.model_profile = Some(
+                    arguments
+                        .next()
+                        .ok_or_else(|| CoreError::InvalidAction("Missing model profile".into()))?
+                        .into(),
+                );
+            }
+            Some("--model-trust-key") => {
+                launch.model_trust_key = Some(
+                    arguments
+                        .next()
+                        .ok_or_else(|| CoreError::InvalidAction("Missing catalog key".into()))?
+                        .into(),
+                );
+            }
             Some("--data-dir") => {
                 let value = arguments
                     .next()

@@ -28,6 +28,7 @@ pub struct ElementSelector {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Condition {
     FileExists { path: PathBuf },
+    FolderExists { path: PathBuf },
     FileAbsent { path: PathBuf },
     ApplicationRunning { application: String },
     UrlEquals { url: String },
@@ -37,6 +38,7 @@ pub enum Condition {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ExpectedOutcome {
+    PublicResource { url: String },
     Condition { condition: Condition },
     FileContains { path: PathBuf, sha256: String },
     CommandExit { code: i32 },
@@ -45,8 +47,12 @@ pub enum ExpectedOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Action {
+    FetchPublic {
+        url: String,
+        max_bytes: u64,
+    },
     OpenApplication {
         application: String,
     },
@@ -134,6 +140,7 @@ pub enum Action {
 impl Action {
     pub fn kind(&self) -> &'static str {
         match self {
+            Self::FetchPublic { .. } => "fetch_public",
             Self::OpenApplication { .. } => "open_application",
             Self::CloseApplication { .. } => "close_application",
             Self::ReadFile { .. } => "read_file",
@@ -159,6 +166,11 @@ impl Action {
 
     pub fn domain(&self) -> ExecutionDomain {
         match self {
+            Self::ClickElement { application, .. } | Self::TypeText { application, .. }
+                if application.starts_with("browser:") =>
+            {
+                ExecutionDomain::Browser
+            }
             Self::NavigateUrl { .. }
             | Self::DownloadFile { .. }
             | Self::UploadFile { .. }
@@ -249,6 +261,9 @@ impl ActionGraph {
         }
         if self.nodes.is_empty() {
             return Err("plan must contain at least one action".into());
+        }
+        if self.nodes.len() > 128 {
+            return Err("plan exceeds 128 actions".into());
         }
 
         let ids: BTreeSet<_> = self.nodes.iter().map(|node| node.proposal.id).collect();

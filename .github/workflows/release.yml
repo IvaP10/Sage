@@ -26,8 +26,8 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.85.1
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@b4f984c1e7daae8e175614de3e73a8411a20333c # 1.89.0
       - name: Install protobuf compiler
         run: brew install protobuf
       - name: Package unsigned preview
@@ -40,7 +40,7 @@ jobs:
         run: |
           file "dist/macos/${{ matrix.architecture }}/Sage.app/Contents/MacOS/Sage"
           codesign --verify --deep --strict --verbose=2 "dist/macos/${{ matrix.architecture }}/Sage.app"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: Sage-macos-${{ matrix.architecture }}
           path: dist/macos/${{ matrix.architecture }}
@@ -52,14 +52,14 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 35
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Download ARM64 package
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: Sage-macos-arm64
           path: dist/macos/arm64
       - name: Download Intel package
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: Sage-macos-x86_64
           path: dist/macos/x86_64
@@ -117,7 +117,7 @@ jobs:
             xcrun stapler staple dist/macos/Sage-1.0.1-macos-universal-preview.dmg
             xcrun stapler validate dist/macos/Sage-1.0.1-macos-universal-preview.dmg
           fi
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: Sage-macos-universal
           path: dist/macos/Sage-1.0.1-macos-universal-preview.dmg
@@ -128,9 +128,9 @@ jobs:
     runs-on: windows-2025
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.85.1
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@b4f984c1e7daae8e175614de3e73a8411a20333c # 1.89.0
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
         with:
           dotnet-version: 8.0.x
       - name: Install build tools
@@ -143,7 +143,7 @@ jobs:
         shell: pwsh
         run: |
           if (-not (Test-Path "dist/windows/Sage-1.0.1-windows-x64-preview.exe")) { throw "installer missing" }
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: Sage-windows-x64
           path: dist/windows/Sage-1.0.1-windows-x64-preview.exe
@@ -155,11 +155,11 @@ jobs:
     needs: [macos-universal, windows]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: Sage-macos-universal
           path: dist
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: Sage-windows-x64
           path: dist

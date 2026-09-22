@@ -43,6 +43,8 @@ struct SettingsView: View {
                     connectionCard
                     modelCard
                     voiceCard
+                    MemorySettingsView(model: model)
+                    WorkflowSettingsView(model: model)
                     permissionsCard
                     localDataCard
                 }

@@ -19,7 +19,7 @@
          bypass the package's BeforeCompile hook, so protocol generation is
          invoked explicitly below before CoreCompile. -->
     <GrpcToolsVersion>2.83.0</GrpcToolsVersion>
-    <SageProtocolSource>$(MSBuildProjectDirectory)\..\..\..\proto\sage\ipc\v1\sage.proto</SageProtocolSource>
+    <SageProtocolSource>$(MSBuildProjectDirectory)\..\..\..\proto\sage\ipc\v2\sage.proto</SageProtocolSource>
     <SageProtocolRoot>$(MSBuildProjectDirectory)\..\..\..\proto</SageProtocolRoot>
     <SageProtocolOutputDir>$(IntermediateOutputPath)GeneratedProtocol</SageProtocolOutputDir>
     <SageProtocPath>$(NuGetPackageRoot)grpc.tools\$(GrpcToolsVersion)\tools\windows_x64\protoc.exe</SageProtocPath>
@@ -29,6 +29,7 @@
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.4.0" />
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.26100.4654" />
     <PackageReference Include="Google.Protobuf" Version="3.36.0" />
+    <PackageReference Include="FlaUI.UIA3" Version="5.0.0" />
     <PackageReference Include="Grpc.Tools" Version="2.83.0" PrivateAssets="All" />
     <Content Include="..\..\..\assets\icon-source-bg.png" Link="Assets\sage-logo.png">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>

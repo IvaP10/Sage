@@ -3,13 +3,14 @@ using System.IO.Pipes;
 using System.Security.Cryptography;
 using System.Text;
 using Google.Protobuf;
-using Sage.Ipc.V1;
+using Sage.Ipc.V2;
 
 namespace Sage.Windows;
 
 internal sealed class SageCoreClient : IDisposable
 {
-    private const int ProtocolVersion = 1;
+    private string _authenticatedSessionId = "";
+    private const int ProtocolVersion = 2;
     private const int MaximumFrameBytes = 4 * 1024 * 1024;
     private readonly SemaphoreSlim _writeLock = new(1, 1);
     private readonly CancellationTokenSource _stopping = new();
@@ -17,12 +18,13 @@ internal sealed class SageCoreClient : IDisposable
     private long _sequence;
 
     public event EventHandler<CoreEvent>? EventReceived;
+    public Func<AdapterRequest, Task<AdapterResult>>? AdapterHandler { get; set; }
 
     public async Task ConnectAsync()
     {
         var pipe = new NamedPipeClientStream(
             ".",
-            "sage-core-v1",
+            "sage-core-v2",
             PipeDirection.InOut,
             PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly
         );
@@ -30,16 +32,21 @@ internal sealed class SageCoreClient : IDisposable
         _pipe = pipe;
         await AuthenticateAsync(pipe, _stopping.Token);
         _ = Task.Run(() => ReceiveLoopAsync(pipe, _stopping.Token));
+        await WriteFrameAsync(pipe, new Frame { ProtocolVersion = ProtocolVersion, Sequence = NextSequence(), AdapterHello = new AdapterHello { Domain = "native" } }, _stopping.Token);
     }
 
-    public Task SubmitTaskAsync(string text)
+    public Task SubmitTaskAsync(string text, string conversationId = "", string? folder = null)
     {
+        var submit = new SubmitTask { Text = text, Source = InputSource.Typed, ConversationId = conversationId };
+        if (!string.IsNullOrEmpty(folder)) { var scope = new ResourceScope { Root = folder }; scope.Effects.Add(ResourceEffect.Read); submit.Resources.Add(scope); }
         return SendCommandAsync(new UiCommand
         {
             RequestId = Guid.NewGuid().ToString(),
-            SubmitTask = new SubmitTask { Text = text, Source = InputSource.Typed },
+            SubmitTask = submit,
         });
     }
+
+    public Task UnlockStorageAsync() => SendCommandAsync(new UiCommand { RequestId = Guid.NewGuid().ToString(), UnlockStorage = new UnlockStorage() });
 
     public Task ControlTaskAsync(string taskId, ControlTask.Types.Operation operation)
     {
@@ -192,6 +199,17 @@ internal sealed class SageCoreClient : IDisposable
         {
             throw new UnauthorizedAccessException("SAGE Core rejected local IPC authentication");
         }
+        using var serverMessage = new MemoryStream();
+        serverMessage.Write(Encoding.UTF8.GetBytes("SAGE-CORE-PROOF-V2\0"));
+        serverMessage.Write(authentication.Proof.ToByteArray());
+        var length = new byte[4];
+        BinaryPrimitives.WriteUInt32BigEndian(length, (uint)Encoding.UTF8.GetByteCount(result.AuthenticationResult.SessionId));
+        serverMessage.Write(length);
+        serverMessage.Write(Encoding.UTF8.GetBytes(result.AuthenticationResult.SessionId));
+        var expected = HMACSHA256.HashData(secret, serverMessage.ToArray());
+        if (!CryptographicOperations.FixedTimeEquals(expected, result.AuthenticationResult.ServerProof.ToByteArray()))
+            throw new UnauthorizedAccessException("Core identity proof is invalid");
+        _authenticatedSessionId = result.AuthenticationResult.SessionId;
     }
 
     private async Task SendCommandAsync(UiCommand command)
@@ -205,6 +223,9 @@ internal sealed class SageCoreClient : IDisposable
         }, _stopping.Token);
     }
 
+    public Task KnowledgeAsync(KnowledgeCommand command) => SendCommandAsync(new UiCommand { RequestId = Guid.NewGuid().ToString(), KnowledgeCommand = command });
+    public Task WorkflowAsync(WorkflowCommand command) => SendCommandAsync(new UiCommand { RequestId = Guid.NewGuid().ToString(), WorkflowCommand = command });
+
     private async Task ReceiveLoopAsync(Stream pipe, CancellationToken cancellationToken)
     {
         try
@@ -215,6 +236,13 @@ internal sealed class SageCoreClient : IDisposable
                 if (frame.PayloadCase == Frame.PayloadOneofCase.CoreEvent)
                 {
                     EventReceived?.Invoke(this, frame.CoreEvent);
+                }
+                if (frame.PayloadCase == Frame.PayloadOneofCase.AdapterRequest && AdapterHandler is not null)
+                {
+                    if (frame.AdapterRequest.Operation == "execute" && frame.AdapterRequest.Grant?.WorkerSession != _authenticatedSessionId)
+                        throw new UnauthorizedAccessException("Grant belongs to another worker session");
+                    var response = await AdapterHandler(frame.AdapterRequest);
+                    await WriteFrameAsync(pipe, new Frame { ProtocolVersion = ProtocolVersion, Sequence = NextSequence(), AdapterResult = response }, cancellationToken);
                 }
             }
         }
@@ -268,7 +296,7 @@ internal sealed class SageCoreClient : IDisposable
     )
     {
         using var stream = new MemoryStream();
-        stream.Write(Encoding.UTF8.GetBytes("SAGE-LOCAL-IPC-AUTH-V1\0"));
+        stream.Write(Encoding.UTF8.GetBytes("SAGE-LOCAL-IPC-AUTH-V2\0"));
         stream.Write(serverNonce);
         stream.Write(clientNonce);
         Span<byte> integer = stackalloc byte[4];

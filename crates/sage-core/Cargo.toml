@@ -39,6 +39,13 @@ tracing-subscriber.workspace = true
 uuid.workspace = true
 url.workspace = true
 zeroize.workspace = true
+notify.workspace = true
+
+ed25519-dalek.workspace = true
+sysinfo.workspace = true
+cedar-policy.workspace = true
+cap-std.workspace = true
+cap-fs-ext.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

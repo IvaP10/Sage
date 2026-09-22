@@ -1,3 +1,5 @@
+pub mod bridge;
+pub mod files;
 mod native;
 mod worker;
 
@@ -20,9 +22,30 @@ pub use worker::{FramedWorkerExecutor, WorkerConfig};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RollbackOperation {
-    MoveFile { source: String, destination: String },
-    RestoreFile { backup: String, destination: String },
-    RemoveEmptyFolder { path: String },
+    RestoreArtifact {
+        artifact_id: Uuid,
+        destination: String,
+        expected_sha256: String,
+    },
+    RemoveCreatedFile {
+        path: String,
+        expected_sha256: String,
+    },
+    RemoveCreatedFolder {
+        path: String,
+        identity: String,
+    },
+    MoveFile {
+        source: String,
+        destination: String,
+    },
+    RestoreFile {
+        backup: String,
+        destination: String,
+    },
+    RemoveEmptyFolder {
+        path: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -115,6 +138,13 @@ impl ExecutionBroker {
                 implementation.executor,
             )
             .await?;
+        if consumed.action_digest != crate::policy::approval_digest(&action.proposal)?
+            || consumed.policy_version != crate::contracts::POLICY_VERSION
+        {
+            return Err(CoreError::CapabilityRejected(
+                "Prepared action or policy changed".into(),
+            ));
+        }
         executor.execute(action, implementation, &consumed).await
     }
 }

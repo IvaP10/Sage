@@ -134,36 +134,16 @@ impl PolicyEngine {
 
 pub fn classify(action: &Action) -> RiskLevel {
     match action {
-        Action::WaitForCondition { .. }
-        | Action::OpenApplication { .. }
-        | Action::CloseApplication { .. }
-        | Action::PressShortcut { .. }
-        | Action::AskUser { .. } => RiskLevel::Safe,
-        Action::ReadFile { .. }
-        | Action::ClickElement { .. }
-        | Action::TypeText {
-            sensitive: false, ..
-        }
-        | Action::NavigateUrl { .. }
-        | Action::RunCommand { network: false, .. } => RiskLevel::Sensitive,
-        Action::TypeText {
-            sensitive: true, ..
-        }
-        | Action::WriteFile {
-            overwrite: false, ..
-        }
-        | Action::MoveFile { .. }
-        | Action::CreateFolder { .. }
-        | Action::DownloadFile { .. }
-        | Action::UploadFile { .. }
-        | Action::SendMessage { .. }
-        | Action::SubmitForm { .. }
-        | Action::RunCommand { network: true, .. } => RiskLevel::Consequential,
+        Action::AskUser { .. } => RiskLevel::Safe,
+        Action::ReadFile { .. } | Action::WaitForCondition { .. } => RiskLevel::Sensitive,
         Action::WriteFile {
             overwrite: true, ..
         }
         | Action::DeleteFile { .. } => RiskLevel::Destructive,
         Action::InstallApplication { .. } | Action::ChangeSetting { .. } => RiskLevel::Privileged,
+        // UI gestures can commit an external effect, even if a model calls
+        // them non-sensitive. Closing an app may discard unsaved user work.
+        _ => RiskLevel::Consequential,
     }
 }
 
@@ -214,6 +194,9 @@ fn prohibited_reason(action: &Action) -> Option<String> {
 fn protected_path_reason(path: &Path) -> Option<String> {
     let protected = [
         ".ssh",
+        "Library/Application Support/Sage",
+        "AppData/Local/Sage",
+        ".local/share/sage",
         ".gnupg",
         ".aws",
         ".azure",
@@ -240,6 +223,34 @@ fn protected_path_reason(path: &Path) -> Option<String> {
 pub fn approval_digest(proposal: &ActionProposal) -> CoreResult<String> {
     let canonical = serde_json::to_vec(proposal)?;
     Ok(format!("{:x}", Sha256::digest(canonical)))
+}
+
+pub fn action_preview(action: &Action) -> CoreResult<String> {
+    let preview = match action {
+        Action::WriteFile {
+            path,
+            content,
+            overwrite,
+        } => format!(
+            "{} {}\n\n{}",
+            if *overwrite { "Replace" } else { "Create" },
+            path.display(),
+            crate::redaction::redact_for_persistence(content)
+        ),
+        Action::ReadFile { path, max_bytes } => format!(
+            "Read {} (up to {} bytes). Provider disclosure requires a separate decision.",
+            path.display(),
+            max_bytes
+        ),
+        _ => serde_json::to_string_pretty(action)?,
+    };
+    if preview.len() > 1_100_000 {
+        return Err(CoreError::PermissionRequired(
+            "Prepared preview exceeds the approval surface; split the action into smaller changes"
+                .into(),
+        ));
+    }
+    Ok(preview)
 }
 
 #[cfg(test)]

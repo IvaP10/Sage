@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use sage_protocol::PROTOCOL_VERSION;
-use sage_protocol::sage::ipc::v1 as wire;
+use sage_protocol::sage::ipc::v2 as wire;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::time::{Duration, timeout};
 use uuid::Uuid;
@@ -61,6 +61,12 @@ pub async fn serve(
             tracing::info!(path = %path.display(), "SAGE Core IPC ready");
             loop {
                 let (stream, _) = listener.accept().await?;
+                // The socket is owner-only; additionally bind acceptance to the
+                // owning OS user rather than trusting a role string alone.
+                let owner = std::os::unix::fs::MetadataExt::uid(&std::fs::metadata(&path)?);
+                if stream.peer_cred()?.uid() != owner {
+                    continue;
+                }
                 let core = Arc::clone(&core);
                 let authenticator = Arc::clone(&authenticator);
                 tokio::spawn(async move {
@@ -149,28 +155,61 @@ where
             sequence,
             wire::frame::Payload::AuthenticationResult(wire::AuthenticationResult {
                 accepted: true,
-                session_id,
+                session_id: session_id.clone(),
                 error_code: String::new(),
                 message: "authenticated".into(),
+                server_proof: authenticator
+                    .server_proof(client.client_kind, &client.proof, &session_id)?
+                    .to_vec(),
             }),
         ),
     )
     .await?;
 
     let mut event_receiver = core.events().subscribe();
+    let (adapter_sender, mut adapter_receiver) = tokio::sync::mpsc::channel(16);
+    let is_browser = client.client_kind == wire::ClientKind::Browser as i32;
+    let mut received_sequence = authentication.sequence;
+    let mut request_ids = std::collections::HashSet::new();
+    // read_exact is not cancellation-safe. A dedicated reader retains partial
+    // frames while adapter responses or UI events are being written.
+    let (frames_sender, mut frames_receiver) = tokio::sync::mpsc::channel(4);
+    let reader_task = tokio::spawn(async move {
+        loop {
+            let incoming = read_frame(&mut reader).await;
+            let failed = incoming.is_err();
+            if frames_sender.send(incoming).await.is_err() || failed {
+                break;
+            }
+        }
+    });
+    let result=async {
     loop {
         tokio::select! {
-            incoming = read_frame(&mut reader) => {
-                let incoming = incoming?;
+            incoming = frames_receiver.recv() => {
+                let incoming = incoming.ok_or_else(||CoreError::Protocol("IPC reader disconnected".into()))??;
+                if incoming.sequence <= received_sequence { return Err(CoreError::Protocol("Replayed IPC frame".into())); }
+                received_sequence=incoming.sequence;
                 if incoming.protocol_version != PROTOCOL_VERSION {
                     return Err(CoreError::Protocol("protocol version changed within a session".into()));
+                }
+                match incoming.payload.clone() {
+                    Some(wire::frame::Payload::UiCommand(ref command)) if command.request_id.is_empty() || !request_ids.insert(command.request_id.clone()) || request_ids.len()>65_536 => return Err(CoreError::Protocol("Replayed or excessive UI requests".into())),
+                    Some(wire::frame::Payload::AdapterHello(hello))=>{core.adapters.register(&hello.domain,&session_id,client.client_kind,adapter_sender.clone()).await?;continue;},
+                    Some(wire::frame::Payload::AdapterResult(response))=>{core.adapters.complete(&session_id,response).await?;continue;},
+                    Some(wire::frame::Payload::Ping(_))=>{},
+                    _ if is_browser=>return Err(CoreError::Protocol("Browser sessions cannot issue UI commands.".into())),
+                    _=>{},
                 }
                 if let Some(response) = handle_frame(&core, incoming).await {
                     sequence += 1;
                     write_frame(&mut writer, &frame(sequence, response)).await?;
                 }
             }
-            event = event_receiver.recv() => {
+            request = adapter_receiver.recv() => {
+                if let Some(request)=request {sequence+=1;write_frame(&mut writer,&frame(sequence,wire::frame::Payload::AdapterRequest(request))).await?;}
+            }
+            event = event_receiver.recv(), if !is_browser => {
                 match event {
                     Ok(event) => {
                         sequence += 1;
@@ -192,6 +231,10 @@ where
             }
         }
     }
+    }.await;
+    reader_task.abort();
+    core.adapters.disconnect(&session_id).await;
+    result
 }
 
 async fn handle_frame(core: &Arc<SageCore>, incoming: wire::Frame) -> Option<wire::frame::Payload> {
@@ -223,13 +266,76 @@ async fn handle_command(
 ) -> CoreResult<Option<wire::CoreEvent>> {
     use wire::ui_command::Command;
     let request_id = command.request_id.clone();
+    let needs_storage = match command.command.as_ref() {
+        Some(Command::GetState(_)) => false,
+        Some(Command::KnowledgeCommand(c)) if c.operation == "list" => false,
+        Some(Command::WorkflowCommand(c)) if c.operation == "list" => false,
+        _ => true,
+    };
+    if needs_storage {
+        core.unlock_storage().await?;
+    }
     match command
         .command
         .ok_or_else(|| CoreError::Protocol("UI command has no payload".into()))?
     {
+        Command::UnlockStorage(_) => Ok(Some(snapshot_event(core.snapshot(true).await))),
         Command::SubmitTask(submit) => {
-            core.submit_task(submit.text).await?;
+            let conversation = if submit.conversation_id.is_empty() {
+                None
+            } else {
+                Some(parse_uuid(&submit.conversation_id, "conversation_id")?)
+            };
+            let resources = submit
+                .resources
+                .into_iter()
+                .map(|scope| {
+                    let effects = scope
+                        .effects
+                        .into_iter()
+                        .map(|effect| match wire::ResourceEffect::try_from(effect) {
+                            Ok(wire::ResourceEffect::Read) => Ok(crate::contracts::Effect::Read),
+                            Ok(wire::ResourceEffect::Create) => {
+                                Ok(crate::contracts::Effect::Create)
+                            }
+                            _ => Err(CoreError::PermissionRequired(
+                                "Unsupported scope effect".into(),
+                            )),
+                        })
+                        .collect::<CoreResult<std::collections::BTreeSet<_>>>()?;
+                    Ok(crate::contracts::ResourceScope {
+                        root: scope.root.into(),
+                        effects,
+                    })
+                })
+                .collect::<CoreResult<Vec<_>>>()?;
+            core.submit_scoped(submit.text, conversation, false, None, resources)
+                .await?;
             Ok(None)
+        }
+        Command::KnowledgeCommand(command) => {
+            let snapshot = core.knowledge_command(command).await?;
+            Ok(Some(wire::CoreEvent {
+                event_id: Uuid::new_v4().to_string(),
+                occurred_at_unix_ms: Utc::now().timestamp_millis(),
+                event: Some(wire::core_event::Event::KnowledgeState(
+                    wire::KnowledgeState {
+                        json: serde_json::to_string(&snapshot)?,
+                    },
+                )),
+            }))
+        }
+        Command::WorkflowCommand(command) => {
+            let snapshot = core.workflow_command(command).await?;
+            Ok(Some(wire::CoreEvent {
+                event_id: Uuid::new_v4().to_string(),
+                occurred_at_unix_ms: Utc::now().timestamp_millis(),
+                event: Some(wire::core_event::Event::WorkflowState(
+                    wire::WorkflowState {
+                        json: serde_json::to_string(&snapshot)?,
+                    },
+                )),
+            }))
         }
         Command::ControlTask(control) => {
             let task_id = parse_uuid(&control.task_id, "task_id")?;
@@ -333,9 +439,30 @@ fn snapshot_event(snapshot: crate::events::StateSnapshot) -> wire::CoreEvent {
         event: Some(wire::core_event::Event::StateSnapshot(
             wire::StateSnapshot {
                 tasks: snapshot.tasks.into_iter().map(task_to_wire).collect(),
-                pending_approvals: Vec::new(),
+                pending_approvals: snapshot
+                    .pending_approvals
+                    .into_iter()
+                    .map(|p| wire::ApprovalRequest {
+                        approval_id: p.approval_id.to_string(),
+                        approval_digest: p.digest,
+                        task_id: p.task_id.to_string(),
+                        action_id: p.action_id.to_string(),
+                        title: "Review prepared action".into(),
+                        explanation: p.explanation,
+                        resource: p.resource,
+                        risk: risk_to_wire(p.risk) as i32,
+                        expires_at_unix_ms: p.expires_at.timestamp_millis(),
+                        reversible: p.reversible,
+                        requires_native_authentication: p.requires_native_authentication,
+                    })
+                    .collect(),
+                storage_locked: snapshot.storage_locked,
                 core_version: snapshot.core_version,
                 protocol_version: snapshot.protocol_version,
+                knowledge: snapshot
+                    .knowledge
+                    .and_then(|knowledge| serde_json::to_string(&knowledge).ok())
+                    .map(|json| wire::KnowledgeState { json }),
                 provider_settings: snapshot
                     .provider_settings
                     .into_iter()
@@ -379,6 +506,13 @@ fn event_to_wire(event: CoreEvent) -> wire::CoreEvent {
     let occurred_at_unix_ms = event.occurred_at.timestamp_millis();
     let task_id = event.task_id.map(|id| id.to_string()).unwrap_or_default();
     let payload = match event.kind {
+        CoreEventKind::ModelResponse { text, finished } => {
+            wire::core_event::Event::ModelResponseDelta(wire::ModelResponseDelta {
+                task_id,
+                text,
+                finished,
+            })
+        }
         CoreEventKind::ApprovalRequested {
             approval_id,
             action_id,
@@ -443,6 +577,13 @@ fn event_to_wire(event: CoreEvent) -> wire::CoreEvent {
 
 fn agent_event(task_id: String, kind: CoreEventKind) -> wire::AgentEvent {
     let (action_id, name, title, detail, risk) = match kind {
+        CoreEventKind::ModelResponse { text, .. } => (
+            String::new(),
+            "model_response",
+            "Response".into(),
+            text,
+            None,
+        ),
         CoreEventKind::TaskStarted => (
             String::new(),
             "task_started",
@@ -606,6 +747,20 @@ fn task_to_wire(task: Task) -> wire::TaskUpdate {
         current_action,
         final_outcome: task.final_outcome.unwrap_or_default(),
         undo_available: task.rollback_available,
+        conversation_id: task
+            .conversation_id
+            .map(|id| id.to_string())
+            .unwrap_or_default(),
+        message_id: task.message_id.map(|id| id.to_string()).unwrap_or_default(),
+        actions: task
+            .actions
+            .values()
+            .map(|state| wire::ActionProgress {
+                action_id: state.proposal.id.to_string(),
+                summary: state.proposal.action.redacted_summary(),
+                status: format!("{:?}", state.status).to_ascii_lowercase(),
+            })
+            .collect(),
     }
 }
 
@@ -651,4 +806,123 @@ fn error_event(request_id: String, error: CoreError) -> wire::CoreEvent {
 
 fn parse_uuid(value: &str, field: &str) -> CoreResult<Uuid> {
     Uuid::parse_str(value).map_err(|_| CoreError::Protocol(format!("{field} is not a valid UUID")))
+}
+
+#[cfg(test)]
+mod protocol_v2_tests {
+    use super::*;
+    use crate::{model::UnconfiguredModelProvider, secrets::SecretBytes};
+    async fn handshake(
+        client: &mut tokio::io::DuplexStream,
+        kind: wire::ClientKind,
+        key: &[u8],
+    ) -> wire::AuthenticationResult {
+        let challenge = read_frame(client).await.unwrap();
+        let Some(wire::frame::Payload::ServerChallenge(challenge)) = challenge.payload else {
+            panic!("challenge expected")
+        };
+        let proof = crate::ipc::authentication_proof(
+            key,
+            &challenge.nonce,
+            &[2; 32],
+            PROTOCOL_VERSION,
+            kind as i32,
+            "test",
+        )
+        .unwrap();
+        write_frame(
+            client,
+            &frame(
+                1,
+                wire::frame::Payload::ClientAuthenticate(wire::ClientAuthenticate {
+                    client_kind: kind as i32,
+                    client_version: "test".into(),
+                    client_nonce: vec![2; 32],
+                    proof: proof.to_vec(),
+                }),
+            ),
+        )
+        .await
+        .unwrap();
+        let Some(wire::frame::Payload::AuthenticationResult(result)) =
+            read_frame(client).await.unwrap().payload
+        else {
+            panic!("authentication expected")
+        };
+        assert_eq!(
+            result.server_proof,
+            crate::ipc::server_authentication_proof(key, &proof, &result.session_id).unwrap()
+        );
+        result
+    }
+    #[tokio::test]
+    async fn authenticated_browser_cannot_send_ui_commands() {
+        let data = tempfile::tempdir().unwrap();
+        let core = SageCore::new(
+            crate::config::CoreConfig::for_test(data.path()),
+            Arc::new(UnconfiguredModelProvider),
+        )
+        .unwrap();
+        let root = SecretBytes::new(vec![7; 32]);
+        let key = super::super::auth::derive_browser_secret(&root);
+        let auth = Arc::new(IpcAuthenticator::new(root));
+        let (mut client, server) = tokio::io::duplex(8192);
+        let task = tokio::spawn(handle_connection(server, core.clone(), auth));
+        handshake(&mut client, wire::ClientKind::Browser, key.expose()).await;
+        write_frame(
+            &mut client,
+            &frame(
+                2,
+                wire::frame::Payload::UiCommand(wire::UiCommand {
+                    request_id: "attacker".into(),
+                    command: Some(wire::ui_command::Command::SubmitTask(wire::SubmitTask {
+                        text: "unauthorized".into(),
+                        ..Default::default()
+                    })),
+                }),
+            ),
+        )
+        .await
+        .unwrap();
+        assert!(
+            timeout(Duration::from_secs(2), task)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_err()
+        );
+        assert!(core.snapshot(true).await.tasks.is_empty());
+    }
+    #[tokio::test]
+    async fn replayed_frame_is_rejected_after_a_valid_native_handshake() {
+        let data = tempfile::tempdir().unwrap();
+        let core = SageCore::new(
+            crate::config::CoreConfig::for_test(data.path()),
+            Arc::new(UnconfiguredModelProvider),
+        )
+        .unwrap();
+        let auth = Arc::new(IpcAuthenticator::new(SecretBytes::new(vec![7; 32])));
+        let (mut client, server) = tokio::io::duplex(8192);
+        let task = tokio::spawn(handle_connection(server, core, auth));
+        let kind = if cfg!(windows) {
+            wire::ClientKind::Windows
+        } else {
+            wire::ClientKind::Macos
+        };
+        handshake(&mut client, kind, &[7; 32]).await;
+        let ping = frame(2, wire::frame::Payload::Ping(wire::Ping { value: 19 }));
+        write_frame(&mut client, &ping).await.unwrap();
+        assert!(matches!(
+            read_frame(&mut client).await.unwrap().payload,
+            Some(wire::frame::Payload::Pong(_))
+        ));
+        write_frame(&mut client, &ping).await.unwrap();
+        assert!(
+            timeout(Duration::from_secs(2), task)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_err()
+        );
+    }
 }

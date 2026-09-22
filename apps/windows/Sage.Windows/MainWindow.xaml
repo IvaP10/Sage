@@ -142,6 +142,8 @@
                             <TextBlock Text="Undo" />
                         </StackPanel>
                     </Button>
+                    <Button x:Name="ResumeButton" Content="Resume" Visibility="Collapsed" Click="Resume_Click" />
+                    <Button x:Name="SaveSkillButton" Content="Save skill" Visibility="Collapsed" Click="SaveSkill_Click" />
                 </StackPanel>
             </Grid>
 
@@ -187,6 +189,8 @@
                                 <ColumnDefinition Width="Auto" />
                             </Grid.ColumnDefinitions>
                             <TextBox x:Name="Composer" Grid.Column="0" PlaceholderText="Ask to build something…" AcceptsReturn="True" TextWrapping="Wrap" MaxHeight="140" MinHeight="34" Background="Transparent" BorderThickness="0" Padding="0,5,0,5" TextChanged="Composer_TextChanged" KeyDown="Composer_KeyDown" />
+                            <Button x:Name="UnlockHistoryButton" Grid.Column="0" HorizontalAlignment="Right" Content="Open protected history" Click="UnlockHistory_Click" />
+                            <Button x:Name="ScopeButton" Grid.Column="2" Content="Folder" Click="Scope_Click" ToolTipService.ToolTip="Choose a folder this task can read" />
                             <Button x:Name="SendButton" Grid.Column="1" Style="{StaticResource IconButtonStyle}" Click="Send_Click" ToolTipService.ToolTip="Send task">
                                 <FontIcon Glyph="&#xE72A;" FontSize="14" />
                             </Button>

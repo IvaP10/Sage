@@ -12,6 +12,10 @@ use crate::policy::RiskLevel;
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum CoreEventKind {
     TaskStarted,
+    ModelResponse {
+        text: String,
+        finished: bool,
+    },
     PlanGenerated {
         action_count: usize,
     },
@@ -139,5 +143,8 @@ pub struct StateSnapshot {
     pub tasks: Vec<Task>,
     pub provider_settings: Vec<crate::model::ProviderSettings>,
     pub core_version: String,
+    pub storage_locked: bool,
+    pub pending_approvals: Vec<crate::contracts::ApprovalRecord>,
     pub protocol_version: u32,
+    pub knowledge: Option<crate::knowledge::KnowledgeSnapshot>,
 }

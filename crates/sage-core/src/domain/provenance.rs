@@ -20,6 +20,7 @@ pub enum ProvenanceSource {
 pub enum TrustClass {
     UserAuthority,
     TrustedComponent,
+    UntrustedModel,
     Observation,
     UntrustedExternalContent,
 }
@@ -45,7 +46,7 @@ impl Provenance {
     pub fn model(parent_ids: Vec<String>) -> Self {
         Self {
             source: ProvenanceSource::Model,
-            trust: TrustClass::TrustedComponent,
+            trust: TrustClass::UntrustedModel,
             source_id: None,
             parent_ids,
         }

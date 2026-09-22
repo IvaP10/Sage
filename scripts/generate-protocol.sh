@@ -2,7 +2,7 @@
 set -eu
 
 repository_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-proto_file="$repository_root/proto/sage/ipc/v1/sage.proto"
+proto_file="$repository_root/proto/sage/ipc/v2/sage.proto"
 swift_output="$repository_root/apps/macos/Sources/SageMac/Generated"
 
 command -v protoc >/dev/null 2>&1 || {
@@ -15,7 +15,7 @@ if command -v protoc-gen-swift >/dev/null 2>&1; then
 elif [ -n "${PROTOC_GEN_SWIFT:-}" ] && [ -x "$PROTOC_GEN_SWIFT" ]; then
   swift_plugin="$PROTOC_GEN_SWIFT"
 else
-  generated_file="$swift_output/sage/ipc/v1/sage.pb.swift"
+  generated_file="$swift_output/sage/ipc/v2/sage.pb.swift"
   if [ -f "$generated_file" ]; then
     echo "Using checked-in Swift protobuf binding (set PROTOC_GEN_SWIFT to regenerate)."
     exit 0

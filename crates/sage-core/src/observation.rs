@@ -3,7 +3,6 @@ use std::path::Path;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 use crate::domain::{ActionProposal, Condition, ExpectedOutcome, Provenance, ProvenanceSource};
 use crate::error::{CoreError, CoreResult};
@@ -12,10 +11,16 @@ use crate::execution::ExecutionReceipt;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Evidence {
+    FetchedResource {
+        url: String,
+        status: u16,
+        sha256: String,
+    },
     FileState {
         path: String,
         exists: bool,
         is_file: bool,
+        is_directory: bool,
         size: u64,
     },
     FileHash {
@@ -73,6 +78,21 @@ impl Observer for DeterministicObserver {
         receipt: &ExecutionReceipt,
     ) -> CoreResult<Observation> {
         let evidence = match &proposal.expected_outcome {
+            ExpectedOutcome::PublicResource { url } => {
+                let document: crate::network::FetchedResource =
+                    serde_json::from_value(receipt.transient_data.clone())?;
+                document.validate()?;
+                if receipt.executor != "network-broker" || document.url != *url {
+                    return Err(CoreError::VerificationFailed(
+                        "HTTP evidence belongs to another resource".into(),
+                    ));
+                }
+                vec![Evidence::FetchedResource {
+                    url: document.url,
+                    status: document.status,
+                    sha256: document.sha256,
+                }]
+            }
             ExpectedOutcome::Condition { condition } => vec![observe_condition(condition).await?],
             ExpectedOutcome::FileContains { path, .. } => vec![Evidence::FileHash {
                 path: path.to_string_lossy().into_owned(),
@@ -124,7 +144,9 @@ impl Observer for DeterministicObserver {
 
 async fn observe_condition(condition: &Condition) -> CoreResult<Evidence> {
     match condition {
-        Condition::FileExists { path } | Condition::FileAbsent { path } => {
+        Condition::FileExists { path }
+        | Condition::FolderExists { path }
+        | Condition::FileAbsent { path } => {
             let exists = tokio::fs::try_exists(path).await?;
             let metadata = if exists {
                 Some(tokio::fs::metadata(path).await?)
@@ -135,30 +157,27 @@ async fn observe_condition(condition: &Condition) -> CoreResult<Evidence> {
                 path: path.to_string_lossy().into_owned(),
                 exists,
                 is_file: metadata.as_ref().is_some_and(|value| value.is_file()),
+                is_directory: metadata.as_ref().is_some_and(|value| value.is_dir()),
                 size: metadata.as_ref().map_or(0, std::fs::Metadata::len),
             })
         }
-        Condition::ApplicationRunning { application } => Ok(Evidence::ApplicationState {
-            application: application.clone(),
-            running: false,
-        }),
-        Condition::UrlEquals { url } => Ok(Evidence::BrowserState { url: url.clone() }),
-        Condition::ElementPresent { selector } => Ok(Evidence::ElementState {
-            description: format!("{selector:?}"),
-            present: false,
-        }),
+        _ => Err(CoreError::ExecutorUnavailable(
+            "A fresh platform/browser observation is required.".into(),
+        )),
     }
 }
 
 async fn hash_file(path: &Path) -> CoreResult<String> {
-    let bytes = tokio::fs::read(path).await?;
-    Ok(format!("{:x}", Sha256::digest(bytes)))
+    crate::execution::files::hash_file(path)
 }
 
 fn summarize(evidence: &[Evidence]) -> String {
     evidence
         .iter()
         .map(|item| match item {
+            Evidence::FetchedResource { url, status, .. } => {
+                format!("Fetched {url}; HTTP {status}")
+            }
             Evidence::FileState {
                 path, exists, size, ..
             } => {

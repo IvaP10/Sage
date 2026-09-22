@@ -29,6 +29,7 @@ pub enum ActionStatus {
     WaitingForApproval,
     Running,
     Verifying,
+    Uncertain,
     Succeeded,
     Failed,
     Skipped,
@@ -46,6 +47,24 @@ pub struct ActionState {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Task {
     pub id: Uuid,
+    #[serde(default)]
+    pub continuation_of: Option<Uuid>,
+    #[serde(default)]
+    pub budget_exhausted: bool,
+    #[serde(default)]
+    pub conversation_id: Option<Uuid>,
+    #[serde(default)]
+    pub message_id: Option<Uuid>,
+    #[serde(default)]
+    pub recovery_attempt: bool,
+    #[serde(default)]
+    pub workflow_run: bool,
+    #[serde(default)]
+    pub background: bool,
+    #[serde(default)]
+    pub contract: Option<crate::contracts::RunContract>,
+    #[serde(default)]
+    pub tool_results: Vec<crate::contracts::ToolResult>,
     pub request: String,
     pub status: TaskStatus,
     pub goal: Option<String>,
@@ -64,6 +83,15 @@ impl Task {
         let now = Utc::now();
         Self {
             id: Uuid::new_v4(),
+            continuation_of: None,
+            budget_exhausted: false,
+            conversation_id: None,
+            message_id: None,
+            recovery_attempt: false,
+            workflow_run: false,
+            background: false,
+            contract: None,
+            tool_results: Vec::new(),
             request: request.into(),
             status: TaskStatus::Pending,
             goal: None,
@@ -79,6 +107,10 @@ impl Task {
 
     pub fn install_plan(&mut self, graph: ActionGraph) -> Result<(), String> {
         graph.validate(self.id)?;
+        if graph.nodes.len() > 32 {
+            return Err("Workflow exceeds the 32-step run budget".into());
+        }
+        self.workflow_run = true;
         self.goal = Some(graph.goal);
         self.actions = graph
             .nodes
@@ -101,6 +133,37 @@ impl Task {
             .into_iter()
             .map(|node| (node.proposal.id, node.depends_on))
             .collect();
+        self.status = TaskStatus::Running;
+        self.touch();
+        Ok(())
+    }
+
+    pub fn append_plan(&mut self, graph: ActionGraph) -> Result<(), String> {
+        graph.validate(self.id)?;
+        if graph
+            .nodes
+            .iter()
+            .any(|n| self.actions.contains_key(&n.proposal.id))
+        {
+            return Err("Every turn must use fresh action identities".into());
+        }
+        if self.actions.len() + graph.nodes.len() > 32 {
+            return Err("Task reached its 32-step budget".into());
+        }
+        self.goal = Some(graph.goal);
+        for node in graph.nodes {
+            self.dependencies.insert(node.proposal.id, node.depends_on);
+            self.actions.insert(
+                node.proposal.id,
+                ActionState {
+                    proposal: node.proposal,
+                    status: ActionStatus::Pending,
+                    attempts: 0,
+                    summary: None,
+                    error: None,
+                },
+            );
+        }
         self.status = TaskStatus::Running;
         self.touch();
         Ok(())

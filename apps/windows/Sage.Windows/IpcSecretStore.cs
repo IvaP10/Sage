@@ -11,7 +11,7 @@ namespace Sage.Windows;
 internal static class IpcSecretStore
 {
     private const string Service = "com.ivanpadeliya.sage";
-    private const string UserName = "local-ipc-v1";
+    private const string UserName = "local-ipc-v2";
     private const string Target = UserName + "." + Service;
     private const uint CredentialTypeGeneric = 1;
     private const uint CredentialPersistEnterprise = 3;

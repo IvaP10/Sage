@@ -159,7 +159,7 @@ struct MainView: View {
         .padding(.bottom, 14)
     }
 
-    private func taskRow(_ task: Sage_Ipc_V1_TaskUpdate) -> some View {
+    private func taskRow(_ task: Sage_Ipc_V2_TaskUpdate) -> some View {
         let selected = model.selectedTaskID == task.taskID && !model.settingsVisible
         let showingOptions = hoveredTaskID == task.taskID
 
@@ -238,7 +238,7 @@ struct MainView: View {
         }
     }
 
-    private func taskOptionsMenu(_ task: Sage_Ipc_V1_TaskUpdate) -> some View {
+    private func taskOptionsMenu(_ task: Sage_Ipc_V2_TaskUpdate) -> some View {
         Menu {
             taskMenuItems(task)
         } label: {
@@ -257,7 +257,7 @@ struct MainView: View {
     }
 
     @ViewBuilder
-    private func taskMenuItems(_ task: Sage_Ipc_V1_TaskUpdate) -> some View {
+    private func taskMenuItems(_ task: Sage_Ipc_V2_TaskUpdate) -> some View {
         Button("Rename", systemImage: "pencil") {
             model.beginRename(task)
         }
@@ -285,7 +285,7 @@ struct MainView: View {
         .background(SageTheme.canvas)
     }
 
-    private func taskToolbar(_ task: Sage_Ipc_V1_TaskUpdate) -> some View {
+    private func taskToolbar(_ task: Sage_Ipc_V2_TaskUpdate) -> some View {
         HStack(spacing: 14) {
             VStack(alignment: .leading, spacing: 4) {
                 Text(model.displayTitle(for: task))
@@ -294,6 +294,12 @@ struct MainView: View {
                     .truncationMode(.tail)
             }
             Spacer(minLength: 16)
+            if task.status == .interrupted || task.status == .paused {
+                Button("Resume") { model.resume(taskID: task.taskID) }.buttonStyle(SageBorderedButtonStyle())
+            }
+            if task.status == .succeeded && task.totalActions > 0 {
+                Button("Save skill") { model.workflow("capture_skill", id: task.taskID, name: model.displayTitle(for: task)) }.buttonStyle(SageBorderedButtonStyle())
+            }
             if task.undoAvailable {
                 Button {
                     model.undo(taskID: task.taskID)
@@ -324,7 +330,23 @@ struct MainView: View {
             if let task = selectedTask {
                 ScrollView(.vertical) {
                     LazyVStack(alignment: .leading, spacing: 0) {
-                        requestMessage(task)
+                        if model.messages.isEmpty { requestMessage(task) }
+                        ForEach(model.messages) { message in
+                            HStack {
+                                if message.role == "user" { Spacer(minLength: 48) }
+                                Text(message.content)
+                                    .font(.system(size: 14))
+                                    .textSelection(.enabled)
+                                    .padding(12)
+                                    .background(message.role == "user" ? SageTheme.userBubble : Color.clear, in: RoundedRectangle(cornerRadius: 12))
+                                if message.role != "user" { Spacer(minLength: 48) }
+                            }.padding(.bottom, 12)
+                        }
+                        if task.status == .interrupted || task.status == .paused {
+                            ForEach(task.actions, id: \.actionID) { action in
+                                HStack { Text(action.summary); Spacer(); Text(action.status).foregroundStyle(.secondary) }.padding(.vertical, 4)
+                            }
+                        }
                         if model.timeline.isEmpty {
                             taskResult(task)
                         } else {
@@ -347,7 +369,7 @@ struct MainView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    private func requestMessage(_ task: Sage_Ipc_V1_TaskUpdate) -> some View {
+    private func requestMessage(_ task: Sage_Ipc_V2_TaskUpdate) -> some View {
         HStack(alignment: .bottom) {
             Spacer(minLength: 48)
             Text(task.request)
@@ -361,7 +383,7 @@ struct MainView: View {
         .padding(.bottom, 18)
     }
 
-    private func taskResult(_ task: Sage_Ipc_V1_TaskUpdate) -> some View {
+    private func taskResult(_ task: Sage_Ipc_V2_TaskUpdate) -> some View {
         let detail = task.summary.isEmpty ? task.finalOutcome : task.summary
 
         return HStack(alignment: .top, spacing: 12) {
@@ -400,7 +422,7 @@ struct MainView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    private func timelineEvent(_ event: Sage_Ipc_V1_AgentEvent) -> some View {
+    private func timelineEvent(_ event: Sage_Ipc_V2_AgentEvent) -> some View {
         HStack(alignment: .top, spacing: 12) {
             Image(systemName: eventIcon(event.kind))
                 .font(.system(size: 12.5, weight: .semibold))
@@ -431,6 +453,10 @@ struct MainView: View {
 
     private var composerArea: some View {
         VStack(spacing: 8) {
+            if model.storageLocked {
+                Button("Open protected history") { model.unlockHistory() }
+                    .buttonStyle(.plain).foregroundStyle(.secondary)
+            }
             if let notice = model.voiceNotice {
                 HStack(spacing: 8) {
                     Image(systemName: "exclamationmark.circle")
@@ -466,7 +492,16 @@ struct MainView: View {
                     .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
 
+                if !model.taskFolders.isEmpty {
+                    HStack {
+                        Text("Can read: " + model.taskFolders.map { URL(fileURLWithPath: $0).lastPathComponent }.joined(separator: ", "))
+                            .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                        Button("Clear") { model.taskFolders = [] }.buttonStyle(.plain)
+                    }.padding(.bottom, 8)
+                }
                 HStack(alignment: .bottom, spacing: 10) {
+                    Button(action: model.chooseTaskFolder) { Image(systemName: "folder.badge.plus") }
+                        .buttonStyle(.plain).help("Choose folders this task can read")
                     TextField("Ask to build something…", text: $model.composerText, axis: .vertical)
                         .textFieldStyle(.plain)
                         .font(.system(size: 14))
@@ -543,7 +578,7 @@ struct MainView: View {
         .frame(maxWidth: .infinity)
     }
 
-    private var selectedTask: Sage_Ipc_V1_TaskUpdate? {
+    private var selectedTask: Sage_Ipc_V2_TaskUpdate? {
         guard let id = model.selectedTaskID else { return nil }
         return model.tasks.first(where: { $0.taskID == id })
     }
@@ -564,11 +599,11 @@ struct MainView: View {
         isVoiceActive ? "stop.fill" : "mic.fill"
     }
 
-    private func statusLabel(_ status: Sage_Ipc_V1_TaskStatus) -> String {
+    private func statusLabel(_ status: Sage_Ipc_V2_TaskStatus) -> String {
         String(describing: status).replacingOccurrences(of: "_", with: " ").capitalized
     }
 
-    private func statusColor(_ status: Sage_Ipc_V1_TaskStatus) -> Color {
+    private func statusColor(_ status: Sage_Ipc_V2_TaskStatus) -> Color {
         switch status {
         case .succeeded: return SageTheme.success
         case .failed, .interrupted: return SageTheme.danger
@@ -579,7 +614,7 @@ struct MainView: View {
         }
     }
 
-    private func statusSymbol(_ status: Sage_Ipc_V1_TaskStatus) -> String {
+    private func statusSymbol(_ status: Sage_Ipc_V2_TaskStatus) -> String {
         switch status {
         case .succeeded: return "checkmark.circle.fill"
         case .failed, .interrupted: return "exclamationmark.triangle.fill"
@@ -592,7 +627,7 @@ struct MainView: View {
         }
     }
 
-    private func isFinished(_ status: Sage_Ipc_V1_TaskStatus) -> Bool {
+    private func isFinished(_ status: Sage_Ipc_V2_TaskStatus) -> Bool {
         [.succeeded, .failed, .cancelled, .interrupted].contains(status)
     }
 
@@ -604,7 +639,7 @@ struct MainView: View {
         return "sparkles"
     }
 
-    private func questionSheet(_ question: Sage_Ipc_V1_QuestionRequest) -> some View {
+    private func questionSheet(_ question: Sage_Ipc_V2_QuestionRequest) -> some View {
         VStack(alignment: .leading, spacing: 18) {
             Text("More information needed")
                 .font(.title2.weight(.semibold))
@@ -629,7 +664,7 @@ struct MainView: View {
 }
 
 private struct ApprovalView: View {
-    let approval: Sage_Ipc_V1_ApprovalRequest
+    let approval: Sage_Ipc_V2_ApprovalRequest
     let approve: () -> Void
     let deny: () -> Void
 
@@ -788,10 +823,10 @@ private struct SageBorderedButtonBody: View {
     }
 }
 
-extension Sage_Ipc_V1_ApprovalRequest: Identifiable {
+extension Sage_Ipc_V2_ApprovalRequest: Identifiable {
     var id: String { approvalID }
 }
 
-extension Sage_Ipc_V1_QuestionRequest: Identifiable {
+extension Sage_Ipc_V2_QuestionRequest: Identifiable {
     var id: String { questionID }
 }

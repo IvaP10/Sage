@@ -7,7 +7,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 use crate::error::{CoreError, CoreResult};
 
 const SERVICE: &str = "com.ivanpadeliya.sage";
-const IPC_SECRET_ACCOUNT: &str = "local-ipc-v1";
+const IPC_SECRET_ACCOUNT: &str = "local-ipc-v2";
 
 #[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct SecretBytes(Vec<u8>);
@@ -86,6 +86,70 @@ pub fn load_or_create_ipc_secret(store: Arc<dyn SecretStore>) -> CoreResult<Secr
     let secret = SecretBytes::new(bytes);
     store.set(IPC_SECRET_ACCOUNT, &secret)?;
     Ok(secret)
+}
+
+/// Browser hosts receive only their role key, never the native UI credential.
+pub fn install_browser_ipc_secret(
+    directory: &std::path::Path,
+    root: &SecretBytes,
+    store: &dyn SecretStore,
+) -> CoreResult<()> {
+    let secret = crate::ipc::derive_browser_secret(root);
+    #[cfg(windows)]
+    {
+        let _ = directory;
+        store.set("browser-ipc-v2", &secret)?;
+    }
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let _ = store;
+        std::fs::create_dir_all(directory)?;
+        std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))?;
+        let staged = directory.join(format!(".browser-key-{}", uuid::Uuid::new_v4()));
+        let mut file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .open(&staged)?;
+        file.write_all(secret.expose())?;
+        file.sync_all()?;
+        std::fs::rename(staged, directory.join("browser-ipc-v2.key"))?;
+    }
+    Ok(())
+}
+
+pub fn load_browser_ipc_secret(
+    directory: &std::path::Path,
+    store: &dyn SecretStore,
+) -> CoreResult<SecretBytes> {
+    #[cfg(windows)]
+    {
+        let _ = directory;
+        return store
+            .get("browser-ipc-v2")?
+            .ok_or(CoreError::AuthenticationFailed);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let _ = store;
+        let path = directory.join("browser-ipc-v2.key");
+        let metadata = std::fs::symlink_metadata(&path)?;
+        if !metadata.is_file()
+            || metadata.mode() & 0o077 != 0
+            || metadata.nlink() != 1
+            || metadata.uid() != std::fs::metadata(directory)?.uid()
+        {
+            return Err(CoreError::AuthenticationFailed);
+        }
+        let bytes = crate::execution::files::PinnedPath::open(&path.canonicalize()?)?.read(32)?;
+        if bytes.len() != 32 {
+            return Err(CoreError::AuthenticationFailed);
+        }
+        Ok(SecretBytes::new(bytes))
+    }
 }
 
 #[cfg(test)]

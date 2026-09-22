@@ -4,8 +4,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
 use serde_json::json;
-use tokio::fs;
-use uuid::Uuid;
+use sha2::{Digest, Sha256};
 
 use crate::capability::{CapabilityGrant, CapabilityResource};
 use crate::compiler::{CompiledAction, ImplementationCandidate};
@@ -43,6 +42,8 @@ impl PlatformController for UnsupportedPlatformController {
 pub struct NativeExecutor {
     recovery_root: PathBuf,
     platform: Arc<dyn PlatformController>,
+    files: Arc<super::files::FileBroker>,
+    store: crate::storage::LocalStore,
 }
 
 impl std::fmt::Debug for NativeExecutor {
@@ -55,10 +56,17 @@ impl std::fmt::Debug for NativeExecutor {
 }
 
 impl NativeExecutor {
-    pub fn new(recovery_root: PathBuf, platform: Arc<dyn PlatformController>) -> Self {
+    pub fn new(
+        recovery_root: PathBuf,
+        platform: Arc<dyn PlatformController>,
+        files: Arc<super::files::FileBroker>,
+        store: crate::storage::LocalStore,
+    ) -> Self {
         Self {
             recovery_root,
             platform,
+            files,
+            store,
         }
     }
 
@@ -69,21 +77,24 @@ impl NativeExecutor {
     ) -> CoreResult<ExecutionReceipt> {
         let proposal = &compiled.proposal;
         match &proposal.action {
-            Action::ReadFile { path, max_bytes } => {
-                require_exact_file(capability, path)?;
-                let metadata = fs::metadata(path).await?;
-                if !metadata.is_file() {
-                    return Err(CoreError::ExecutionFailed(
-                        "resource is not a regular file".into(),
+            Action::FetchPublic { url, max_bytes } => {
+                if !matches!(&capability.resource,CapabilityResource::NetworkRoute{url:approved} if approved==url)
+                {
+                    return Err(CoreError::CapabilityRejected(
+                        "Public fetch grant targets another URL".into(),
                     ));
                 }
-                let limit = (*max_bytes).min(16 * 1024 * 1024) as usize;
-                if metadata.len() > limit as u64 {
-                    return Err(CoreError::ExecutionFailed(format!(
-                        "file exceeds the authorized read limit of {limit} bytes"
-                    )));
-                }
-                let bytes = fs::read(path).await?;
+                let document = crate::network::fetch_public(url, *max_bytes).await?;
+                Ok(ExecutionReceipt {
+                    executor: "network-broker".into(),
+                    summary: format!("Read {} bytes from {}", document.text.len(), document.url),
+                    transient_data: serde_json::to_value(document)?,
+                    rollback: None,
+                })
+            }
+            Action::ReadFile { path, max_bytes } => {
+                require_exact_file(capability, path)?;
+                let bytes = self.files.take(proposal, capability)?.read(*max_bytes)?;
                 Ok(ExecutionReceipt {
                     executor: self.name().into(),
                     summary: format!("read {} bytes from {}", bytes.len(), path.display()),
@@ -97,43 +108,35 @@ impl NativeExecutor {
                 overwrite,
             } => {
                 require_exact_file(capability, path)?;
-                let existed = fs::try_exists(path).await?;
-                if existed && !overwrite {
-                    return Err(CoreError::ExecutionFailed(
-                        "destination already exists and overwrite was not authorized".into(),
-                    ));
-                }
-                let task_recovery = self.task_recovery(proposal.task_id).await?;
-                let rollback = if existed {
-                    let backup = task_recovery.join(format!("{}-backup", proposal.id));
-                    fs::copy(path, &backup).await?;
-                    Some(RollbackPlan {
-                        action_id: proposal.id,
-                        operations: vec![RollbackOperation::RestoreFile {
-                            backup: backup.to_string_lossy().into_owned(),
-                            destination: path.to_string_lossy().into_owned(),
-                        }],
-                        expires_at: Utc::now() + Duration::hours(24),
-                    })
+                let prepared = self.files.take(proposal, capability)?;
+                let expected_sha256 = format!("{:x}", Sha256::digest(content.as_bytes()));
+                let operation = if prepared.exists() {
+                    if !overwrite {
+                        return Err(CoreError::ExecutionFailed(
+                            "Overwrite was not authorized".into(),
+                        ));
+                    }
+                    let backup = prepared.read(16 * 1024 * 1024)?;
+                    let artifact_id = self.store.save_artifact(proposal.task_id, &backup)?;
+                    RollbackOperation::RestoreArtifact {
+                        artifact_id,
+                        destination: path.to_string_lossy().into_owned(),
+                        expected_sha256,
+                    }
                 } else {
-                    Some(RollbackPlan {
-                        action_id: proposal.id,
-                        operations: vec![RollbackOperation::MoveFile {
-                            source: path.to_string_lossy().into_owned(),
-                            destination: task_recovery
-                                .join(format!("{}-created", proposal.id))
-                                .to_string_lossy()
-                                .into_owned(),
-                        }],
-                        expires_at: Utc::now() + Duration::hours(24),
-                    })
+                    RollbackOperation::RemoveCreatedFile {
+                        path: path.to_string_lossy().into_owned(),
+                        expected_sha256,
+                    }
                 };
-                let temporary = sibling_temporary_path(path, proposal.id)?;
-                fs::write(&temporary, content.as_bytes()).await?;
-                if existed {
-                    fs::remove_file(path).await?;
-                }
-                fs::rename(&temporary, path).await?;
+                let rollback = Some(RollbackPlan {
+                    action_id: proposal.id,
+                    operations: vec![operation],
+                    expires_at: Utc::now() + Duration::hours(24),
+                });
+                self.store
+                    .save_rollback(proposal.task_id, rollback.as_ref().unwrap())?;
+                prepared.write(content.as_bytes(), *overwrite)?;
                 Ok(ExecutionReceipt {
                     executor: self.name().into(),
                     summary: format!("wrote {} bytes to {}", content.len(), path.display()),
@@ -141,60 +144,19 @@ impl NativeExecutor {
                     rollback,
                 })
             }
-            Action::MoveFile {
-                source,
-                destination,
-            } => {
-                require_file_pair(capability, source, destination)?;
-                if fs::try_exists(destination).await? {
-                    return Err(CoreError::ExecutionFailed(
-                        "move destination already exists".into(),
-                    ));
-                }
-                fs::rename(source, destination).await?;
-                Ok(ExecutionReceipt {
-                    executor: self.name().into(),
-                    summary: format!("moved {} to {}", source.display(), destination.display()),
-                    transient_data: json!({}),
-                    rollback: Some(RollbackPlan {
-                        action_id: proposal.id,
-                        operations: vec![RollbackOperation::MoveFile {
-                            source: destination.to_string_lossy().into_owned(),
-                            destination: source.to_string_lossy().into_owned(),
-                        }],
-                        expires_at: Utc::now() + Duration::hours(24),
-                    }),
-                })
-            }
-            Action::DeleteFile { path } => {
-                require_exact_file(capability, path)?;
-                let task_recovery = self.task_recovery(proposal.task_id).await?;
-                let quarantined = task_recovery.join(format!("{}-deleted", proposal.id));
-                fs::rename(path, &quarantined).await?;
-                Ok(ExecutionReceipt {
-                    executor: self.name().into(),
-                    summary: format!("moved {} into SAGE recovery storage", path.display()),
-                    transient_data: json!({}),
-                    rollback: Some(RollbackPlan {
-                        action_id: proposal.id,
-                        operations: vec![RollbackOperation::MoveFile {
-                            source: quarantined.to_string_lossy().into_owned(),
-                            destination: path.to_string_lossy().into_owned(),
-                        }],
-                        expires_at: Utc::now() + Duration::hours(24),
-                    }),
-                })
-            }
             Action::CreateFolder { path } => {
                 require_exact_file(capability, path)?;
-                fs::create_dir(path).await?;
+                let prepared = self.files.take(proposal, capability)?;
+                prepared.create_folder()?;
+                let identity = prepared.current_identity()?;
                 Ok(ExecutionReceipt {
                     executor: self.name().into(),
                     summary: format!("created folder {}", path.display()),
                     transient_data: json!({}),
                     rollback: Some(RollbackPlan {
                         action_id: proposal.id,
-                        operations: vec![RollbackOperation::RemoveEmptyFolder {
+                        operations: vec![RollbackOperation::RemoveCreatedFolder {
+                            identity,
                             path: path.to_string_lossy().into_owned(),
                         }],
                         expires_at: Utc::now() + Duration::hours(24),
@@ -207,12 +169,6 @@ impl NativeExecutor {
                     .await
             }
         }
-    }
-
-    async fn task_recovery(&self, task_id: Uuid) -> CoreResult<PathBuf> {
-        let path = self.recovery_root.join(task_id.to_string());
-        fs::create_dir_all(&path).await?;
-        Ok(path)
     }
 }
 
@@ -243,31 +199,4 @@ fn require_exact_file(capability: &CapabilityGrant, path: &Path) -> CoreResult<(
             "filesystem capability does not match the exact action path".into(),
         )),
     }
-}
-
-fn require_file_pair(
-    capability: &CapabilityGrant,
-    source: &Path,
-    destination: &Path,
-) -> CoreResult<()> {
-    match &capability.resource {
-        CapabilityResource::FilePair {
-            source: allowed_source,
-            destination: allowed_destination,
-        } if Path::new(allowed_source) == source
-            && Path::new(allowed_destination) == destination =>
-        {
-            Ok(())
-        }
-        _ => Err(CoreError::CapabilityRejected(
-            "filesystem capability does not match the exact source and destination".into(),
-        )),
-    }
-}
-
-fn sibling_temporary_path(path: &Path, action_id: Uuid) -> CoreResult<PathBuf> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| CoreError::ExecutionFailed("destination has no parent".into()))?;
-    Ok(parent.join(format!(".sage-{action_id}.tmp")))
 }

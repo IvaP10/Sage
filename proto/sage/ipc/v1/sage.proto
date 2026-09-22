@@ -10,6 +10,7 @@ enum ClientKind {
   CLIENT_KIND_MACOS = 1;
   CLIENT_KIND_WINDOWS = 2;
   CLIENT_KIND_DIAGNOSTIC = 3;
+  CLIENT_KIND_BROWSER = 4;
 }
 
 enum InputSource {
@@ -61,6 +62,9 @@ message Frame {
     CoreEvent core_event = 14;
     Ping ping = 15;
     Pong pong = 16;
+    AdapterHello adapter_hello = 17;
+    AdapterRequest adapter_request = 18;
+    AdapterResult adapter_result = 19;
   }
 }
 
@@ -97,12 +101,15 @@ message UiCommand {
     UserAnswer user_answer = 16;
     SaveProviderSettings save_provider_settings = 17;
     TestProviderConnection test_provider_connection = 18;
+    KnowledgeCommand knowledge_command = 19;
+    WorkflowCommand workflow_command = 20;
   }
 }
 
 message SubmitTask {
   string text = 1;
   InputSource source = 2;
+  string conversation_id = 3;
 }
 
 message ControlTask {
@@ -177,6 +184,8 @@ message CoreEvent {
     PermissionRequest permission_request = 17;
     QuestionRequest question_request = 18;
     ProviderConnectionResult provider_connection_result = 19;
+    KnowledgeState knowledge_state = 20;
+    WorkflowState workflow_state = 21;
   }
 }
 
@@ -194,6 +203,7 @@ message StateSnapshot {
   string core_version = 3;
   uint32 protocol_version = 4;
   repeated ProviderSettings provider_settings = 5;
+  KnowledgeState knowledge = 6;
 }
 
 message ProviderSettings {
@@ -214,7 +224,34 @@ message TaskUpdate {
   string current_action = 7;
   string final_outcome = 8;
   bool undo_available = 9;
+  string conversation_id = 10;
+  string message_id = 11;
+  repeated ActionProgress actions = 12;
 }
+
+// Additive typed operations; JSON records are schema-validated by sage-core.
+message KnowledgeCommand {
+  string operation = 1; // list, remember, edit, delete, enable, disable, configure, conversation
+  string id = 2;
+  string content = 3;
+  bool enabled = 4;
+  string conversation_id = 5;
+  bool pinned = 6;
+  bool archived = 7;
+}
+message KnowledgeState { string json = 1; }
+message WorkflowCommand {
+  string operation = 1; // list, capture_skill, run_skill, save_workflow, run_workflow, save_schedule, delete_*
+  string id = 2;
+  string name = 3;
+  string json = 4;
+  string conversation_id = 5;
+}
+message WorkflowState { string json = 1; }
+message ActionProgress { string action_id = 1; string summary = 2; string status = 3; }
+message AdapterHello { string domain = 1; }
+message AdapterRequest { string request_id = 1; string operation = 2; string json = 3; int64 expires_at_unix_ms = 4; }
+message AdapterResult { string request_id = 1; bool success = 2; string json = 3; string error = 4; }
 
 message AgentEvent {
   string task_id = 1;

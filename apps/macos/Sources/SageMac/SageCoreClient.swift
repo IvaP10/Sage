@@ -17,7 +17,8 @@ enum SageClientError: LocalizedError {
 }
 
 final class SageCoreClient: @unchecked Sendable {
-    var onEvent: (@Sendable (Sage_Ipc_V1_CoreEvent) -> Void)?
+    var onEvent: (@Sendable (Sage_Ipc_V2_CoreEvent) -> Void)?
+    var onAdapterRequest: (@Sendable (Sage_Ipc_V2_AdapterRequest) async -> Sage_Ipc_V2_AdapterResult)?
 
     private let queue = DispatchQueue(label: "com.ivanpadeliya.sage.ipc")
     private let stateLock = NSLock()
@@ -55,6 +56,9 @@ final class SageCoreClient: @unchecked Sendable {
         stateLock.withLock { self.connection = connection }
         try await authenticate(connection)
         receiveLoop(connection)
+        var hello = Sage_Ipc_V2_AdapterHello()
+        hello.domain = "native"
+        try await sendPayload(.adapterHello(hello))
     }
 
     func disconnect() {
@@ -66,70 +70,81 @@ final class SageCoreClient: @unchecked Sendable {
 
     func submitTask(
         _ text: String,
-        source: Sage_Ipc_V1_InputSource = .typed
+        source: Sage_Ipc_V2_InputSource = .typed,
+        conversationID: String = "",
+        folders: [String] = []
     ) async throws {
-        var submit = Sage_Ipc_V1_SubmitTask()
+        var submit = Sage_Ipc_V2_SubmitTask()
         submit.text = text
         submit.source = source
-        var command = Sage_Ipc_V1_UiCommand()
+        submit.conversationID = conversationID
+        submit.resources = folders.map { path in var scope = Sage_Ipc_V2_ResourceScope(); scope.root = path; scope.effects = [.read]; return scope }
+        var command = Sage_Ipc_V2_UiCommand()
         command.requestID = UUID().uuidString
         command.command = .submitTask(submit)
         try await send(command)
     }
 
+    func unlockStorage() async throws {
+        var command = Sage_Ipc_V2_UiCommand()
+        command.requestID = UUID().uuidString
+        command.command = .unlockStorage(Sage_Ipc_V2_UnlockStorage())
+        try await send(command)
+    }
+
     func requestState(includeCompleted: Bool) async throws {
-        var request = Sage_Ipc_V1_GetState()
+        var request = Sage_Ipc_V2_GetState()
         request.includeCompletedTasks = includeCompleted
-        var command = Sage_Ipc_V1_UiCommand()
+        var command = Sage_Ipc_V2_UiCommand()
         command.requestID = UUID().uuidString
         command.command = .getState(request)
         try await send(command)
     }
 
     func resolveApproval(
-        _ approval: Sage_Ipc_V1_ApprovalRequest,
+        _ approval: Sage_Ipc_V2_ApprovalRequest,
         approve: Bool,
         nativeAuthenticationSatisfied: Bool
     ) async throws {
-        var response = Sage_Ipc_V1_ApprovalResponse()
+        var response = Sage_Ipc_V2_ApprovalResponse()
         response.taskID = approval.taskID
         response.actionID = approval.actionID
         response.approvalID = approval.approvalID
         response.approvalDigest = approval.approvalDigest
         response.decision = approve ? .approveOnce : .deny
         response.nativeAuthenticationSatisfied = nativeAuthenticationSatisfied
-        var command = Sage_Ipc_V1_UiCommand()
+        var command = Sage_Ipc_V2_UiCommand()
         command.requestID = UUID().uuidString
         command.command = .approvalResponse(response)
         try await send(command)
     }
 
-    func answer(_ question: Sage_Ipc_V1_QuestionRequest, text: String) async throws {
-        var answer = Sage_Ipc_V1_UserAnswer()
+    func answer(_ question: Sage_Ipc_V2_QuestionRequest, text: String) async throws {
+        var answer = Sage_Ipc_V2_UserAnswer()
         answer.taskID = question.taskID
         answer.actionID = question.actionID
         answer.questionID = question.questionID
         answer.answer = text
-        var command = Sage_Ipc_V1_UiCommand()
+        var command = Sage_Ipc_V2_UiCommand()
         command.requestID = UUID().uuidString
         command.command = .userAnswer(answer)
         try await send(command)
     }
 
-    func control(taskID: String, operation: Sage_Ipc_V1_ControlTask.Operation) async throws {
-        var control = Sage_Ipc_V1_ControlTask()
+    func control(taskID: String, operation: Sage_Ipc_V2_ControlTask.Operation) async throws {
+        var control = Sage_Ipc_V2_ControlTask()
         control.taskID = taskID
         control.operation = operation
-        var command = Sage_Ipc_V1_UiCommand()
+        var command = Sage_Ipc_V2_UiCommand()
         command.requestID = UUID().uuidString
         command.command = .controlTask(control)
         try await send(command)
     }
 
     func undo(taskID: String) async throws {
-        var undo = Sage_Ipc_V1_UndoLastAction()
+        var undo = Sage_Ipc_V2_UndoLastAction()
         undo.taskID = taskID
-        var command = Sage_Ipc_V1_UiCommand()
+        var command = Sage_Ipc_V2_UiCommand()
         command.requestID = UUID().uuidString
         command.command = .undoLastAction(undo)
         try await send(command)
@@ -143,7 +158,7 @@ final class SageCoreClient: @unchecked Sendable {
         removeSavedKey: Bool,
         nativeAuthenticationSatisfied: Bool
     ) async throws {
-        var settings = Sage_Ipc_V1_SaveProviderSettings()
+        var settings = Sage_Ipc_V2_SaveProviderSettings()
         settings.role = "reasoning"
         settings.provider = provider
         settings.model = model
@@ -151,7 +166,7 @@ final class SageCoreClient: @unchecked Sendable {
         settings.apiKey = apiKey
         settings.removeSavedKey = removeSavedKey
         settings.nativeAuthenticationSatisfied = nativeAuthenticationSatisfied
-        var command = Sage_Ipc_V1_UiCommand()
+        var command = Sage_Ipc_V2_UiCommand()
         command.requestID = UUID().uuidString
         command.command = .saveProviderSettings(settings)
         try await send(command)
@@ -163,21 +178,23 @@ final class SageCoreClient: @unchecked Sendable {
         endpoint: String,
         apiKey: String
     ) async throws {
-        var settings = Sage_Ipc_V1_TestProviderConnection()
+        var settings = Sage_Ipc_V2_TestProviderConnection()
         settings.role = "reasoning"
         settings.provider = provider
         settings.model = model
         settings.endpoint = endpoint
         settings.apiKey = apiKey
-        var command = Sage_Ipc_V1_UiCommand()
+        var command = Sage_Ipc_V2_UiCommand()
         command.requestID = UUID().uuidString
         command.command = .testProviderConnection(settings)
         try await send(command)
     }
 
+    private var authenticatedSessionID = ""
+
     private func authenticate(_ connection: NWConnection) async throws {
         let challengeFrame = try await receiveFrame(connection)
-        guard challengeFrame.protocolVersion == 1,
+        guard challengeFrame.protocolVersion == 2,
               case .serverChallenge(let challenge) = challengeFrame.payload,
               challenge.nonce.count == 32 else {
             throw SageClientError.authenticationFailed("SAGE Core sent an invalid challenge")
@@ -191,7 +208,7 @@ final class SageCoreClient: @unchecked Sendable {
             throw SageClientError.authenticationFailed("Could not generate client nonce")
         }
         let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.0"
-        var authentication = Sage_Ipc_V1_ClientAuthenticate()
+        var authentication = Sage_Ipc_V2_ClientAuthenticate()
         authentication.clientKind = .macos
         authentication.clientVersion = version
         authentication.clientNonce = clientNonce
@@ -199,29 +216,57 @@ final class SageCoreClient: @unchecked Sendable {
             secret: secret,
             serverNonce: challenge.nonce,
             clientNonce: clientNonce,
-            protocolVersion: 1,
-            clientKind: Sage_Ipc_V1_ClientKind.macos.rawValue,
+            protocolVersion: 2,
+            clientKind: Sage_Ipc_V2_ClientKind.macos.rawValue,
             clientVersion: version
         )
-        var frame = Sage_Ipc_V1_Frame()
-        frame.protocolVersion = 1
+        var frame = Sage_Ipc_V2_Frame()
+        frame.protocolVersion = 2
         frame.sequence = nextSequence()
         frame.payload = .clientAuthenticate(authentication)
         try await writeFrame(frame, connection: connection)
         let resultFrame = try await receiveFrame(connection)
-        guard case .authenticationResult(let result) = resultFrame.payload, result.accepted else {
+        guard resultFrame.protocolVersion == 2,
+              case .authenticationResult(let result) = resultFrame.payload, result.accepted else {
             throw SageClientError.authenticationFailed("SAGE Core rejected local IPC authentication")
         }
+        var serverMessage = Data("SAGE-CORE-PROOF-V2\0".utf8)
+        serverMessage.append(authentication.proof)
+        var length = UInt32(result.sessionID.utf8.count).bigEndian
+        withUnsafeBytes(of: &length) { serverMessage.append(contentsOf: $0) }
+        serverMessage.append(Data(result.sessionID.utf8))
+        guard HMAC<SHA256>.isValidAuthenticationCode(result.serverProof, authenticating: serverMessage, using: SymmetricKey(data: secret)) else {
+            throw SageClientError.authenticationFailed("Core identity proof is invalid")
+        }
+        stateLock.withLock { authenticatedSessionID = result.sessionID }
     }
 
-    private func send(_ command: Sage_Ipc_V1_UiCommand) async throws {
+    private func send(_ command: Sage_Ipc_V2_UiCommand) async throws {
+        try await sendPayload(.uiCommand(command))
+    }
+
+    func knowledge(_ request: Sage_Ipc_V2_KnowledgeCommand) async throws {
+        var command = Sage_Ipc_V2_UiCommand()
+        command.requestID = UUID().uuidString
+        command.command = .knowledgeCommand(request)
+        try await send(command)
+    }
+
+    func workflow(_ request: Sage_Ipc_V2_WorkflowCommand) async throws {
+        var command = Sage_Ipc_V2_UiCommand()
+        command.requestID = UUID().uuidString
+        command.command = .workflowCommand(request)
+        try await send(command)
+    }
+
+    private func sendPayload(_ payload: Sage_Ipc_V2_Frame.OneOf_Payload) async throws {
         guard let connection = stateLock.withLock({ self.connection }) else {
             throw SageClientError.connectionFailed("SAGE Core is not connected")
         }
-        var frame = Sage_Ipc_V1_Frame()
-        frame.protocolVersion = 1
+        var frame = Sage_Ipc_V2_Frame()
+        frame.protocolVersion = 2
         frame.sequence = nextSequence()
-        frame.payload = .uiCommand(command)
+        frame.payload = payload
         try await writeFrame(frame, connection: connection)
     }
 
@@ -234,6 +279,13 @@ final class SageCoreClient: @unchecked Sendable {
                     if case .coreEvent(let event) = frame.payload {
                         self?.onEvent?(event)
                     }
+                    if case .adapterRequest(let request) = frame.payload, let handler = self?.onAdapterRequest {
+                        if request.operation == "execute", request.grant.workerSession != self?.stateLock.withLock({ self?.authenticatedSessionID }) {
+                            throw SageClientError.authenticationFailed("Grant belongs to another session")
+                        }
+                        let response = await handler(request)
+                        try await self?.sendPayload(.adapterResult(response))
+                    }
                 }
             } catch {
                 self?.disconnect()
@@ -241,7 +293,7 @@ final class SageCoreClient: @unchecked Sendable {
         }
     }
 
-    private func writeFrame(_ frame: Sage_Ipc_V1_Frame, connection: NWConnection) async throws {
+    private func writeFrame(_ frame: Sage_Ipc_V2_Frame, connection: NWConnection) async throws {
         let payload = try frame.serializedData()
         guard !payload.isEmpty, payload.count <= 4 * 1024 * 1024 else {
             throw SageClientError.protocolError("IPC frame is outside the accepted size range")
@@ -261,14 +313,14 @@ final class SageCoreClient: @unchecked Sendable {
         }
     }
 
-    private func receiveFrame(_ connection: NWConnection) async throws -> Sage_Ipc_V1_Frame {
+    private func receiveFrame(_ connection: NWConnection) async throws -> Sage_Ipc_V2_Frame {
         let header = try await receiveExactly(4, connection: connection)
         let length = header.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self).bigEndian }
         guard length > 0, length <= 4 * 1024 * 1024 else {
             throw SageClientError.protocolError("SAGE Core sent an invalid frame length")
         }
         let payload = try await receiveExactly(Int(length), connection: connection)
-        return try Sage_Ipc_V1_Frame(serializedBytes: payload)
+        return try Sage_Ipc_V2_Frame(serializedBytes: payload)
     }
 
     private func receiveExactly(_ count: Int, connection: NWConnection) async throws -> Data {
@@ -322,7 +374,7 @@ final class SageCoreClient: @unchecked Sendable {
         clientKind: Int,
         clientVersion: String
     ) -> Data {
-        var message = Data("SAGE-LOCAL-IPC-AUTH-V1\0".utf8)
+        var message = Data("SAGE-LOCAL-IPC-AUTH-V2\0".utf8)
         message.append(serverNonce)
         message.append(clientNonce)
         var protocolValue = protocolVersion.bigEndian

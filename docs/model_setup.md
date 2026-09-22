@@ -1,74 +1,25 @@
 # Model setup
 
-Sage has independent provider roles:
+The executable has two routes: an explicitly configured compatible provider, or the supervised local CPU prototype selected with a signed profile. No model weights or qualified inference runtime are bundled. See [candidate metadata](../evals/models/qwen3.5-4b-candidate.json) and [qualification status](v2/implementation-status.md).
 
-- reasoning and structured planning;
-- vision;
-- speech recognition;
-- speech synthesis;
-- embeddings.
+## Configured provider
 
-The shared interfaces are in **crates/sage-core/src/model.rs**. A provider descriptor declares its ID, display name, local/cloud placement, and supported roles.
+Open Sage, unlock protected storage when requested, and configure the reasoning provider in Settings. Choose the OpenAI preset or an OpenAI-compatible service, enter the actual model name and endpoint, and supply any required credential through the native settings form. Use the connection test; this sends a small synthetic test request, not conversation history.
 
-## Current behavior
+Provider endpoints require HTTPS. Exact `localhost`, `127.0.0.1` and `[::1]` HTTP endpoints are allowed as explicitly configured external routes. URLs cannot contain credentials, query parameters or fragments. Requests use pinned validated DNS addresses, no proxy and no redirect following. Compatible services must support Sage's bounded structured response contract; unsupported capability errors are surfaced.
 
-The default sage-core executable installs the provider-neutral `OpenAICompatibleProvider`.
-It supports the OpenAI preset and OpenAI-compatible `/v1/chat/completions`
-endpoints, including exact loopback HTTP addresses for local runtimes such as
-Ollama. No provider is active until a user selects it in Settings.
+A saved endpoint or credential is not permission to disclose task data. Every inference call needs approval for the displayed exact context and destination. Changing an endpoint/path/port does not reuse its old credential. Legacy accounts are preserved in the OS store but disconnected during migration; re-enter a credential for the intended endpoint. There is no silent cloud fallback.
 
-The adapter always requests JSON Schema structured output. A response that is
-not valid Sage draft JSON is rejected; it never falls back to prose or shell
-text. The model supplies only a draft. Sage assigns action IDs and provenance,
-then runs the normal graph, policy, capability, approval, observation, and
-verification checks.
+## Managed local prototype
 
-## Provider requirements
+A profile must be signed by an explicitly supplied Ed25519 public key and contain verified model/runtime/dependency digests, revision/expiry, license, evaluation digest, context/output bounds and total memory envelope. Only the current macOS CPU isolation prototype is accepted; unsupported platforms/backends refuse execution.
 
-A reasoning adapter must:
+```sh
+cargo run --locked -p sage-core -- --model-profile /absolute/path/to/signed-profile.json --model-trust-key /absolute/path/to/ed25519-public-key.bin
+```
 
-1. accept PlanningContext;
-2. keep trusted constraints separate from untrusted context;
-3. return one strict ActionGraph;
-4. use the core-provided task ID;
-5. generate unique action IDs;
-6. declare dependencies;
-7. provide ExpectedOutcome for every action;
-8. treat tool descriptors as schemas, not authority;
-9. return errors rather than prose when structured output is invalid;
-10. implement bounded replan.
+The key file is a **public** verification key of exactly 32 bytes. Keep signing private keys outside Sage and the repository. This development route does not install a production trust root, model catalog, downloader or qualification result. Do not generate a signed production profile from estimated memory or made-up evaluation hashes.
 
-The core validates the result again. Provider validation is not the security boundary.
+The target baseline is a reproducible Qwen3.5-4B Q4_K_M conversion for llama.cpp, 8K context and one active generation. Quantization, backend compatibility, warm latency, peak memory and task quality remain unmeasured here. The current development Mac has 8 GiB RAM; release qualification requires the specified 16 GB hardware matrix.
 
-## Local providers
-
-A local provider may run as a separate model runtime process. It should expose a typed adapter rather than link inference into the native UI. Model crashes and restarts must not corrupt SQLite task state.
-
-Local does not mean trusted. A compromised or hallucinating local model still passes through policy and capabilities.
-
-## Cloud providers
-
-A cloud provider adapter must:
-
-- use HTTPS for public endpoints;
-- disable unrelated redirects;
-- enforce the configured origin;
-- retrieve credentials from SecretStore only for the request;
-- avoid logging headers or response bodies containing secrets;
-- label all provider output as model provenance;
-- apply timeouts and response-size limits;
-- support cancellation.
-
-Provider credentials never belong in product.toml, SQLite, source files, environment examples, or command arguments.
-
-## Native settings
-
-macOS and Windows expose matching Provider, Model, Endpoint, API key, Save, and
-Test controls. Provider records are stored without secrets; credentials remain
-in Keychain or Windows Credential Manager. The Test action sends a temporary
-credential to the core and requires the same structured-output contract without
-saving it. Anthropic and Google are intentionally not offered in this preview;
-legacy records remain visible as unconfigured until reselected.
-
-Provider calls stay in Rust. Do not reintroduce an Electron settings bridge or
-put provider requests in Swift/C#.
+The prototype clears the environment, restricts file/network/process access, bounds input/output, checks asset digests at admission and stops on cancellation/timeout. It reloads per request and lacks the target warm server, tokenizer allocation, platform RSS enforcement and fully separated native service. It is not the final production inference runtime.

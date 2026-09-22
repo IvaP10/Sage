@@ -12,7 +12,7 @@ members = [
 [workspace.package]
 version = "1.0.1"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.89"
 license = "LicenseRef-Proprietary"
 publish = false
 
@@ -29,7 +29,7 @@ keyring = { version = "3.6", default-features = false, features = ["apple-native
 prost = "0.14"
 prost-build = "0.14"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-rusqlite = { version = "0.37", features = ["bundled", "chrono", "uuid"] }
+rusqlite = { version = "0.37", features = ["bundled-sqlcipher-vendored-openssl", "chrono", "uuid"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"
@@ -40,6 +40,14 @@ tokio = { version = "1.47", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 uuid = { version = "1.18", features = ["serde", "v4"] }
-# Keep the URL/IDNA graph compatible with the Rust 1.85 preview CI toolchain.
+# Keep the URL/IDNA graph compatible with the Rust 1.89 CI toolchain.
 url = "=2.5.0"
 zeroize = { version = "1.8", features = ["derive"] }
+notify = "8.2"
+
+cedar-policy = { version = "=4.13.0", default-features = false }
+cap-std = "=3.4.5"
+cap-fs-ext = "=3.4.5"
+
+ed25519-dalek = "=2.2.0"
+sysinfo = { version = "=0.37.2", default-features = false, features = ["system"] }

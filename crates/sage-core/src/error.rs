@@ -41,3 +41,12 @@ pub enum CoreError {
     #[error("operation timed out: {0}")]
     Timeout(String),
 }
+
+impl From<rusqlite::Error> for CoreError {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::Storage(format!(
+            "Database operation failed ({:?})",
+            error.sqlite_error_code()
+        ))
+    }
+}

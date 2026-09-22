@@ -1,5 +1,5 @@
 fn main() {
-    let proto = "../../proto/sage/ipc/v1/sage.proto";
+    let proto = "../../proto/sage/ipc/v2/sage.proto";
     println!("cargo:rerun-if-changed={proto}");
 
     prost_build::Config::new()

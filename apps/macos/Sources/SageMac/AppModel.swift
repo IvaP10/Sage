@@ -28,12 +28,22 @@ final class AppModel {
     }
 
     var connectionState: ConnectionState = .starting
-    var tasks: [Sage_Ipc_V1_TaskUpdate] = []
-    var timeline: [Sage_Ipc_V1_AgentEvent] = []
-    var pendingApproval: Sage_Ipc_V1_ApprovalRequest?
-    var pendingQuestion: Sage_Ipc_V1_QuestionRequest?
+    var tasks: [Sage_Ipc_V2_TaskUpdate] = []
+    var timeline: [Sage_Ipc_V2_AgentEvent] = []
+    var pendingApproval: Sage_Ipc_V2_ApprovalRequest?
+    var pendingQuestion: Sage_Ipc_V2_QuestionRequest?
     var composerText = ""
+    var taskFolders: [String] = []
+    var storageLocked = true
     var selectedTaskID: String?
+    var selectedConversationID: String?
+    var conversations: [ConversationRecord] = []
+    var messages: [ConversationMessage] = []
+    var memories: [MemoryRecord] = []
+    var memoryEnabled = true
+    var skills: [SkillRecord] = []
+    var workflows: [WorkflowRecord] = []
+    var schedules: [ScheduleRecord] = []
     var settingsVisible = false
     var composerFocusToken = UUID()
     var renameFocusToken = UUID()
@@ -51,16 +61,17 @@ final class AppModel {
     var providerSaving = false
     var providerTestMessage: String?
     var providerTesting = false
-    var providerSettings: Sage_Ipc_V1_ProviderSettings?
+    var providerSettings: Sage_Ipc_V2_ProviderSettings?
     private(set) var isSubmitting = false
     private(set) var draftActive = false
 
     private let supervisor = CoreSupervisor()
     private let client = SageCoreClient()
+    private let platformAdapter = PlatformAdapter()
     private let voiceOverlay = OverlayWindowController()
     private let voiceInput = VoiceInputController()
     private var taskMetadata: [String: TaskMetadata] = [:]
-    private var timelinesByTaskID: [String: [Sage_Ipc_V1_AgentEvent]] = [:]
+    private var timelinesByTaskID: [String: [Sage_Ipc_V2_AgentEvent]] = [:]
     private var lastSubmittedRequest = ""
     private var lastSubmittedAt: Date?
     private var started = false
@@ -74,8 +85,13 @@ final class AppModel {
 
     private static let taskMetadataKey = "taskMetadata.v1"
 
-    var visibleTasks: [Sage_Ipc_V1_TaskUpdate] {
-        tasks
+    var visibleTasks: [Sage_Ipc_V2_TaskUpdate] {
+        var seen = Set<String>()
+        let visible = Set(conversations.map(\.id))
+        return tasks.filter { task in
+            let id = task.conversationID.isEmpty ? task.taskID : task.conversationID
+            return (conversations.isEmpty || visible.contains(id)) && seen.insert(id).inserted
+        }
             .enumerated()
             .filter { !((taskMetadata[$0.element.taskID]?.deleted) ?? false) }
             .sorted { lhs, rhs in
@@ -87,18 +103,23 @@ final class AppModel {
             .map(\.element)
     }
 
-    func displayTitle(for task: Sage_Ipc_V1_TaskUpdate) -> String {
+    func displayTitle(for task: Sage_Ipc_V2_TaskUpdate) -> String {
+        if let conversation = conversations.first(where: { $0.id == task.conversationID }) { return conversation.title }
         let title = taskMetadata[task.taskID]?.title?.trimmingCharacters(in: .whitespacesAndNewlines)
         return title?.isEmpty == false ? title! : task.request
     }
 
     func isPinned(_ taskID: String) -> Bool {
-        taskMetadata[taskID]?.pinned ?? false
+        if let task = tasks.first(where: { $0.taskID == taskID }), let conversation = conversations.first(where: { $0.id == task.conversationID }) { return conversation.pinned }
+        return taskMetadata[taskID]?.pinned ?? false
     }
 
     func selectTask(_ taskID: String) {
         guard tasks.contains(where: { $0.taskID == taskID }) else { return }
         selectedTaskID = taskID
+        selectedConversationID = tasks.first(where: { $0.taskID == taskID })?.conversationID
+        messages = []
+        knowledge("list")
         settingsVisible = false
         draftActive = false
         editingTaskID = nil
@@ -106,7 +127,7 @@ final class AppModel {
         composerText = ""
     }
 
-    func beginRename(_ task: Sage_Ipc_V1_TaskUpdate) {
+    func beginRename(_ task: Sage_Ipc_V2_TaskUpdate) {
         settingsVisible = false
         editingTaskID = task.taskID
         editingTaskTitle = displayTitle(for: task)
@@ -132,6 +153,7 @@ final class AppModel {
             taskMetadata[taskID] = metadata
         }
         persistTaskMetadata()
+        if let task = tasks.first(where: { $0.taskID == taskID }) { updateConversation(task, title: title) }
         editingTaskID = nil
     }
 
@@ -140,13 +162,14 @@ final class AppModel {
     }
 
     func togglePinned(_ taskID: String) {
+        if let task = tasks.first(where: { $0.taskID == taskID }) { updateConversation(task, pinned: !isPinned(taskID)); return }
         var metadata = taskMetadata[taskID] ?? TaskMetadata()
         metadata.pinned.toggle()
         taskMetadata[taskID] = metadata
         persistTaskMetadata()
     }
 
-    func requestDelete(_ task: Sage_Ipc_V1_TaskUpdate) {
+    func requestDelete(_ task: Sage_Ipc_V2_TaskUpdate) {
         editingTaskID = nil
         deleteCandidateID = task.taskID
         deleteCandidateTitle = displayTitle(for: task)
@@ -159,6 +182,7 @@ final class AppModel {
 
     func confirmDelete() {
         guard let taskID = deleteCandidateID else { return }
+        if let task = tasks.first(where: { $0.taskID == taskID }) { updateConversation(task, archived: true) }
         if let task = tasks.first(where: { $0.taskID == taskID }), !isFinished(task.status) {
             cancel(taskID: taskID)
         }
@@ -180,6 +204,10 @@ final class AppModel {
         guard !started else { return }
         started = true
         configureVoiceInput()
+        client.onAdapterRequest = { [weak self] request in
+            guard let self else { return Sage_Ipc_V2_AdapterResult() }
+            return await self.platformAdapter.handle(request)
+        }
         do {
             let secret = try IPCSecretStore().loadOrCreateSecret()
             do {
@@ -209,7 +237,7 @@ final class AppModel {
         supervisor.detach()
     }
 
-    func submit(source: Sage_Ipc_V1_InputSource = .typed) {
+    func submit(source: Sage_Ipc_V2_InputSource = .typed) {
         let request = composerText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !request.isEmpty, !isSubmitting, !selectedTaskIsActive else { return }
         if request == lastSubmittedRequest,
@@ -220,11 +248,13 @@ final class AppModel {
         lastSubmittedRequest = request
         lastSubmittedAt = Date()
         isSubmitting = true
+        if selectedConversationID == nil { selectedConversationID = UUID().uuidString.lowercased() }
         draftActive = false
         composerText = ""
         Task {
             do {
-                try await client.submitTask(request, source: source)
+                try await client.submitTask(request, source: source, conversationID: selectedConversationID ?? "", folders: taskFolders)
+                taskFolders = []
                 if source == .voice {
                     voiceInteractionExecuting(request)
                 }
@@ -236,7 +266,21 @@ final class AppModel {
         }
     }
 
-    func approve(_ approval: Sage_Ipc_V1_ApprovalRequest) {
+    func unlockHistory() {
+        Task { do { try await client.unlockStorage() } catch { errorMessage = error.localizedDescription } }
+    }
+
+    func chooseTaskFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = true
+        panel.message = "Allow this task to read files in the selected folders. Changes will still need approval."
+        panel.prompt = "Allow reading"
+        if panel.runModal() == .OK { taskFolders = panel.urls.map(\.path) }
+    }
+
+    func approve(_ approval: Sage_Ipc_V2_ApprovalRequest) {
         Task {
             do {
                 let authenticated: Bool
@@ -259,7 +303,7 @@ final class AppModel {
         }
     }
 
-    func deny(_ approval: Sage_Ipc_V1_ApprovalRequest) {
+    func deny(_ approval: Sage_Ipc_V2_ApprovalRequest) {
         Task {
             do {
                 try await client.resolveApproval(
@@ -274,7 +318,7 @@ final class AppModel {
         }
     }
 
-    func answer(_ answer: String, question: Sage_Ipc_V1_QuestionRequest) {
+    func answer(_ answer: String, question: Sage_Ipc_V2_QuestionRequest) {
         Task {
             do {
                 try await client.answer(question, text: answer)
@@ -317,6 +361,8 @@ final class AppModel {
             return
         }
         selectedTaskID = nil
+        selectedConversationID = nil
+        messages = []
         timeline = []
         composerText = ""
         editingTaskID = nil
@@ -332,6 +378,67 @@ final class AppModel {
                 errorMessage = error.localizedDescription
             }
         }
+    }
+
+    private func applyKnowledge(_ json: String) {
+        guard let data = try? decodeKnowledge(KnowledgeData.self, json) else { return }
+        conversations = data.conversations; memories = data.memories; memoryEnabled = data.memoryEnabled
+        let incoming = data.messages.filter { $0.conversationId == selectedConversationID }
+        if !incoming.isEmpty { messages = incoming }
+    }
+
+    func knowledge(_ operation: String, id: String = "", content: String = "", enabled: Bool = true) {
+        var request = Sage_Ipc_V2_KnowledgeCommand()
+        request.operation = operation; request.id = id; request.content = content; request.enabled = enabled
+        request.conversationID = selectedConversationID ?? ""
+        Task { do { try await client.knowledge(request) } catch { errorMessage = error.localizedDescription } }
+    }
+
+    private func updateConversation(_ task: Sage_Ipc_V2_TaskUpdate, title: String? = nil, pinned: Bool? = nil, archived: Bool = false) {
+        var request = Sage_Ipc_V2_KnowledgeCommand()
+        request.operation = "conversation"; request.id = task.conversationID
+        request.content = title ?? displayTitle(for: task); request.pinned = pinned ?? isPinned(task.taskID); request.archived = archived
+        request.conversationID = selectedConversationID ?? ""
+        Task {
+            do {
+                if archived && !isFinished(task.status) { try await client.control(taskID: task.taskID, operation: .cancel) }
+                try await client.knowledge(request)
+                try await client.requestState(includeCompleted: true)
+            } catch { errorMessage = error.localizedDescription }
+        }
+    }
+
+    func workflow(_ operation: String, id: String = "", name: String = "", json: String = "") {
+        var request = Sage_Ipc_V2_WorkflowCommand()
+        request.operation = operation; request.id = id; request.name = name; request.json = json
+        request.conversationID = selectedConversationID ?? ""
+        Task { do { try await client.workflow(request) } catch { errorMessage = error.localizedDescription } }
+    }
+
+    func schedule(name: String, request: String, date: Date, interval: Int, folder: String) {
+        let formatter = ISO8601DateFormatter()
+        let trigger: [String: Any]
+        if !folder.isEmpty { trigger = ["kind": "folder_changed", "path": folder] }
+        else if interval > 0 { trigger = ["kind": "interval", "seconds": interval] }
+        else { trigger = ["kind": "once", "at": formatter.string(from: date)] }
+        let record: [String: Any] = ["id": UUID().uuidString.lowercased(), "name": name, "request": request,
+            "conversation_id": UUID().uuidString.lowercased(), "trigger": trigger, "enabled": true,
+            "next_run_at": formatter.string(from: date), "last_condition": false]
+        if let data = try? JSONSerialization.data(withJSONObject: record) {
+            var command = Sage_Ipc_V2_WorkflowCommand()
+            command.operation = "save_schedule"; command.json = String(decoding: data, as: UTF8.self)
+            command.backgroundExpiresAtUnixMs = Int64(Date().addingTimeInterval(30 * 86400).timeIntervalSince1970 * 1000)
+            command.maximumRuns = 100
+            if !folder.isEmpty {
+                var scope = Sage_Ipc_V2_ResourceScope(); scope.root = folder; scope.effects = [.read]
+                command.backgroundResources = [scope]
+            }
+            Task { do { try await client.workflow(command) } catch { errorMessage = error.localizedDescription } }
+        }
+    }
+
+    func resume(taskID: String) {
+        Task { do { try await client.control(taskID: taskID, operation: .resume); refreshState() } catch { errorMessage = error.localizedDescription } }
     }
 
     func toggleVoiceInput() {
@@ -458,10 +565,14 @@ final class AppModel {
         throw finalError ?? SageClientError.connectionFailed("SAGE Core did not open its socket")
     }
 
-    private func consume(_ event: Sage_Ipc_V1_CoreEvent) {
+    private func consume(_ event: Sage_Ipc_V2_CoreEvent) {
         switch event.event {
         case .stateSnapshot(let snapshot):
+            storageLocked = snapshot.storageLocked
+            pendingApproval = snapshot.pendingApprovals.first
             tasks = snapshot.tasks
+            if snapshot.hasKnowledge { applyKnowledge(snapshot.knowledge.json) }
+            if let conversation = selectedConversationID, let latest = tasks.first(where: { $0.conversationID == conversation }) { selectedTaskID = latest.taskID }
             providerSettings = snapshot.providerSettings.first
             if providerSaving {
                 providerSaving = false
@@ -469,6 +580,8 @@ final class AppModel {
             }
             if selectedTaskID == nil, !draftActive {
                 selectedTaskID = visibleTasks.first?.taskID
+                selectedConversationID = visibleTasks.first?.conversationID
+                knowledge("list")
                 if let selectedTaskID {
                     timeline = timelinesByTaskID[selectedTaskID] ?? []
                 }
@@ -509,6 +622,7 @@ final class AppModel {
         case .questionRequest(let question):
             pendingQuestion = question
         case .error(let error):
+            isSubmitting = false
             providerSaving = false
             providerTesting = false
             errorMessage = error.message
@@ -516,7 +630,19 @@ final class AppModel {
         case .providerConnectionResult(let result):
             providerTesting = false
             providerTestMessage = result.success ? result.message : "Test failed: \(result.message)"
-        case .notification, .modelResponseDelta, .permissionRequest, nil:
+        case .knowledgeState(let state): applyKnowledge(state.json)
+        case .workflowState(let state):
+            if let data = try? decodeKnowledge(WorkflowData.self, state.json) { skills = data.skills; workflows = data.workflows; schedules = data.schedules }
+        case .notification:
+            isSubmitting = false
+            refreshState()
+            knowledge("list")
+        case .modelResponseDelta(let delta):
+            if let index = tasks.firstIndex(where: { $0.taskID == delta.taskID }) {
+                if !delta.finished { tasks[index].finalOutcome = delta.text }
+            }
+            if delta.finished { refreshState(); knowledge("list") }
+        case .permissionRequest, nil:
             break
         }
     }
@@ -563,7 +689,7 @@ final class AppModel {
         UserDefaults.standard.set(data, forKey: Self.taskMetadataKey)
     }
 
-    private func isFinished(_ status: Sage_Ipc_V1_TaskStatus) -> Bool {
+    private func isFinished(_ status: Sage_Ipc_V2_TaskStatus) -> Bool {
         [.succeeded, .failed, .cancelled, .interrupted].contains(status)
     }
 

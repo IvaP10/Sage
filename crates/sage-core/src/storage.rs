@@ -15,6 +15,9 @@ use crate::events::CoreEvent;
 #[derive(Clone)]
 pub struct LocalStore {
     connection: Arc<Mutex<Connection>>,
+    path: std::path::PathBuf,
+    unlocked: Arc<std::sync::atomic::AtomicBool>,
+    pub(crate) audit_lock: Arc<Mutex<()>>,
 }
 
 impl std::fmt::Debug for LocalStore {
@@ -24,27 +27,80 @@ impl std::fmt::Debug for LocalStore {
 }
 
 impl LocalStore {
-    pub fn open(path: &Path) -> CoreResult<Self> {
+    /// Startup uses an empty, volatile store. OS key access only happens after
+    /// an explicit user operation calls unlock; no history is copied here.
+    pub fn deferred(path: &Path) -> CoreResult<Self> {
+        let store = Self {
+            connection: Arc::new(Mutex::new(Connection::open_in_memory()?)),
+            path: path.into(),
+            unlocked: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            audit_lock: Arc::new(Mutex::new(())),
+        };
+        store.migrate()?;
+        store.migrate_journal()?;
+        Ok(store)
+    }
+
+    pub fn is_locked(&self) -> bool {
+        !self.unlocked.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    pub fn open_encrypted(path: &Path, key: &crate::secrets::SecretBytes) -> CoreResult<Self> {
+        if key.expose().len() != 32 {
+            return Err(CoreError::Storage("Invalid database key length".into()));
+        }
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let connection =
-            Connection::open(path).map_err(|error| CoreError::Storage(error.to_string()))?;
-        connection
-            .pragma_update(None, "journal_mode", "WAL")
-            .map_err(|error| CoreError::Storage(error.to_string()))?;
-        connection
-            .pragma_update(None, "foreign_keys", "ON")
-            .map_err(|error| CoreError::Storage(error.to_string()))?;
-        connection
-            .pragma_update(None, "busy_timeout", 5_000)
-            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        crate::vault::migrate_plaintext(path, key)?;
+        let connection = crate::vault::open_encrypted(path, key)?;
         let store = Self {
             connection: Arc::new(Mutex::new(connection)),
+            path: path.into(),
+            unlocked: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            audit_lock: Arc::new(Mutex::new(())),
         };
         store.migrate()?;
+        store.migrate_journal()?;
         store.mark_incomplete_tasks_interrupted()?;
         Ok(store)
+    }
+
+    pub fn unlock(&self, secrets: &dyn crate::secrets::SecretStore) -> CoreResult<bool> {
+        if !self.is_locked() {
+            return Ok(false);
+        }
+        let key = match secrets.get("database-v2")? {
+            Some(key) => key,
+            None => {
+                if self.path.exists() && !crate::vault::is_plaintext(&self.path)? {
+                    return Err(CoreError::Storage("The encrypted database key is unavailable. Restore its OS credential before opening history.".into()));
+                }
+                let mut bytes = vec![0; 32];
+                getrandom::fill(&mut bytes)
+                    .map_err(|_| CoreError::SecretStore("Randomness unavailable".into()))?;
+                let key = crate::secrets::SecretBytes::new(bytes);
+                secrets.set("database-v2", &key)?;
+                key
+            }
+        };
+        let replacement = Self::open_encrypted(&self.path, &key)?;
+        replacement.migrate_knowledge()?;
+        replacement.migrate_workflows()?;
+        replacement.checkpoint_audit(secrets)?;
+        replacement.retire_expired_artifacts()?;
+        let mut target = self
+            .connection
+            .lock()
+            .map_err(|_| CoreError::Storage("Database lock poisoned".into()))?;
+        let mut source = replacement
+            .connection
+            .lock()
+            .map_err(|_| CoreError::Storage("Database lock poisoned".into()))?;
+        std::mem::swap(&mut *target, &mut *source);
+        self.unlocked
+            .store(true, std::sync::atomic::Ordering::Release);
+        Ok(true)
     }
 
     fn migrate(&self) -> CoreResult<()> {
@@ -54,6 +110,10 @@ impl LocalStore {
                 CREATE TABLE IF NOT EXISTS schema_migrations (
                     version INTEGER PRIMARY KEY,
                     applied_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS private_artifacts (
+                    id TEXT PRIMARY KEY, task_id TEXT NOT NULL, content BLOB NOT NULL,
+                    sha256 TEXT NOT NULL, expires_at TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS tasks (
                     id TEXT PRIMARY KEY,
@@ -153,7 +213,62 @@ impl LocalStore {
                 VALUES (1, CURRENT_TIMESTAMP);
                 "#,
             )?;
+            let migrated: bool = connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=5)", [], |row| row.get(0))?;
+            if !migrated {
+                // Legacy account names did not identify an endpoint. Keep the
+                // OS secret intact, but never automatically release it to a
+                // destination inferred from old settings.
+                let tx = connection.transaction()?;
+                tx.execute("UPDATE settings SET value_json=json_set(value_json,'$.has_api_key',json('false')) WHERE key='provider.reasoning'", [])?;
+                tx.execute("INSERT INTO schema_migrations VALUES(5,CURRENT_TIMESTAMP)", [])?;
+                tx.commit()?;
+            }
             Ok(())
+        })
+    }
+
+    pub(crate) fn database_path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn save_artifact(&self, task: Uuid, bytes: &[u8]) -> CoreResult<Uuid> {
+        if bytes.len() > 16 * 1024 * 1024 {
+            return Err(CoreError::Storage(
+                "Artifact exceeds the 16 MiB limit".into(),
+            ));
+        }
+        let id = Uuid::new_v4();
+        let digest = format!("{:x}", Sha256::digest(bytes));
+        self.with_connection(|db| {
+            db.execute(
+                "INSERT INTO private_artifacts VALUES(?1,?2,?3,?4,?5)",
+                params![
+                    id.to_string(),
+                    task.to_string(),
+                    bytes,
+                    digest,
+                    (Utc::now() + chrono::Duration::hours(24)).to_rfc3339()
+                ],
+            )?;
+            Ok(())
+        })?;
+        Ok(id)
+    }
+
+    pub fn read_artifact(&self, id: Uuid) -> CoreResult<Vec<u8>> {
+        self.with_connection(|db| {
+            let (bytes, digest, expiry): (Vec<u8>, String, String) = db.query_row(
+                "SELECT content,sha256,expires_at FROM private_artifacts WHERE id=?1",
+                [id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?;
+            if chrono::DateTime::parse_from_rfc3339(&expiry)? <= Utc::now()
+                || format!("{:x}", Sha256::digest(&bytes)) != digest
+            {
+                return Err("Artifact expired or failed integrity verification".into());
+            }
+            Ok(bytes)
         })
     }
 
@@ -377,10 +492,11 @@ impl LocalStore {
 
     pub fn consume_rollback(&self, action_id: Uuid) -> CoreResult<()> {
         self.with_connection(|connection| {
-            connection.execute(
+            let changed=connection.execute(
                 "UPDATE rollback_plans SET consumed_at=?2 WHERE action_id=?1 AND consumed_at IS NULL",
                 params![action_id.to_string(), Utc::now().to_rfc3339()],
             )?;
+            if changed!=1 {return Err(CoreError::ApprovalRejected("Undo was already dispatched".into()).into());}
             Ok(())
         })
     }
@@ -414,7 +530,7 @@ impl LocalStore {
         })
     }
 
-    fn with_connection<T>(
+    pub(crate) fn with_connection<T>(
         &self,
         operation: impl FnOnce(&mut Connection) -> Result<T, Box<dyn std::error::Error + Send + Sync>>,
     ) -> CoreResult<T> {
@@ -445,6 +561,7 @@ fn event_kind_name(event: &CoreEvent) -> &'static str {
     use crate::events::CoreEventKind;
     match &event.kind {
         CoreEventKind::TaskStarted => "task_started",
+        CoreEventKind::ModelResponse { .. } => "model_response",
         CoreEventKind::PlanGenerated { .. } => "plan_generated",
         CoreEventKind::ActionProposed { .. } => "action_proposed",
         CoreEventKind::PolicyDenied { .. } => "policy_denied",

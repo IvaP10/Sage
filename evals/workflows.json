@@ -1,0 +1,808 @@
+{
+  "schema_version": 2,
+  "suite_id": "sage-desktop-v2-100-v1",
+  "status": "fixed_acceptance_specification_not_measured",
+  "repeats": 5,
+  "cases": [
+    {
+      "id": "SAGE-001",
+      "family": "conversation",
+      "outcome": "Explain recursion with a short example",
+      "network_required": false,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-002",
+      "family": "conversation",
+      "outcome": "Compare two supplied approaches",
+      "network_required": false,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-003",
+      "family": "conversation",
+      "outcome": "Rewrite a paragraph concisely",
+      "network_required": false,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-004",
+      "family": "conversation",
+      "outcome": "Translate a supplied sentence",
+      "network_required": false,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-005",
+      "family": "conversation",
+      "outcome": "Summarize the preceding conversation",
+      "network_required": false,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-006",
+      "family": "conversation",
+      "outcome": "Explain an error message supplied by the user",
+      "network_required": false,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-007",
+      "family": "conversation",
+      "outcome": "Answer a basic arithmetic question",
+      "network_required": false,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-008",
+      "family": "conversation",
+      "outcome": "Turn supplied notes into a checklist",
+      "network_required": false,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-009",
+      "family": "conversation",
+      "outcome": "Ask for an essential missing detail",
+      "network_required": false,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-010",
+      "family": "conversation",
+      "outcome": "Answer a follow-up using prior conversation references",
+      "network_required": false,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-011",
+      "family": "read_grounding",
+      "outcome": "Summarize an approved text file",
+      "network_required": false,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-012",
+      "family": "read_grounding",
+      "outcome": "Extract dates from a meeting note",
+      "network_required": false,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-013",
+      "family": "read_grounding",
+      "outcome": "Find the total in a small CSV",
+      "network_required": false,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-014",
+      "family": "read_grounding",
+      "outcome": "Compare two approved documents",
+      "network_required": false,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-015",
+      "family": "read_grounding",
+      "outcome": "Explain a source function without executing it",
+      "network_required": false,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-016",
+      "family": "read_grounding",
+      "outcome": "Extract a project dependency from a manifest",
+      "network_required": false,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-017",
+      "family": "read_grounding",
+      "outcome": "Identify contradictions across two notes",
+      "network_required": false,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-018",
+      "family": "read_grounding",
+      "outcome": "Quote the relevant passage with its source path",
+      "network_required": false,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-019",
+      "family": "read_grounding",
+      "outcome": "Describe a UTF-8 multilingual document",
+      "network_required": false,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-020",
+      "family": "read_grounding",
+      "outcome": "Identify missing information in the actual input",
+      "network_required": false,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-021",
+      "family": "create_artifacts",
+      "outcome": "Write a meeting summary in the selected folder",
+      "network_required": false,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-022",
+      "family": "create_artifacts",
+      "outcome": "Create a Markdown task list from notes",
+      "network_required": false,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-023",
+      "family": "create_artifacts",
+      "outcome": "Write a CSV extracted from a source table",
+      "network_required": false,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-024",
+      "family": "create_artifacts",
+      "outcome": "Create a JSON checklist from instructions",
+      "network_required": false,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-025",
+      "family": "create_artifacts",
+      "outcome": "Write a short code example without execution",
+      "network_required": false,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-026",
+      "family": "create_artifacts",
+      "outcome": "Create a project folder and a README",
+      "network_required": false,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-027",
+      "family": "create_artifacts",
+      "outcome": "Write a bilingual glossary from supplied text",
+      "network_required": false,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-028",
+      "family": "create_artifacts",
+      "outcome": "Produce a source-linked comparison note",
+      "network_required": false,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-029",
+      "family": "create_artifacts",
+      "outcome": "Create a study guide grounded in two files",
+      "network_required": false,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-030",
+      "family": "create_artifacts",
+      "outcome": "Generate a release checklist from an approved manifest",
+      "network_required": false,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-031",
+      "family": "dependent_work",
+      "outcome": "Read a manifest and choose the relevant document",
+      "network_required": false,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-032",
+      "family": "dependent_work",
+      "outcome": "Read an index then summarize its named file",
+      "network_required": false,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-033",
+      "family": "dependent_work",
+      "outcome": "Calculate from one CSV and write the result",
+      "network_required": false,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-034",
+      "family": "dependent_work",
+      "outcome": "Read a generated note and correct its omission",
+      "network_required": false,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-035",
+      "family": "dependent_work",
+      "outcome": "Compare three files then write the differences",
+      "network_required": false,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-036",
+      "family": "dependent_work",
+      "outcome": "Inspect instructions then create the requested folder",
+      "network_required": false,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-037",
+      "family": "dependent_work",
+      "outcome": "Read configuration then explain an observed inconsistency",
+      "network_required": false,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-038",
+      "family": "dependent_work",
+      "outcome": "Combine related notes while retaining file references",
+      "network_required": false,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-039",
+      "family": "dependent_work",
+      "outcome": "Choose the next read using the previous tool result",
+      "network_required": false,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-040",
+      "family": "dependent_work",
+      "outcome": "Finish a bounded workflow with a useful evidence-backed answer",
+      "network_required": false,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-041",
+      "family": "prepared_edits",
+      "outcome": "Review and replace a short paragraph",
+      "network_required": false,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-042",
+      "family": "prepared_edits",
+      "outcome": "Preview a configuration value change",
+      "network_required": false,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-043",
+      "family": "prepared_edits",
+      "outcome": "Update a Markdown checklist after reading it",
+      "network_required": false,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-044",
+      "family": "prepared_edits",
+      "outcome": "Correct a small CSV entry with approval",
+      "network_required": false,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-045",
+      "family": "prepared_edits",
+      "outcome": "Replace an existing generated report with a verified revision",
+      "network_required": false,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-046",
+      "family": "prepared_edits",
+      "outcome": "Undo an approved file replacement",
+      "network_required": false,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-047",
+      "family": "prepared_edits",
+      "outcome": "Undo creation of a generated file",
+      "network_required": false,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-048",
+      "family": "prepared_edits",
+      "outcome": "Undo creation of an empty task folder",
+      "network_required": false,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-049",
+      "family": "prepared_edits",
+      "outcome": "Review a proposed code edit without running it",
+      "network_required": false,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-050",
+      "family": "prepared_edits",
+      "outcome": "Preserve unrelated content during a targeted replacement",
+      "network_required": false,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-051",
+      "family": "public_research",
+      "outcome": "Fetch and summarize a public text document",
+      "network_required": true,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-052",
+      "family": "public_research",
+      "outcome": "Compare two public documentation pages",
+      "network_required": true,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-053",
+      "family": "public_research",
+      "outcome": "Extract installation prerequisites with source links",
+      "network_required": true,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-054",
+      "family": "public_research",
+      "outcome": "Explain a public JSON dataset field",
+      "network_required": true,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-055",
+      "family": "public_research",
+      "outcome": "List the claims supported by a public article",
+      "network_required": true,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-056",
+      "family": "public_research",
+      "outcome": "Write a cited research note into an approved folder",
+      "network_required": true,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-057",
+      "family": "public_research",
+      "outcome": "Compare public runtime documentation and local project requirements",
+      "network_required": true,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-058",
+      "family": "public_research",
+      "outcome": "Follow an explicitly approved source link",
+      "network_required": true,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-059",
+      "family": "public_research",
+      "outcome": "Extract a small public table without executing page scripts",
+      "network_required": true,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-060",
+      "family": "public_research",
+      "outcome": "Give a sourced answer and identify information absent from the sources",
+      "network_required": true,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-061",
+      "family": "paired_browser",
+      "outcome": "Navigate the paired tab to a same-origin reference",
+      "network_required": true,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-062",
+      "family": "paired_browser",
+      "outcome": "Open a same-origin documentation section",
+      "network_required": true,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-063",
+      "family": "paired_browser",
+      "outcome": "Navigate from an index to a selected article",
+      "network_required": true,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-064",
+      "family": "paired_browser",
+      "outcome": "Open a same-origin page chosen after public research",
+      "network_required": true,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-065",
+      "family": "paired_browser",
+      "outcome": "Navigate the explicitly paired tab while other tabs exist",
+      "network_required": true,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-066",
+      "family": "paired_browser",
+      "outcome": "Report the exact verified final browser URL",
+      "network_required": true,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-067",
+      "family": "paired_browser",
+      "outcome": "Navigate within the paired window after another app was focused",
+      "network_required": true,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-068",
+      "family": "paired_browser",
+      "outcome": "Open an approved same-origin URL with an explicit path",
+      "network_required": true,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-069",
+      "family": "paired_browser",
+      "outcome": "Complete a navigation then answer using verified state",
+      "network_required": true,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-070",
+      "family": "paired_browser",
+      "outcome": "Perform two separately prepared same-origin navigations",
+      "network_required": true,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-071",
+      "family": "memory",
+      "outcome": "Save an explicit preference then inspect it",
+      "network_required": false,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-072",
+      "family": "memory",
+      "outcome": "Use an approved preference in a later answer",
+      "network_required": false,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-073",
+      "family": "memory",
+      "outcome": "Edit an existing preference and use the revision",
+      "network_required": false,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-074",
+      "family": "memory",
+      "outcome": "Forget a retained preference and exclude it from later context",
+      "network_required": false,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-075",
+      "family": "memory",
+      "outcome": "Disable memory before a new conversation",
+      "network_required": false,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-076",
+      "family": "memory",
+      "outcome": "Keep project-specific recall within its scope",
+      "network_required": false,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-077",
+      "family": "memory",
+      "outcome": "Inspect the source of a retained fact",
+      "network_required": false,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-078",
+      "family": "memory",
+      "outcome": "Search retained history for an approved earlier decision",
+      "network_required": false,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-079",
+      "family": "memory",
+      "outcome": "Use a relevant retained fact with provenance",
+      "network_required": false,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-080",
+      "family": "memory",
+      "outcome": "Forget a source and exclude derived summaries from future context",
+      "network_required": false,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-081",
+      "family": "skills",
+      "outcome": "Capture a fully verified task as a disabled draft",
+      "network_required": false,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-082",
+      "family": "skills",
+      "outcome": "Inspect the captured action sequence",
+      "network_required": false,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-083",
+      "family": "skills",
+      "outcome": "Review the exact draft before enabling it",
+      "network_required": false,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-084",
+      "family": "skills",
+      "outcome": "Run a reviewed read-only skill in a fresh task",
+      "network_required": false,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-085",
+      "family": "skills",
+      "outcome": "Run a reviewed creation skill under a current folder scope",
+      "network_required": false,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-086",
+      "family": "skills",
+      "outcome": "Compose two reviewed skills into a workflow",
+      "network_required": false,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-087",
+      "family": "skills",
+      "outcome": "Execute a workflow with result-dependent context",
+      "network_required": false,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-088",
+      "family": "skills",
+      "outcome": "Inspect the verification result of a reusable workflow",
+      "network_required": false,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-089",
+      "family": "skills",
+      "outcome": "Run a reviewed skill after restarting with fresh authorization",
+      "network_required": false,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-090",
+      "family": "skills",
+      "outcome": "Create a new draft from an improved verified workflow",
+      "network_required": false,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-091",
+      "family": "schedules",
+      "outcome": "Create a one-time scoped background task",
+      "network_required": false,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-092",
+      "family": "schedules",
+      "outcome": "Create an interval task with a finite run budget",
+      "network_required": false,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-093",
+      "family": "schedules",
+      "outcome": "Run a scoped folder-change task",
+      "network_required": false,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-094",
+      "family": "schedules",
+      "outcome": "Retain a folder event while an earlier run is active",
+      "network_required": false,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-095",
+      "family": "schedules",
+      "outcome": "Pause scheduled work for an additional concrete approval",
+      "network_required": false,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-096",
+      "family": "schedules",
+      "outcome": "Resume retained scheduled work after reviewing its scope",
+      "network_required": false,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-097",
+      "family": "schedules",
+      "outcome": "Disable a schedule and cancel its active firing",
+      "network_required": false,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-098",
+      "family": "schedules",
+      "outcome": "Delete a schedule and prevent future firings",
+      "network_required": false,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-099",
+      "family": "schedules",
+      "outcome": "Inspect the reason a background task stopped at expiry",
+      "network_required": false,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    },
+    {
+      "id": "SAGE-100",
+      "family": "schedules",
+      "outcome": "Review an interrupted firing before re-enabling a schedule",
+      "network_required": false,
+      "setup": "Use synthetic fixtures in a disposable granted workspace; use test origins/accounts for external work. Record exact fixture hashes and granted scopes.",
+      "verification": "Record independent result evidence and artifact hashes, permissions/approval count and measured cost. The model answer alone is not proof."
+    }
+  ]
+}

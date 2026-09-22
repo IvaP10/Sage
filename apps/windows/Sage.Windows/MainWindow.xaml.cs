@@ -8,11 +8,11 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
-using Sage.Ipc.V1;
+using Sage.Ipc.V2;
 using Windows.System;
 using Windows.UI;
 using Windows.UI.Core;
-using WireTaskStatus = Sage.Ipc.V1.TaskStatus;
+using WireTaskStatus = Sage.Ipc.V2.TaskStatus;
 
 namespace Sage.Windows;
 
@@ -20,11 +20,19 @@ public sealed partial class MainWindow : Window
 {
     private readonly CoreSupervisor _supervisor = new();
     private readonly SageCoreClient _client = new();
+    private readonly PlatformAdapter _platformAdapter = new();
     private readonly TaskMetadataStore _taskMetadata = new();
     private readonly ObservableCollection<TaskRow> _tasks = [];
     private readonly ObservableCollection<AgentEvent> _timeline = [];
     private readonly Dictionary<string, List<AgentEvent>> _timelineByTaskId = [];
     private string? _selectedTaskId;
+    private string? _selectedConversationId;
+    private readonly List<JsonElement> _conversationRecords = [];
+    private readonly List<JsonElement> _messages = [];
+    private readonly List<JsonElement> _memories = [];
+    private bool _memoryEnabled = true;
+    private StackPanel? _memoryPanel;
+    private StackPanel? _workflowPanel;
     private bool _draftActive;
     private bool _isSubmitting;
     private ProviderSettings? _providerSettings;
@@ -36,7 +44,8 @@ public sealed partial class MainWindow : Window
         TaskList.ItemsSource = _tasks;
         Timeline.ItemsSource = _timeline;
         _client.EventReceived += OnCoreEvent;
-        Closed += (_, _) => _client.Dispose();
+        _client.AdapterHandler = _platformAdapter.HandleAsync;
+        Closed += (_, _) => { _client.Dispose(); _platformAdapter.Dispose(); };
         TaskToolbar.Visibility = Visibility.Collapsed;
         EmptyState.Visibility = Visibility.Visible;
         Composer_TextChanged(Composer, null!);
@@ -112,21 +121,43 @@ public sealed partial class MainWindow : Window
                 case CoreEvent.EventOneofCase.ProviderConnectionResult:
                     _providerTestWaiter?.TrySetResult(coreEvent.ProviderConnectionResult);
                     break;
+                case CoreEvent.EventOneofCase.KnowledgeState:
+                    LoadKnowledge(coreEvent.KnowledgeState.Json);
+                    if (SelectedTask is { } selectedTask) RefreshTimeline(selectedTask);
+                    break;
+                case CoreEvent.EventOneofCase.WorkflowState:
+                    LoadWorkflows(coreEvent.WorkflowState.Json);
+                    break;
+                case CoreEvent.EventOneofCase.ModelResponseDelta:
+                    var delta = coreEvent.ModelResponseDelta;
+                    if (_tasks.FirstOrDefault(row => row.TaskId == delta.TaskId) is { } streamingRow) { streamingRow.Task.FinalOutcome = delta.Text; UpsertTask(streamingRow.Task); }
+                    break;
+                case CoreEvent.EventOneofCase.Notification:
+                    _isSubmitting = false;
+                    await _client.RequestStateAsync(true);
+                    await _client.KnowledgeAsync(new KnowledgeCommand { Operation = "list", ConversationId = _selectedConversationId ?? "" });
+                    break;
             }
         });
     }
 
     private void LoadSnapshot(StateSnapshot snapshot)
     {
+        UnlockHistoryButton.Visibility = snapshot.StorageLocked ? Visibility.Visible : Visibility.Collapsed;
         _providerSettings = snapshot.ProviderSettings.FirstOrDefault(item => item.Role == "reasoning");
+        if (snapshot.Knowledge is not null) LoadKnowledge(snapshot.Knowledge.Json);
         _tasks.Clear();
-        foreach (var task in snapshot.Tasks)
+        foreach (var task in snapshot.Tasks.GroupBy(task => string.IsNullOrEmpty(task.ConversationId) ? task.TaskId : task.ConversationId).Select(group => group.First()))
         {
-            if (!_taskMetadata.IsDeleted(task.TaskId))
+            if (!_taskMetadata.IsDeleted(task.TaskId) && (_conversationRecords.Count == 0 || _conversationRecords.Any(record => J(record, "id") == task.ConversationId)))
             {
-                _tasks.Add(new TaskRow(task, _taskMetadata.Get(task.TaskId)));
+                var metadata = _taskMetadata.Get(task.TaskId);
+                var record = _conversationRecords.FirstOrDefault(record => J(record, "id") == task.ConversationId);
+                if (record.ValueKind == JsonValueKind.Object) { metadata.Title = J(record, "title"); metadata.Pinned = record.GetProperty("pinned").GetBoolean(); }
+                _tasks.Add(new TaskRow(task, metadata));
             }
         }
+        if (_selectedConversationId is not null) _selectedTaskId = _tasks.FirstOrDefault(row => row.Task.ConversationId == _selectedConversationId)?.TaskId ?? _selectedTaskId;
         ReorderTasks();
 
         if (_selectedTaskId is not null)
@@ -218,6 +249,9 @@ public sealed partial class MainWindow : Window
     {
         _draftActive = false;
         _selectedTaskId = row.TaskId;
+        var changedConversation = _selectedConversationId != row.Task.ConversationId;
+        _selectedConversationId = row.Task.ConversationId;
+        if (changedConversation) { _messages.Clear(); _ = _client.KnowledgeAsync(new KnowledgeCommand { Operation = "list", ConversationId = _selectedConversationId }); }
         TaskList.SelectedItem = row;
         foreach (var task in _tasks) task.SetSelected(task.TaskId == _selectedTaskId);
         SetTaskHeader(row);
@@ -230,6 +264,8 @@ public sealed partial class MainWindow : Window
     {
         _draftActive = true;
         _selectedTaskId = null;
+        _selectedConversationId = null;
+        _messages.Clear();
         TaskList.SelectedItem = null;
         foreach (var task in _tasks) task.SetSelected(false);
         _timeline.Clear();
@@ -254,6 +290,8 @@ public sealed partial class MainWindow : Window
         TaskTitle.Text = row.Request;
         UndoButton.Visibility = row.Task.UndoAvailable ? Visibility.Visible : Visibility.Collapsed;
         StopButton.Visibility = IsFinished(row.Task.Status) ? Visibility.Collapsed : Visibility.Visible;
+        ResumeButton.Visibility = row.Task.Status is WireTaskStatus.Interrupted or WireTaskStatus.Paused ? Visibility.Visible : Visibility.Collapsed;
+        SaveSkillButton.Visibility = row.Task.Status == WireTaskStatus.Succeeded && row.Task.TotalActions > 0 ? Visibility.Visible : Visibility.Collapsed;
     }
 
     private void RefreshTimeline(TaskRow? row)
@@ -266,6 +304,10 @@ public sealed partial class MainWindow : Window
         }
 
         EmptyState.Visibility = Visibility.Collapsed;
+
+        foreach (var message in _messages) _timeline.Add(new AgentEvent { TaskId = J(message, "task_id"), Title = J(message, "role") == "user" ? "You" : "Sage", Detail = J(message, "content"), Kind = "message" });
+        if (row.Task.Status is WireTaskStatus.Interrupted or WireTaskStatus.Paused)
+            foreach (var action in row.Task.Actions) _timeline.Add(new AgentEvent { TaskId = row.TaskId, ActionId = action.ActionId, Title = action.Summary, Detail = action.Status, Kind = "recovery" });
 
         if (_timelineByTaskId.TryGetValue(row.TaskId, out var events))
         {
@@ -362,7 +404,10 @@ public sealed partial class MainWindow : Window
         UpdateComposerActions();
         try
         {
-            await _client.SubmitTaskAsync(request);
+            _selectedConversationId ??= Guid.NewGuid().ToString();
+            await _client.SubmitTaskAsync(request, _selectedConversationId, _taskFolder);
+            _taskFolder = null;
+            ScopeButton.Content = "Folder";
         }
         catch (Exception error)
         {
@@ -372,6 +417,23 @@ public sealed partial class MainWindow : Window
             UpdateComposerActions();
             await ShowErrorAsync(error.Message);
         }
+    }
+
+    private async void UnlockHistory_Click(object sender, RoutedEventArgs e)
+    {
+        try { await _client.UnlockStorageAsync(); } catch (Exception error) { await ShowErrorAsync(error.Message); }
+    }
+    private string? _taskFolder;
+    private async void Scope_Click(object sender, RoutedEventArgs e)
+    {
+        var picker = new Windows.Storage.Pickers.FolderPicker();
+        picker.FileTypeFilter.Add("*");
+        WinRT.Interop.InitializeWithWindow.Initialize(picker, WinRT.Interop.WindowNative.GetWindowHandle(this));
+        var folder = await picker.PickSingleFolderAsync();
+        if (folder is null) return;
+        var dialog = new ContentDialog { XamlRoot = Root.XamlRoot, Title = "Allow this task to read files?",
+            Content = folder.Path + "\nChanges still need approval.", PrimaryButtonText = "Allow reading", CloseButtonText = "Cancel" };
+        if (await dialog.ShowAsync() == ContentDialogResult.Primary) { _taskFolder = folder.Path; ScopeButton.Content = folder.Name; }
     }
 
     private void TaskRow_PointerEntered(object sender, PointerRoutedEventArgs e)
@@ -409,15 +471,17 @@ public sealed partial class MainWindow : Window
         var title = editor.Text.Trim();
         if (title.Length == 0) return;
         _taskMetadata.SetTitle(row.TaskId, title);
+        await _client.KnowledgeAsync(new KnowledgeCommand { Operation = "conversation", Id = row.Task.ConversationId, Content = title, Pinned = row.IsPinned });
         row.SetPresentation(_taskMetadata.Get(row.TaskId));
         ReorderTasks();
         if (_selectedTaskId == row.TaskId) SetTaskHeader(row);
     }
 
-    private void TogglePin_Click(object sender, RoutedEventArgs e)
+    private async void TogglePin_Click(object sender, RoutedEventArgs e)
     {
         if ((sender as MenuFlyoutItem)?.Tag is not TaskRow row) return;
         _taskMetadata.TogglePinned(row.TaskId);
+        await _client.KnowledgeAsync(new KnowledgeCommand { Operation = "conversation", Id = row.Task.ConversationId, Content = row.Request, Pinned = !row.IsPinned });
         row.SetPresentation(_taskMetadata.Get(row.TaskId));
         ReorderTasks();
     }
@@ -441,6 +505,7 @@ public sealed partial class MainWindow : Window
             catch { /* The history entry can still be removed locally. */ }
         }
         _taskMetadata.MarkDeleted(row.TaskId);
+        await _client.KnowledgeAsync(new KnowledgeCommand { Operation = "conversation", Id = row.Task.ConversationId, Content = row.Request, Pinned = row.IsPinned, Archived = true });
         var wasSelected = _selectedTaskId == row.TaskId;
         if (wasSelected)
         {
@@ -493,13 +558,20 @@ public sealed partial class MainWindow : Window
         panel.Children.Add(removeKey);
         panel.Children.Add(test);
         panel.Children.Add(status);
+        _memoryPanel = new StackPanel { Spacing = 10 };
+        _workflowPanel = new StackPanel { Spacing = 10 };
+        panel.Children.Add(_memoryPanel);
+        panel.Children.Add(_workflowPanel);
+        RenderMemories();
+        await _client.KnowledgeAsync(new KnowledgeCommand { Operation = "list", ConversationId = _selectedConversationId ?? "" });
+        await _client.WorkflowAsync(new WorkflowCommand { Operation = "list" });
         var dialog = new ContentDialog
         {
             XamlRoot = Root.XamlRoot,
             Title = "Settings",
-            Content = panel,
+            Content = new ScrollViewer { Content = panel, MaxHeight = 600 },
             PrimaryButtonText = "Save",
-            CloseButtonText = "Done",
+            CloseButtonText = "Back",
             DefaultButton = ContentDialogButton.Primary,
         };
         test.Click += async (_, _) =>

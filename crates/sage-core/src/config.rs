@@ -17,6 +17,8 @@ pub struct CoreConfig {
     pub recovery_dir: PathBuf,
     pub ipc_endpoint: IpcEndpoint,
     pub maximum_replans: u32,
+    /// Additional installed assets that agent file tools must never access.
+    pub protected_paths: Vec<PathBuf>,
 }
 
 impl CoreConfig {
@@ -36,7 +38,7 @@ impl CoreConfig {
         #[cfg(unix)]
         let ipc_endpoint = IpcEndpoint::UnixSocket(data_dir.join("sage-core.sock"));
         #[cfg(windows)]
-        let ipc_endpoint = IpcEndpoint::NamedPipe(r"\\.\pipe\sage-core-v1".into());
+        let ipc_endpoint = IpcEndpoint::NamedPipe(r"\\.\pipe\sage-core-v2".into());
 
         Ok(Self {
             data_dir,
@@ -44,6 +46,7 @@ impl CoreConfig {
             recovery_dir,
             ipc_endpoint,
             maximum_replans: 2,
+            protected_paths: Vec::new(),
         })
     }
 
@@ -61,6 +64,7 @@ impl CoreConfig {
                 uuid::Uuid::new_v4()
             )),
             maximum_replans: 1,
+            protected_paths: Vec::new(),
         }
     }
 }

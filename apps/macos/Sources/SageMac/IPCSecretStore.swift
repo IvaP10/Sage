@@ -23,7 +23,7 @@ struct IPCSecretStore {
             [.posixPermissions: 0o700],
             ofItemAtPath: directory.path
         )
-        let keyURL = directory.appendingPathComponent("ipc-auth.key", isDirectory: false)
+        let keyURL = directory.appendingPathComponent("ipc-auth-v2.key", isDirectory: false)
         do {
             return try loadSecret(at: keyURL)
         } catch let error as NSError where error.domain == NSPOSIXErrorDomain && error.code == Int(ENOENT) {
