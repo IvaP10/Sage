@@ -37,8 +37,6 @@ if (-not (Test-Path $appExecutable)) {
 $rustOutput = Join-Path $repositoryRoot "target/x86_64-pc-windows-msvc/release"
 Copy-Item "$rustOutput/sage-core.exe" $output
 Copy-Item "$rustOutput/sage-browser-worker.exe" $output
-Copy-Item "$rustOutput/sage-sandbox-worker.exe" $output
-Copy-Item "$rustOutput/sage-privileged-helper.exe" $output
 
 $iscc = (Get-Command ISCC.exe -ErrorAction Stop).Source
 if (Test-Path $installer) { Remove-Item -Force $installer }

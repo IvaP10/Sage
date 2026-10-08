@@ -1,0 +1,17 @@
+[0/1] Planning build
+[1/1] Compiling plugin SwiftProtobufPlugin
+Building for debugging...
+[1/5] Write sources
+[2/5] Write swift-version--1AB21518FC5DEDBE.txt
+[4/7] Compiling SageMac PlatformAdapter.swift
+[5/7] Emitting module SageMac
+[5/8] Write Objects.LinkFileList
+[6/8] Linking SageMac
+[7/8] Applying SageMac
+Build complete! (3.12s)
+PASS: bounded architecture table accepts valid slices and rejects malformed inputs
+PASS: signed system bundle accepted; changed path, signer and digest rejected
+PASS: unsigned fixture bundle rejected
+PASS: existing Finder process matched to signed bundle; invalid PID rejected
+PASS: missing typed identity and incorrect operation authority rejected before launch
+No application was launched or activated. These checks do not qualify the complete approval/launch flow.

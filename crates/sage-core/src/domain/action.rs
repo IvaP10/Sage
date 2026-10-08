@@ -35,15 +35,65 @@ pub enum Condition {
     ElementPresent { selector: ElementSelector },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ExpectedOutcome {
-    PublicResource { url: String },
-    Condition { condition: Condition },
-    FileContains { path: PathBuf, sha256: String },
-    CommandExit { code: i32 },
-    ExternalSuccess { marker: String },
+    DirectoryPage {
+        path: PathBuf,
+        page_size: u32,
+        cursor: Option<String>,
+    },
+    SignedApplication {
+        target: crate::application_target::ApplicationTarget,
+    },
+    ApplicationControlValue {
+        target: crate::application_target::ApplicationTarget,
+        control_id: String,
+        value: ApplicationControlValue,
+    },
+    PublicResource {
+        url: String,
+    },
+    Condition {
+        condition: Condition,
+    },
+    FileContains {
+        path: PathBuf,
+        sha256: String,
+    },
+    FileMatchesStream {
+        path: PathBuf,
+        channel_id: String,
+        producer_node: String,
+        maximum_bytes: u64,
+    },
+    CommandExit {
+        code: i32,
+    },
+    ExternalSuccess {
+        marker: String,
+    },
     UserAnswered,
+}
+
+/// The only value types exposed by Sage's first-party learned application
+/// control primitive. These values remain data; the native adapter never
+/// interprets them as code or selectors.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ApplicationControlValue {
+    Boolean(bool),
+    Number(f64),
+}
+
+impl ApplicationControlValue {
+    pub fn validate(&self) -> Result<(), String> {
+        match self {
+            Self::Boolean(_) => Ok(()),
+            Self::Number(value) if value.is_finite() => Ok(()),
+            Self::Number(_) => Err("Application control value must be finite".into()),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -56,12 +106,25 @@ pub enum Action {
     OpenApplication {
         application: String,
     },
+    SetApplicationControl {
+        application: String,
+        system_id: Uuid,
+        system_fingerprint: String,
+        capability_id: String,
+        control_id: String,
+        value: ApplicationControlValue,
+    },
     CloseApplication {
         application: String,
     },
     ReadFile {
         path: PathBuf,
         max_bytes: u64,
+    },
+    ListDirectory {
+        path: PathBuf,
+        page_size: u32,
+        cursor: Option<String>,
     },
     WriteFile {
         path: PathBuf,
@@ -142,8 +205,10 @@ impl Action {
         match self {
             Self::FetchPublic { .. } => "fetch_public",
             Self::OpenApplication { .. } => "open_application",
+            Self::SetApplicationControl { .. } => "set_application_control",
             Self::CloseApplication { .. } => "close_application",
             Self::ReadFile { .. } => "read_file",
+            Self::ListDirectory { .. } => "list_directory",
             Self::WriteFile { .. } => "write_file",
             Self::MoveFile { .. } => "move_file",
             Self::DeleteFile { .. } => "delete_file",
@@ -177,6 +242,7 @@ impl Action {
             | Self::SubmitForm { .. } => ExecutionDomain::Browser,
             Self::RunCommand { .. } => ExecutionDomain::Sandbox,
             Self::InstallApplication { .. } => ExecutionDomain::Privileged,
+            Self::SetApplicationControl { .. } => ExecutionDomain::Native,
             Self::AskUser { .. } => ExecutionDomain::UserInteraction,
             _ => ExecutionDomain::Native,
         }
@@ -224,6 +290,17 @@ impl Action {
                     args.len()
                 )
             }
+            Self::SetApplicationControl {
+                application,
+                control_id,
+                value,
+                ..
+            } => format!(
+                "set learned control {} in {} to {}",
+                control_id.chars().take(12).collect::<String>(),
+                application,
+                serde_json::to_string(value).unwrap_or_else(|_| "[invalid]".into())
+            ),
             _ => self.kind().replace('_', " "),
         }
     }

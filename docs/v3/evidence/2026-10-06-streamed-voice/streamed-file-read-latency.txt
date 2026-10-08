@@ -1,0 +1,16 @@
+Command: cargo test --release -p sage-core streamed_file_read_latency -- --ignored --nocapture
+
+    Finished `release` profile [optimized] target(s) in 0.39s
+     Running unittests src/lib.rs (target/release/deps/sage_core-349919b266bf7571)
+
+running 1 test
+streamed_file_read samples=100 p50_ns=2954291 p95_ns=3795542 p99_ns=5874375
+test preparation::tests::streamed_file_read_latency ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 191 filtered out; finished in 0.58s
+
+     Running unittests src/main.rs (target/release/deps/sage_core-d2c185f362abcc85)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s

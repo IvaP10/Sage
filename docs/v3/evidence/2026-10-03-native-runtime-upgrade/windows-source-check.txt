@@ -1,0 +1,2 @@
+XAML parsed and 30 declared event handlers resolved in source.
+No .NET/Windows build or WinUI runtime was available. This check is not compilation.

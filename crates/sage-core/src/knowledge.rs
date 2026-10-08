@@ -227,13 +227,14 @@ impl LocalStore {
             "#)?;
             Ok(())
         })?;
-        // Migration is idempotent and preserves the old task IDs and audit chain.
+        // Migration preserves task IDs; interrupted run projections are closed
+        // below once conversation and memory tables are available.
         for mut task in self.load_tasks(true)? {
             if task.conversation_id.is_none() {
                 let conversation = self.ensure_conversation(Some(task.id), &task.request)?;
                 task.conversation_id = Some(conversation.id);
                 task.message_id = Some(task.id);
-                self.save_task(&task)?;
+                self.save_task(&mut task)?;
                 self.append_message(&Message {
                     id: task.id,
                     conversation_id: conversation.id,
@@ -249,7 +250,7 @@ impl LocalStore {
                 }
             }
         }
-        Ok(())
+        self.reconcile_run_closures()
     }
 
     pub fn ensure_conversation(&self, id: Option<Uuid>, title: &str) -> CoreResult<Conversation> {
@@ -264,6 +265,15 @@ impl LocalStore {
         self.with_connection(|db| {
             let mut statement = db.prepare("SELECT id,title,summary,pinned,archived,created_at,updated_at FROM conversations WHERE archived=0 ORDER BY pinned DESC,updated_at DESC LIMIT 200")?;
             Ok(statement.query_map([], conversation_row)?.collect::<Result<Vec<_>,_>>()?)
+        })
+    }
+
+    /// Resolve an identity directly; the sidebar's display limit is not a
+    /// retention boundary for a conversation selected by an existing task.
+    pub fn conversation(&self, id: Uuid) -> CoreResult<Option<Conversation>> {
+        self.with_connection(|db| {
+            Ok(db.query_row("SELECT id,title,summary,pinned,archived,created_at,updated_at FROM conversations WHERE id=?1 AND archived=0",
+                params![id.to_string()], conversation_row).optional()?)
         })
     }
 
@@ -356,8 +366,7 @@ impl LocalStore {
         record.updated_at = Utc::now();
         self.with_connection(|db| {
             let tx = db.transaction()?;
-            tx.execute("INSERT INTO memory(id,kind,content,metadata_json,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(id) DO UPDATE SET kind=excluded.kind,content=excluded.content,metadata_json=excluded.metadata_json,updated_at=excluded.updated_at", params![record.id.to_string(),serde_json::to_value(record.kind)?.as_str(),record.content,serde_json::to_string(&record.metadata)?,record.created_at.to_rfc3339(),record.updated_at.to_rfc3339()])?;
-            tx.execute("INSERT INTO memory_records(id,subject,confidence,provenance_json,enabled) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(id) DO UPDATE SET subject=excluded.subject,confidence=excluded.confidence,provenance_json=excluded.provenance_json,enabled=excluded.enabled", params![record.id.to_string(),record.subject,record.confidence,serde_json::to_string(&record.provenance)?,record.enabled])?;
+            write_memory(&tx, &record)?;
             tx.commit()?;
             Ok(())
         })?;
@@ -386,6 +395,21 @@ impl LocalStore {
         limit: usize,
         scope: Option<Uuid>,
     ) -> CoreResult<Vec<MemoryRecord>> {
+        self.memories_scoped_kind(query, enabled_only, limit, scope, None)
+    }
+
+    pub fn preferences_scoped(&self, scope: Option<Uuid>) -> CoreResult<Vec<MemoryRecord>> {
+        self.memories_scoped_kind(None, true, 500, scope, Some("preference"))
+    }
+
+    fn memories_scoped_kind(
+        &self,
+        query: Option<&str>,
+        enabled_only: bool,
+        limit: usize,
+        scope: Option<Uuid>,
+        kind: Option<&str>,
+    ) -> CoreResult<Vec<MemoryRecord>> {
         if enabled_only && !self.memory_enabled()? {
             return Ok(Vec::new());
         }
@@ -395,12 +419,12 @@ impl LocalStore {
         }
         self.with_connection(|db| {
             let sql = if search.is_some() {
-                "SELECT m.id,m.kind,m.content,m.metadata_json,m.created_at,m.updated_at,r.subject,r.confidence,r.provenance_json,r.enabled FROM memory m JOIN memory_records r ON r.id=m.id JOIN memory_fts f ON f.memory_id=m.id WHERE memory_fts MATCH ?1 AND (?2=0 OR r.enabled=1) AND (?4 IS NULL OR json_extract(m.metadata_json,'$.scope_id')=?4 OR (m.kind!='episodic' AND json_extract(m.metadata_json,'$.scope_id') IS NULL)) ORDER BY rank,m.updated_at DESC LIMIT ?3"
+                "SELECT m.id,m.kind,m.content,m.metadata_json,m.created_at,m.updated_at,r.subject,r.confidence,r.provenance_json,r.enabled FROM memory m JOIN memory_records r ON r.id=m.id JOIN memory_fts f ON f.memory_id=m.id WHERE memory_fts MATCH ?1 AND (?2=0 OR r.enabled=1) AND (?4 IS NULL OR json_extract(m.metadata_json,'$.scope_id')=?4 OR (m.kind!='episodic' AND json_extract(m.metadata_json,'$.scope_id') IS NULL)) AND (?5 IS NULL OR m.kind=?5) ORDER BY rank,m.updated_at DESC,m.id LIMIT ?3"
             } else {
-                "SELECT m.id,m.kind,m.content,m.metadata_json,m.created_at,m.updated_at,r.subject,r.confidence,r.provenance_json,r.enabled FROM memory m JOIN memory_records r ON r.id=m.id WHERE (?1 IS NULL) AND (?2=0 OR r.enabled=1) AND (?4 IS NULL OR json_extract(m.metadata_json,'$.scope_id')=?4 OR (m.kind!='episodic' AND json_extract(m.metadata_json,'$.scope_id') IS NULL)) ORDER BY m.updated_at DESC LIMIT ?3"
+                "SELECT m.id,m.kind,m.content,m.metadata_json,m.created_at,m.updated_at,r.subject,r.confidence,r.provenance_json,r.enabled FROM memory m JOIN memory_records r ON r.id=m.id WHERE (?1 IS NULL) AND (?2=0 OR r.enabled=1) AND (?4 IS NULL OR json_extract(m.metadata_json,'$.scope_id')=?4 OR (m.kind!='episodic' AND json_extract(m.metadata_json,'$.scope_id') IS NULL)) AND (?5 IS NULL OR m.kind=?5) ORDER BY m.updated_at DESC,m.id LIMIT ?3"
             };
             let mut statement = db.prepare(sql)?;
-            let mut rows = statement.query(params![search,enabled_only,limit.min(500),scope.map(|id|id.to_string())])?;
+            let mut rows = statement.query(params![search,enabled_only,limit.min(500),scope.map(|id|id.to_string()),kind])?;
             let mut records = Vec::new();
             while let Some(row) = rows.next()? {
                 let kind: String = row.get(1)?;
@@ -416,14 +440,21 @@ impl LocalStore {
     }
 
     pub fn delete_memory(&self, id: Uuid) -> CoreResult<()> {
+        let _retention = self
+            .retention_lock
+            .lock()
+            .map_err(|_| CoreError::Storage("Retention lock poisoned".into()))?;
         self.with_connection(|db| {
             let tx=db.transaction()?;
             tx.execute_batch("CREATE TEMP TABLE IF NOT EXISTS forgetting_ids(id TEXT PRIMARY KEY); DELETE FROM forgetting_ids; CREATE TEMP TABLE IF NOT EXISTS forgetting_tasks(id TEXT PRIMARY KEY); DELETE FROM forgetting_tasks;")?;
             tx.execute("INSERT INTO forgetting_ids WITH RECURSIVE children(id) AS (SELECT ?1 UNION SELECT l.child_id FROM memory_lineage l JOIN children c ON c.id=l.parent_id) SELECT id FROM children",params![id.to_string()])?;
             tx.execute_batch("INSERT OR IGNORE INTO forgetting_tasks SELECT task_id FROM context_memory_sources WHERE memory_id IN (SELECT id FROM forgetting_ids);")?;
+            // A cancelled reader may still return. Persist revocation in the
+            // same transaction as deletion so late replies cannot restore it.
+            tx.execute_batch("INSERT OR IGNORE INTO retired_task_data SELECT id,CURRENT_TIMESTAMP FROM forgetting_tasks;")?;
             // Preserve explicit history for inspection, while preventing its
             // retained source or derived answers from re-entering model context.
-            tx.execute_batch("INSERT OR IGNORE INTO excluded_context_messages SELECT messages.id FROM messages WHERE task_id IN (SELECT id FROM forgetting_tasks) OR id IN (SELECT json_extract(provenance_json,'$.source_id') FROM memory_records WHERE id IN (SELECT id FROM forgetting_ids)); DELETE FROM working_memory WHERE conversation_id IN (SELECT conversation_id FROM conversation_tasks WHERE task_id IN (SELECT id FROM forgetting_tasks)); UPDATE conversations SET summary='' WHERE id IN (SELECT conversation_id FROM conversation_tasks WHERE task_id IN (SELECT id FROM forgetting_tasks)); DELETE FROM private_artifacts WHERE task_id IN (SELECT id FROM forgetting_tasks); DELETE FROM memory WHERE id IN (SELECT id FROM forgetting_ids); DELETE FROM forgetting_ids; DELETE FROM forgetting_tasks;")?;
+            tx.execute_batch("INSERT OR IGNORE INTO excluded_context_messages SELECT messages.id FROM messages WHERE task_id IN (SELECT id FROM forgetting_tasks) OR id IN (SELECT json_extract(provenance_json,'$.source_id') FROM memory_records WHERE id IN (SELECT id FROM forgetting_ids)); DELETE FROM working_memory WHERE conversation_id IN (SELECT conversation_id FROM conversation_tasks WHERE task_id IN (SELECT id FROM forgetting_tasks)); UPDATE conversations SET summary='' WHERE id IN (SELECT conversation_id FROM conversation_tasks WHERE task_id IN (SELECT id FROM forgetting_tasks)); DELETE FROM memory WHERE id IN (SELECT id FROM forgetting_ids); DELETE FROM forgetting_ids; DELETE FROM forgetting_tasks;")?;
             tx.execute_batch("DELETE FROM working_memory WHERE conversation_id IN (SELECT conversation_id FROM messages JOIN excluded_context_messages ON messages.id=message_id);")?;
             tx.commit()?;Ok(())
         })?;
@@ -580,126 +611,36 @@ impl LocalStore {
     }
 
     pub fn update_working_memory(&self, task: &Task) -> CoreResult<()> {
-        let Some(conversation_id) = task.conversation_id else {
-            return Ok(());
-        };
-        let mut memory = self
-            .working_memory(conversation_id)?
-            .unwrap_or(WorkingMemory {
-                conversation_id,
-                task_id: task.id,
-                goal: String::new(),
-                resources: Vec::new(),
-                applications: Vec::new(),
-                entities: Vec::new(),
-                recent_actions: Vec::new(),
-                selections: Vec::new(),
-                selection_expires_at: None,
-                expires_at: Utc::now(),
-            });
-        memory.task_id = task.id;
-        memory.goal = clipped(task.goal.as_deref().unwrap_or(&task.request), 500);
-        for state in task
-            .actions
-            .values()
-            .filter(|state| state.status == crate::domain::ActionStatus::Succeeded)
-        {
-            let resource = redact_for_persistence(&state.proposal.target_resource);
-            if !memory.resources.contains(&resource) {
-                memory.resources.push(resource);
-            }
-            let summary = clipped(
-                &redact_for_persistence(state.summary.as_deref().unwrap_or("Verified action")),
-                300,
-            );
-            if !memory.recent_actions.contains(&summary) {
-                memory.recent_actions.push(summary);
-            }
-            let application = match &state.proposal.action {
-                crate::domain::Action::OpenApplication { application }
-                | crate::domain::Action::ClickElement { application, .. }
-                | crate::domain::Action::TypeText { application, .. } => Some(application),
-                _ => None,
-            };
-            if let Some(app) = application
-                && !memory.applications.contains(app)
-            {
-                memory.applications.push(app.clone());
-            }
-        }
-        for values in [
-            &mut memory.resources,
-            &mut memory.recent_actions,
-            &mut memory.applications,
-        ] {
-            if values.len() > 16 {
-                values.drain(..values.len() - 16);
-            }
-        }
-        memory.expires_at = Utc::now() + Duration::hours(2);
-        self.with_connection(|db| { db.execute("INSERT INTO working_memory VALUES(?1,?2,?3) ON CONFLICT(conversation_id) DO UPDATE SET content_json=excluded.content_json,expires_at=excluded.expires_at",params![conversation_id.to_string(),serde_json::to_string(&memory)?,memory.expires_at.to_rfc3339()])?; Ok(()) })
+        self.with_connection(|db| {
+            let tx = db.transaction()?;
+            write_working_memory(&tx, task)?;
+            tx.commit()?;
+            Ok(())
+        })
     }
 
-    pub fn record_outcome(&self, task: &Task) -> CoreResult<()> {
-        let Some(conversation) = task.conversation_id else {
-            return Ok(());
-        };
-        self.append_message(&Message {
-            id: Uuid::new_v4(),
-            conversation_id: conversation,
-            task_id: Some(task.id),
-            role: "assistant".into(),
-            content: task.final_outcome.clone().unwrap_or_default(),
-            provenance: Provenance::external(ProvenanceSource::SageCore, task.id.to_string()),
-            created_at: Utc::now(),
-        })?;
-        if !is_memory_command(&task.request) {
-            self.update_working_memory(task)?;
-        }
-        // Rolling extractive summary: bounded factual outcomes, no additional model call.
+    pub(crate) fn record_outcome(&self, task: &Task) -> CoreResult<()> {
+        let _retention = self
+            .retention_lock
+            .lock()
+            .map_err(|_| CoreError::Storage("Retention lock poisoned".into()))?;
         self.with_connection(|db| {
-            let previous:String=db.query_row("SELECT summary FROM conversations WHERE id=?1",params![conversation.to_string()],|row|row.get(0))?;
-            let mut facts:Vec<serde_json::Value>=serde_json::from_str(&previous).unwrap_or_default();
-            if !facts.iter().any(|fact|fact["task_id"].as_str()==Some(&task.id.to_string())) && !is_memory_command(&task.request) {
-                facts.push(serde_json::json!({"task_id":task.id,"goal":clipped(task.goal.as_deref().unwrap_or(&task.request),180),"outcome":clipped(task.final_outcome.as_deref().unwrap_or(""),220),"resources":task.actions.values().filter(|s|s.status==crate::domain::ActionStatus::Succeeded).take(4).map(|s|clipped(&s.proposal.target_resource,180)).collect::<Vec<_>>() }));
+            let tx = db.transaction()?;
+            if outcome_retired(&tx, task.id)? {
+                return Ok(());
             }
-            while facts.len()>1 && serde_json::to_string(&facts)?.len()>SUMMARY_CHARS {facts.remove(0);}
-            db.execute("UPDATE conversations SET summary=?2 WHERE id=?1",params![conversation.to_string(),serde_json::to_string(&facts)?])?;Ok(())
-        })?;
-        if task.status == TaskStatus::Succeeded
-            && task.completed_count() > 0
-            && self.memory_enabled()?
-        {
-            let content = format!(
-                "{} — {}",
-                task.goal.as_deref().unwrap_or(&task.request),
-                task.final_outcome
-                    .as_deref()
-                    .unwrap_or("Verified completion")
-            );
-            if safe_memory_text(&content).is_ok() {
-                self.save_memory(MemoryRecord {
-                    id: task.id,
-                    kind: MemoryKind::Episodic,
-                    subject: clipped(task.goal.as_deref().unwrap_or(&task.request), 100),
-                    content: clipped(&content, 1500),
-                    confidence: 0.9,
-                    provenance: Provenance::external(
-                        ProvenanceSource::SageCore,
-                        task.id.to_string(),
-                    ),
-                    enabled: true,
-                    created_at: task.created_at,
-                    updated_at: Utc::now(),
-                    metadata: BTreeMap::from([
-                        ("task_id".into(), task.id.to_string()),
-                        ("scope_id".into(), conversation.to_string()),
-                    ]),
-                })?;
-                self.with_connection(|db| {db.execute("INSERT OR IGNORE INTO memory_lineage SELECT memory_id,task_id FROM context_memory_sources WHERE task_id=?1 AND memory_id!=task_id",params![task.id.to_string()])?;Ok(())})?;
+            let current: String = tx.query_row(
+                "SELECT task_json FROM tasks WHERE id=?1",
+                [task.id.to_string()],
+                |row| row.get(0),
+            )?;
+            if serde_json::from_str::<Task>(&current)? != *task {
+                return Err("Outcome does not match the durable task".into());
             }
-        }
-        Ok(())
+            write_outcome(&tx, task)?;
+            tx.commit()?;
+            Ok(())
+        })
     }
 }
 
@@ -708,6 +649,118 @@ pub fn is_memory_command(text: &str) -> bool {
     lower.starts_with("remember ")
         || lower.starts_with("forget ")
         || lower.starts_with("what do you remember about me")
+}
+
+pub(crate) fn outcome_retired(db: &rusqlite::Transaction<'_>, task_id: Uuid) -> CoreResult<bool> {
+    Ok(db.query_row("SELECT EXISTS(SELECT 1 FROM retired_task_data WHERE task_id=?1 UNION ALL SELECT 1 FROM undo_journal WHERE task_id=?1 AND phase!='prepared')", [task_id.to_string()], |row| row.get(0))?)
+}
+
+/// Conversation, bounded summary and reusable evidence are one projection of
+/// the durable outcome. A resumed attempt replaces the prior outcome in place.
+pub(crate) fn write_outcome(db: &rusqlite::Transaction<'_>, task: &Task) -> CoreResult<()> {
+    crate::learning::record_outcome(db, task)?;
+    if outcome_retired(db, task.id)? {
+        return Ok(());
+    }
+    let Some(conversation) = task.conversation_id else {
+        return Ok(());
+    };
+    let Some(outcome) = &task.final_outcome else {
+        return Ok(());
+    };
+    let provenance = Provenance::external(ProvenanceSource::SageCore, task.id.to_string());
+    if task.status != TaskStatus::Succeeded
+        || !crate::domain::ExecutionFacts::for_task(task).all_verified()
+    {
+        db.execute("DELETE FROM working_memory WHERE conversation_id=?1 AND json_extract(content_json,'$.task_id')=?2",params![conversation.to_string(),task.id.to_string()])?;
+        db.execute("WITH RECURSIVE invalid(id) AS (SELECT ?1 UNION SELECT child_id FROM memory_lineage JOIN invalid ON parent_id=invalid.id) UPDATE memory_records SET enabled=0 WHERE id IN (SELECT id FROM invalid)",[task.id.to_string()])?;
+    }
+    db.execute("INSERT INTO messages(id,conversation_id,task_id,role,content,provenance_json,created_at) VALUES(?1,?2,?3,'assistant',?4,?5,?6) ON CONFLICT(task_id,role) WHERE task_id IS NOT NULL DO UPDATE SET content=excluded.content,provenance_json=excluded.provenance_json", params![Uuid::new_v4().to_string(),conversation.to_string(),task.id.to_string(),redact_for_persistence(outcome),serde_json::to_string(&provenance)?,Utc::now().to_rfc3339()])?;
+    #[cfg(test)]
+    crate::finalization::crash_checkpoint("message");
+    if !is_memory_command(&task.request) {
+        write_working_memory(db, task)?;
+    }
+    let previous: String = db.query_row(
+        "SELECT summary FROM conversations WHERE id=?1",
+        [conversation.to_string()],
+        |row| row.get(0),
+    )?;
+    let mut facts: Vec<serde_json::Value> = serde_json::from_str(&previous).unwrap_or_default();
+    let id = task.id.to_string();
+    facts.retain(|fact| fact["task_id"].as_str() != Some(&id));
+    if !is_memory_command(&task.request) {
+        facts.push(serde_json::json!({"task_id":task.id,"request":clipped(&task.request,180),"status":task.status,
+            "execution":crate::domain::ExecutionFacts::for_task(task),"answer":clipped(outcome,220),"answer_is_execution_evidence":false,
+            "resources":task.current_actions().map(|(_, state)| state).filter(|state|state.status==crate::domain::ActionStatus::Succeeded && !task.undone_actions.contains(&state.proposal.id)).take(4).map(|state|clipped(&state.proposal.target_resource,180)).collect::<Vec<_>>() }));
+    }
+    while facts.len() > 1 && serde_json::to_string(&facts)?.len() > SUMMARY_CHARS {
+        facts.remove(0);
+    }
+    db.execute(
+        "UPDATE conversations SET summary=?2,updated_at=?3 WHERE id=?1",
+        params![
+            conversation.to_string(),
+            serde_json::to_string(&facts)?,
+            Utc::now().to_rfc3339()
+        ],
+    )?;
+    #[cfg(test)]
+    crate::finalization::crash_checkpoint("context");
+    let enabled: Option<String> = db
+        .query_row(
+            "SELECT value_json FROM settings WHERE key='memory.enabled'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if task.status == TaskStatus::Succeeded
+        && crate::domain::ExecutionFacts::for_task(task).all_verified()
+        && enabled
+            .map(|json| serde_json::from_str::<bool>(&json))
+            .transpose()?
+            .unwrap_or(true)
+    {
+        let verified = task
+            .current_actions()
+            .map(|(id, _)| id)
+            .filter_map(|id| {
+                task.tool_results
+                    .iter()
+                    .rev()
+                    .find(|result| result.action_id == *id)
+            })
+            .filter(|result| result.verdict == crate::contracts::Verdict::Confirmed)
+            .map(|result| result.summary.as_str())
+            .collect::<Vec<_>>()
+            .join("; ");
+        let content = format!("Request: {}. Verified actions: {}", task.request, verified);
+        let subject = clipped(task.goal.as_deref().unwrap_or(&task.request), 100);
+        if safe_memory_text(&content).is_ok() && safe_memory_text(&subject).is_ok() {
+            write_memory(
+                db,
+                &MemoryRecord {
+                    id: task.id,
+                    kind: MemoryKind::Episodic,
+                    subject,
+                    content: clipped(&content, 1500),
+                    confidence: 0.9,
+                    provenance,
+                    enabled: true,
+                    created_at: task.created_at,
+                    updated_at: Utc::now(),
+                    metadata: BTreeMap::from([
+                        ("task_id".into(), task.id.to_string()),
+                        ("scope_id".into(), conversation.to_string()),
+                    ]),
+                },
+            )?;
+            db.execute("INSERT OR IGNORE INTO memory_lineage SELECT memory_id,task_id FROM context_memory_sources WHERE task_id=?1 AND memory_id!=task_id",[task.id.to_string()])?;
+        }
+    }
+    #[cfg(test)]
+    crate::finalization::crash_checkpoint("memory");
+    Ok(())
 }
 
 fn conversation_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Conversation> {
@@ -743,6 +796,102 @@ fn fts_query(query: &str) -> String {
         .join(" OR ")
 }
 
+fn write_memory(db: &rusqlite::Transaction<'_>, record: &MemoryRecord) -> CoreResult<()> {
+    db.execute("INSERT INTO memory(id,kind,content,metadata_json,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(id) DO UPDATE SET kind=excluded.kind,content=excluded.content,metadata_json=excluded.metadata_json,updated_at=excluded.updated_at", params![record.id.to_string(),serde_json::to_value(record.kind)?.as_str(),record.content,serde_json::to_string(&record.metadata)?,record.created_at.to_rfc3339(),record.updated_at.to_rfc3339()])?;
+    db.execute("INSERT INTO memory_records(id,subject,confidence,provenance_json,enabled) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(id) DO UPDATE SET subject=excluded.subject,confidence=excluded.confidence,provenance_json=excluded.provenance_json,enabled=excluded.enabled", params![record.id.to_string(),record.subject,record.confidence,serde_json::to_string(&record.provenance)?,record.enabled])?;
+    Ok(())
+}
+
+/// Called within the same transaction as the owning task transition.
+pub(crate) fn write_working_memory(db: &rusqlite::Transaction<'_>, task: &Task) -> CoreResult<()> {
+    let Some(conversation_id) = task.conversation_id else {
+        return Ok(());
+    };
+    if outcome_retired(db, task.id)? {
+        return Ok(());
+    }
+    let previous: Option<String> = db
+        .query_row(
+            "SELECT content_json FROM working_memory WHERE conversation_id=?1 AND expires_at>?2",
+            params![conversation_id.to_string(), Utc::now().to_rfc3339()],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let mut memory: WorkingMemory = previous
+        .map(|json| serde_json::from_str(&json))
+        .transpose()?
+        .unwrap_or(WorkingMemory {
+            conversation_id,
+            task_id: task.id,
+            goal: String::new(),
+            resources: Vec::new(),
+            applications: Vec::new(),
+            entities: Vec::new(),
+            recent_actions: Vec::new(),
+            selections: Vec::new(),
+            selection_expires_at: None,
+            expires_at: Utc::now(),
+        });
+    if memory
+        .selection_expires_at
+        .is_none_or(|expiry| expiry <= Utc::now())
+    {
+        memory.selections.clear();
+    }
+    memory.task_id = task.id;
+    memory.goal = clipped(task.goal.as_deref().unwrap_or(&task.request), 500);
+    for state in task
+        .current_actions()
+        .map(|(_, state)| state)
+        .filter(|state| {
+            state.status == crate::domain::ActionStatus::Succeeded
+                && !task.undone_actions.contains(&state.proposal.id)
+                && task
+                    .tool_results
+                    .iter()
+                    .rev()
+                    .find(|result| result.action_id == state.proposal.id)
+                    .is_some_and(|result| result.verdict == crate::contracts::Verdict::Confirmed)
+        })
+    {
+        let resource = redact_for_persistence(&state.proposal.target_resource);
+        if !memory.resources.contains(&resource) {
+            memory.resources.push(resource);
+        }
+        let summary = clipped(
+            &redact_for_persistence(state.summary.as_deref().unwrap_or("Verified action")),
+            300,
+        );
+        if !memory.recent_actions.contains(&summary) {
+            memory.recent_actions.push(summary);
+        }
+        let application = match &state.proposal.action {
+            crate::domain::Action::OpenApplication { application }
+            | crate::domain::Action::ClickElement { application, .. }
+            | crate::domain::Action::TypeText { application, .. } => Some(application),
+            _ => None,
+        };
+        if let Some(app) = application
+            && !memory.applications.contains(app)
+        {
+            memory.applications.push(app.clone());
+        }
+    }
+    for values in [
+        &mut memory.resources,
+        &mut memory.recent_actions,
+        &mut memory.applications,
+    ] {
+        if values.len() > 16 {
+            values.drain(..values.len() - 16);
+        }
+    }
+    memory.expires_at = Utc::now() + Duration::hours(2);
+
+    db.execute("INSERT INTO working_memory VALUES(?1,?2,?3) ON CONFLICT(conversation_id) DO UPDATE SET content_json=excluded.content_json,expires_at=excluded.expires_at",params![conversation_id.to_string(),serde_json::to_string(&memory)?,memory.expires_at.to_rfc3339()])?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod v2_tests {
     use super::*;
@@ -752,6 +901,113 @@ mod v2_tests {
                 .unwrap();
         store.migrate_knowledge().unwrap();
         store
+    }
+
+    #[test]
+    fn conversation_identity_lookup_survives_sidebar_limit_but_respects_archive() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = store(&directory.path().join("vault.db"));
+        let oldest = store.ensure_conversation(None, "Original project").unwrap();
+        store
+            .with_connection(|db| {
+                db.execute(
+                    "UPDATE conversations SET summary='retained context' WHERE id=?1",
+                    params![oldest.id.to_string()],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        for _ in 0..205 {
+            store.ensure_conversation(None, "Newer chat").unwrap();
+        }
+        assert!(
+            !store
+                .conversations()
+                .unwrap()
+                .iter()
+                .any(|chat| chat.id == oldest.id)
+        );
+        assert_eq!(
+            store.conversation(oldest.id).unwrap().unwrap().summary,
+            "retained context"
+        );
+        store
+            .update_conversation(oldest.id, "Original project", false, true)
+            .unwrap();
+        assert!(store.conversation(oldest.id).unwrap().is_none());
+    }
+
+    #[test]
+    fn preference_filter_precedes_limit_and_preserves_latest_scoped_value() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = store(&directory.path().join("vault.db"));
+        let conversation = store.ensure_conversation(None, "Test preferences").unwrap();
+        let mut task = Task::new("Answer a question");
+        task.conversation_id = Some(conversation.id);
+        store.save_task(&mut task).unwrap();
+        let record = |kind, subject: &str, content: &str, scope: Option<Uuid>| MemoryRecord {
+            id: Uuid::new_v4(),
+            kind,
+            subject: subject.into(),
+            content: content.into(),
+            confidence: 1.0,
+            provenance: Provenance::user(),
+            enabled: true,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            metadata: scope
+                .map(|id| BTreeMap::from([("scope_id".into(), id.to_string())]))
+                .unwrap_or_default(),
+        };
+        store
+            .save_memory(record(
+                MemoryKind::Preference,
+                "interaction_style",
+                "Older style",
+                None,
+            ))
+            .unwrap();
+        store
+            .save_memory(record(
+                MemoryKind::Preference,
+                "interaction_style",
+                "Use concise explanations",
+                Some(conversation.id),
+            ))
+            .unwrap();
+        store
+            .save_memory(record(
+                MemoryKind::Preference,
+                "interaction_style",
+                "Unrelated private style",
+                Some(Uuid::new_v4()),
+            ))
+            .unwrap();
+        for _ in 0..505 {
+            store
+                .save_memory(record(
+                    MemoryKind::Semantic,
+                    "fixture",
+                    "Unrelated reference",
+                    None,
+                ))
+                .unwrap();
+        }
+        assert!(
+            store
+                .memories_scoped(None, true, 500, Some(conversation.id))
+                .unwrap()
+                .iter()
+                .all(|memory| memory.kind != MemoryKind::Preference)
+        );
+        let context = crate::context::build_context(&store, &task, Vec::new(), Vec::new()).unwrap();
+        let hints = context
+            .untrusted_context
+            .iter()
+            .find(|item| item.source == "personalization_hints")
+            .unwrap();
+        let hints: serde_json::Value = serde_json::from_str(&hints.content).unwrap();
+        assert_eq!(hints["interaction_style"], "Use concise explanations");
     }
     #[test]
     fn permission_filter_runs_before_rank_and_limit() {
@@ -791,7 +1047,7 @@ mod v2_tests {
         let conversation = store.ensure_conversation(None, "test").unwrap();
         let mut source = Task::new("remember orchid");
         source.conversation_id = Some(conversation.id);
-        store.save_task(&source).unwrap();
+        store.save_task(&mut source).unwrap();
         store.link_task(&source).unwrap();
         let message = Message {
             id: Uuid::new_v4(),
@@ -806,7 +1062,7 @@ mod v2_tests {
         let memory = store.remember("orchid", message.id).unwrap();
         let mut derived = Task::new("use the memory");
         derived.conversation_id = Some(conversation.id);
-        store.save_task(&derived).unwrap();
+        store.save_task(&mut derived).unwrap();
         store.link_task(&derived).unwrap();
         store
             .record_context_memories(derived.id, std::slice::from_ref(&memory))
@@ -832,6 +1088,13 @@ mod v2_tests {
             })
             .unwrap();
         store.delete_memory(memory.id).unwrap();
+        assert!(
+            store
+                .save_artifact(derived.id, b"late private content")
+                .is_err()
+        );
+        derived.final_outcome = Some("late reply containing the forgotten orchid".into());
+        store.record_outcome(&derived).unwrap();
         assert!(store.memories(None, false, 500).unwrap().is_empty());
         assert!(
             store

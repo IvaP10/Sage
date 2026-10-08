@@ -1,0 +1,11 @@
+   Compiling sage-protocol v1.0.1 (/Users/ivanpadeliya/Desktop/Sage/crates/sage-protocol)
+   Compiling sage-core v1.0.1 (/Users/ivanpadeliya/Desktop/Sage/crates/sage-core)
+    Finished `release` profile [optimized] target(s) in 22.77s
+     Running unittests src/lib.rs (target/release/deps/sage_core-349919b266bf7571)
+
+running 1 test
+intent_revision_cpu samples=10000 p50_ns=8125 p95_ns=13000 p99_ns=15125; excludes persistence, IPC, approvals and effects
+test reconciliation::tests::intent_revision_cpu_latency ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 168 filtered out; finished in 0.10s
+

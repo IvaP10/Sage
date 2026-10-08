@@ -222,6 +222,8 @@ nonisolated enum Sage_Ipc_V2_TaskStatus: SwiftProtobuf.Enum, Swift.CaseIterable 
   case failed // = 8
   case cancelled // = 9
   case interrupted // = 10
+  case answered // = 11
+  case partial // = 12
   case UNRECOGNIZED(Int)
 
   init() {
@@ -241,6 +243,8 @@ nonisolated enum Sage_Ipc_V2_TaskStatus: SwiftProtobuf.Enum, Swift.CaseIterable 
     case 8: self = .failed
     case 9: self = .cancelled
     case 10: self = .interrupted
+    case 11: self = .answered
+    case 12: self = .partial
     default: self = .UNRECOGNIZED(rawValue)
     }
   }
@@ -258,6 +262,8 @@ nonisolated enum Sage_Ipc_V2_TaskStatus: SwiftProtobuf.Enum, Swift.CaseIterable 
     case .failed: return 8
     case .cancelled: return 9
     case .interrupted: return 10
+    case .answered: return 11
+    case .partial: return 12
     case .UNRECOGNIZED(let i): return i
     }
   }
@@ -275,6 +281,8 @@ nonisolated enum Sage_Ipc_V2_TaskStatus: SwiftProtobuf.Enum, Swift.CaseIterable 
     .failed,
     .cancelled,
     .interrupted,
+    .answered,
+    .partial,
   ]
 
 }
@@ -410,6 +418,22 @@ nonisolated struct Sage_Ipc_V2_Frame: Sendable {
     set {payload = .adapterResult(newValue)}
   }
 
+  var adapterCancel: Sage_Ipc_V2_AdapterCancel {
+    get {
+      if case .adapterCancel(let v)? = payload {return v}
+      return Sage_Ipc_V2_AdapterCancel()
+    }
+    set {payload = .adapterCancel(newValue)}
+  }
+
+  var adapterCancelAcknowledged: Sage_Ipc_V2_AdapterCancelAcknowledged {
+    get {
+      if case .adapterCancelAcknowledged(let v)? = payload {return v}
+      return Sage_Ipc_V2_AdapterCancelAcknowledged()
+    }
+    set {payload = .adapterCancelAcknowledged(newValue)}
+  }
+
   var unknownFields = SwiftProtobuf.UnknownStorage()
 
   nonisolated enum OneOf_Payload: Equatable, Sendable {
@@ -423,6 +447,8 @@ nonisolated struct Sage_Ipc_V2_Frame: Sendable {
     case adapterHello(Sage_Ipc_V2_AdapterHello)
     case adapterRequest(Sage_Ipc_V2_AdapterRequest)
     case adapterResult(Sage_Ipc_V2_AdapterResult)
+    case adapterCancel(Sage_Ipc_V2_AdapterCancel)
+    case adapterCancelAcknowledged(Sage_Ipc_V2_AdapterCancelAcknowledged)
 
   }
 
@@ -442,6 +468,8 @@ nonisolated struct Sage_Ipc_V2_ServerChallenge: Sendable {
 
   var coreInstanceID: String = String()
 
+  var supportedFeatures: [String] = []
+
   var unknownFields = SwiftProtobuf.UnknownStorage()
 
   init() {}
@@ -459,6 +487,8 @@ nonisolated struct Sage_Ipc_V2_ClientAuthenticate: Sendable {
   var clientNonce: Data = Data()
 
   var proof: Data = Data()
+
+  var supportedFeatures: [String] = []
 
   var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -479,6 +509,8 @@ nonisolated struct Sage_Ipc_V2_AuthenticationResult: Sendable {
   var message: String = String()
 
   var serverProof: Data = Data()
+
+  var negotiatedFeatures: [String] = []
 
   var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -590,6 +622,22 @@ nonisolated struct Sage_Ipc_V2_UiCommand: Sendable {
     set {command = .unlockStorage(newValue)}
   }
 
+  var updateIntent: Sage_Ipc_V2_UpdateIntent {
+    get {
+      if case .updateIntent(let v)? = command {return v}
+      return Sage_Ipc_V2_UpdateIntent()
+    }
+    set {command = .updateIntent(newValue)}
+  }
+
+  var worldModelCommand: Sage_Ipc_V2_WorldModelCommand {
+    get {
+      if case .worldModelCommand(let v)? = command {return v}
+      return Sage_Ipc_V2_WorldModelCommand()
+    }
+    set {command = .worldModelCommand(newValue)}
+  }
+
   var unknownFields = SwiftProtobuf.UnknownStorage()
 
   nonisolated enum OneOf_Command: Equatable, Sendable {
@@ -605,6 +653,8 @@ nonisolated struct Sage_Ipc_V2_UiCommand: Sendable {
     case knowledgeCommand(Sage_Ipc_V2_KnowledgeCommand)
     case workflowCommand(Sage_Ipc_V2_WorkflowCommand)
     case unlockStorage(Sage_Ipc_V2_UnlockStorage)
+    case updateIntent(Sage_Ipc_V2_UpdateIntent)
+    case worldModelCommand(Sage_Ipc_V2_WorldModelCommand)
 
   }
 
@@ -615,6 +665,67 @@ nonisolated struct Sage_Ipc_V2_UnlockStorage: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
+
+  var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  init() {}
+}
+
+/// Ephemeral native input, never a submission or an execution capability.
+/// Monotonic revisions are scoped to the authenticated IPC connection.
+nonisolated struct Sage_Ipc_V2_UpdateIntent: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  var streamID: String = String()
+
+  var revision: UInt64 = 0
+
+  var text: String = String()
+
+  var activeTaskID: String = String()
+
+  var allowInterrupt: Bool = false
+
+  var folderRoots: [String] = []
+
+  var voiceInput: Bool = false
+
+  var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  init() {}
+}
+
+nonisolated struct Sage_Ipc_V2_IntentPreview: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  var streamID: String = String()
+
+  var revision: UInt64 = 0
+
+  var steps: [String] = []
+
+  var compiledLocally: Bool = false
+
+  var status: String = String()
+
+  var detail: String = String()
+
+  var compileMicros: UInt64 = 0
+
+  /// A single complete, locally compiled macOS app step whose explicit
+  /// "and then" boundary is still followed by unfinished speech. The UI may
+  /// submit only this exact prefix through the ordinary approval path.
+  var streamedPrefix: String = String()
+
+  /// Reviewed routine aliases suggested from a fresh, explicit local
+  /// reference. Choosing one fills the composer; it never submits a task.
+  var routineSuggestions: [String] = []
+
+  var routineSuggestionDetail: String = String()
 
   var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -633,6 +744,18 @@ nonisolated struct Sage_Ipc_V2_SubmitTask: Sendable {
   var conversationID: String = String()
 
   var resources: [Sage_Ipc_V2_ResourceScope] = []
+
+  /// Explicit replacement of this conversation's current request. A new run
+  /// obtains fresh authority; stopping an old run does not undo its effects.
+  var supersedesTaskID: String = String()
+
+  /// Non-empty only for a prepared voice prefix. The final voice request must
+  /// carry the same stream id and finalize_stream=true to revise the same run.
+  var voiceStreamID: String = String()
+
+  var streamedPrefix: Bool = false
+
+  var finalizeStream: Bool = false
 
   var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -749,6 +872,9 @@ nonisolated struct Sage_Ipc_V2_UndoLastAction: Sendable {
   // methods supported on all messages.
 
   var taskID: String = String()
+
+  /// Required identity from TaskUpdate; retries must not select an older action.
+  var actionID: String = String()
 
   var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -924,6 +1050,38 @@ nonisolated struct Sage_Ipc_V2_CoreEvent: Sendable {
     set {event = .workflowState(newValue)}
   }
 
+  var taskAccepted: Sage_Ipc_V2_TaskAccepted {
+    get {
+      if case .taskAccepted(let v)? = event {return v}
+      return Sage_Ipc_V2_TaskAccepted()
+    }
+    set {event = .taskAccepted(newValue)}
+  }
+
+  var decisionResolved: Sage_Ipc_V2_DecisionResolved {
+    get {
+      if case .decisionResolved(let v)? = event {return v}
+      return Sage_Ipc_V2_DecisionResolved()
+    }
+    set {event = .decisionResolved(newValue)}
+  }
+
+  var intentPreview: Sage_Ipc_V2_IntentPreview {
+    get {
+      if case .intentPreview(let v)? = event {return v}
+      return Sage_Ipc_V2_IntentPreview()
+    }
+    set {event = .intentPreview(newValue)}
+  }
+
+  var worldModelState: Sage_Ipc_V2_WorldModelState {
+    get {
+      if case .worldModelState(let v)? = event {return v}
+      return Sage_Ipc_V2_WorldModelState()
+    }
+    set {event = .worldModelState(newValue)}
+  }
+
   var unknownFields = SwiftProtobuf.UnknownStorage()
 
   nonisolated enum OneOf_Event: Equatable, Sendable {
@@ -939,8 +1097,44 @@ nonisolated struct Sage_Ipc_V2_CoreEvent: Sendable {
     case providerConnectionResult(Sage_Ipc_V2_ProviderConnectionResult)
     case knowledgeState(Sage_Ipc_V2_KnowledgeState)
     case workflowState(Sage_Ipc_V2_WorkflowState)
+    case taskAccepted(Sage_Ipc_V2_TaskAccepted)
+    case decisionResolved(Sage_Ipc_V2_DecisionResolved)
+    case intentPreview(Sage_Ipc_V2_IntentPreview)
+    case worldModelState(Sage_Ipc_V2_WorldModelState)
 
   }
+
+  init() {}
+}
+
+/// Sent only after the command and task have committed durably. Retrying the
+/// same request identity and content returns the same task, including after restart.
+nonisolated struct Sage_Ipc_V2_TaskAccepted: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  var requestID: String = String()
+
+  var taskID: String = String()
+
+  var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  init() {}
+}
+
+nonisolated struct Sage_Ipc_V2_DecisionResolved: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  var decisionID: String = String()
+
+  var taskID: String = String()
+
+  var state: String = String()
+
+  var unknownFields = SwiftProtobuf.UnknownStorage()
 
   init() {}
 }
@@ -991,6 +1185,8 @@ nonisolated struct Sage_Ipc_V2_StateSnapshot: Sendable {
 
   var storageLocked: Bool = false
 
+  var pendingQuestions: [Sage_Ipc_V2_QuestionRequest] = []
+
   var unknownFields = SwiftProtobuf.UnknownStorage()
 
   init() {}
@@ -1018,34 +1214,146 @@ nonisolated struct Sage_Ipc_V2_ProviderSettings: Sendable {
   init() {}
 }
 
-nonisolated struct Sage_Ipc_V2_TaskUpdate: Sendable {
+nonisolated struct Sage_Ipc_V2_TaskUpdate: @unchecked Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
-  var taskID: String = String()
+  var taskID: String {
+    get {_storage._taskID}
+    set {_uniqueStorage()._taskID = newValue}
+  }
 
-  var request: String = String()
+  var request: String {
+    get {_storage._request}
+    set {_uniqueStorage()._request = newValue}
+  }
 
-  var status: Sage_Ipc_V2_TaskStatus = .unspecified
+  var status: Sage_Ipc_V2_TaskStatus {
+    get {_storage._status}
+    set {_uniqueStorage()._status = newValue}
+  }
+
+  var summary: String {
+    get {_storage._summary}
+    set {_uniqueStorage()._summary = newValue}
+  }
+
+  var completedActions: UInt32 {
+    get {_storage._completedActions}
+    set {_uniqueStorage()._completedActions = newValue}
+  }
+
+  var totalActions: UInt32 {
+    get {_storage._totalActions}
+    set {_uniqueStorage()._totalActions = newValue}
+  }
+
+  var currentAction: String {
+    get {_storage._currentAction}
+    set {_uniqueStorage()._currentAction = newValue}
+  }
+
+  var finalOutcome: String {
+    get {_storage._finalOutcome}
+    set {_uniqueStorage()._finalOutcome = newValue}
+  }
+
+  var undoAvailable: Bool {
+    get {_storage._undoAvailable}
+    set {_uniqueStorage()._undoAvailable = newValue}
+  }
+
+  var conversationID: String {
+    get {_storage._conversationID}
+    set {_uniqueStorage()._conversationID = newValue}
+  }
+
+  var messageID: String {
+    get {_storage._messageID}
+    set {_uniqueStorage()._messageID = newValue}
+  }
+
+  var actions: [Sage_Ipc_V2_ActionProgress] {
+    get {_storage._actions}
+    set {_uniqueStorage()._actions = newValue}
+  }
+
+  var executionFacts: Sage_Ipc_V2_ExecutionFacts {
+    get {_storage._executionFacts ?? Sage_Ipc_V2_ExecutionFacts()}
+    set {_uniqueStorage()._executionFacts = newValue}
+  }
+  /// Returns true if `executionFacts` has been explicitly set.
+  var hasExecutionFacts: Bool {_storage._executionFacts != nil}
+  /// Clears the value of `executionFacts`. Subsequent reads from it will return its default value.
+  mutating func clearExecutionFacts() {_uniqueStorage()._executionFacts = nil}
+
+  /// Stop addresses this stable scope across fresh continuation executions.
+  var controlScopeID: String {
+    get {_storage._controlScopeID}
+    set {_uniqueStorage()._controlScopeID = newValue}
+  }
+
+  var continuedTaskID: String {
+    get {_storage._continuedTaskID}
+    set {_uniqueStorage()._continuedTaskID = newValue}
+  }
+
+  /// Durable compensation state: empty, prepared, dispatched, uncertain, verified.
+  var undoState: String {
+    get {_storage._undoState}
+    set {_uniqueStorage()._undoState = newValue}
+  }
+
+  var undoSummary: String {
+    get {_storage._undoSummary}
+    set {_uniqueStorage()._undoSummary = newValue}
+  }
+
+  var undoActionID: String {
+    get {_storage._undoActionID}
+    set {_uniqueStorage()._undoActionID = newValue}
+  }
+
+  var intentRevision: UInt64 {
+    get {_storage._intentRevision}
+    set {_uniqueStorage()._intentRevision = newValue}
+  }
+
+  var intentChangeSummary: String {
+    get {_storage._intentChangeSummary}
+    set {_uniqueStorage()._intentChangeSummary = newValue}
+  }
+
+  var routineSummary: String {
+    get {_storage._routineSummary}
+    set {_uniqueStorage()._routineSummary = newValue}
+  }
+
+  var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  init() {}
+
+  fileprivate var _storage = _StorageClass.defaultInstance
+}
+
+/// Broker-derived execution evidence; model text cannot assign these counts.
+nonisolated struct Sage_Ipc_V2_ExecutionFacts: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  var verified: UInt32 = 0
+
+  var failed: UInt32 = 0
+
+  var pending: UInt32 = 0
+
+  var uncertain: UInt32 = 0
 
   var summary: String = String()
 
-  var completedActions: UInt32 = 0
-
-  var totalActions: UInt32 = 0
-
-  var currentAction: String = String()
-
-  var finalOutcome: String = String()
-
-  var undoAvailable: Bool = false
-
-  var conversationID: String = String()
-
-  var messageID: String = String()
-
-  var actions: [Sage_Ipc_V2_ActionProgress] = []
+  var undone: UInt32 = 0
 
   var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -1129,6 +1437,37 @@ nonisolated struct Sage_Ipc_V2_WorkflowState: Sendable {
   init() {}
 }
 
+/// Descriptive discovery data and explicitly approved, expiring learning
+/// sessions. JSON payloads are decoded into closed Rust schemas by sage-core.
+nonisolated struct Sage_Ipc_V2_WorldModelCommand: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  /// discover_current_application, list, system, forget_system, approve_learning_session, run_learning_probe, stop_learning_session
+  var operation: String = String()
+
+  var id: String = String()
+
+  var json: String = String()
+
+  var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  init() {}
+}
+
+nonisolated struct Sage_Ipc_V2_WorldModelState: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  var json: String = String()
+
+  var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  init() {}
+}
+
 nonisolated struct Sage_Ipc_V2_ActionProgress: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -1151,6 +1490,36 @@ nonisolated struct Sage_Ipc_V2_AdapterHello: Sendable {
   // methods supported on all messages.
 
   var domain: String = String()
+
+  var cancellationProtocol: UInt32 = 0
+
+  var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  init() {}
+}
+
+/// Receipt of this signal does not prove that an external effect was prevented.
+/// A final AdapterResult must still be retained and reconciled by the broker.
+nonisolated struct Sage_Ipc_V2_AdapterCancel: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  var requestID: String = String()
+
+  var expiresAtUnixMs: Int64 = 0
+
+  var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  init() {}
+}
+
+nonisolated struct Sage_Ipc_V2_AdapterCancelAcknowledged: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  var requestID: String = String()
 
   var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -1200,11 +1569,43 @@ nonisolated struct Sage_Ipc_V2_AdapterRequest: @unchecked Sendable {
   /// Clears the value of `browserTarget`. Subsequent reads from it will return its default value.
   mutating func clearBrowserTarget() {_uniqueStorage()._browserTarget = nil}
 
+  var applicationTarget: Sage_Ipc_V2_ApplicationTarget {
+    get {_storage._applicationTarget ?? Sage_Ipc_V2_ApplicationTarget()}
+    set {_uniqueStorage()._applicationTarget = newValue}
+  }
+  /// Returns true if `applicationTarget` has been explicitly set.
+  var hasApplicationTarget: Bool {_storage._applicationTarget != nil}
+  /// Clears the value of `applicationTarget`. Subsequent reads from it will return its default value.
+  mutating func clearApplicationTarget() {_uniqueStorage()._applicationTarget = nil}
+
   var unknownFields = SwiftProtobuf.UnknownStorage()
 
   init() {}
 
   fileprivate var _storage = _StorageClass.defaultInstance
+}
+
+nonisolated struct Sage_Ipc_V2_ApplicationTarget: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  var platform: String = String()
+
+  var bundlePath: String = String()
+
+  var identifier: String = String()
+
+  var codeDigest: String = String()
+
+  var signer: String = String()
+
+  /// Sorted validated code-directory identities, one per binary architecture.
+  var codeDigests: [String] = []
+
+  var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  init() {}
 }
 
 nonisolated struct Sage_Ipc_V2_BrowserTarget: Sendable {
@@ -1244,9 +1645,22 @@ nonisolated struct Sage_Ipc_V2_AdapterResult: Sendable {
 
   var error: String = String()
 
+  var applicationTarget: Sage_Ipc_V2_ApplicationTarget {
+    get {_applicationTarget ?? Sage_Ipc_V2_ApplicationTarget()}
+    set {_applicationTarget = newValue}
+  }
+  /// Returns true if `applicationTarget` has been explicitly set.
+  var hasApplicationTarget: Bool {self._applicationTarget != nil}
+  /// Clears the value of `applicationTarget`. Subsequent reads from it will return its default value.
+  mutating func clearApplicationTarget() {self._applicationTarget = nil}
+
+  var observedProcessID: UInt32 = 0
+
   var unknownFields = SwiftProtobuf.UnknownStorage()
 
   init() {}
+
+  fileprivate var _applicationTarget: Sage_Ipc_V2_ApplicationTarget? = nil
 }
 
 nonisolated struct Sage_Ipc_V2_AgentEvent: Sendable {
@@ -1545,7 +1959,7 @@ nonisolated extension Sage_Ipc_V2_RiskLevel: SwiftProtobuf._ProtoNameProviding {
 }
 
 nonisolated extension Sage_Ipc_V2_TaskStatus: SwiftProtobuf._ProtoNameProviding {
-  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0TASK_STATUS_UNSPECIFIED\0\u{1}TASK_STATUS_PENDING\0\u{1}TASK_STATUS_PLANNING\0\u{1}TASK_STATUS_RUNNING\0\u{1}TASK_STATUS_WAITING_FOR_APPROVAL\0\u{1}TASK_STATUS_WAITING_FOR_USER\0\u{1}TASK_STATUS_PAUSED\0\u{1}TASK_STATUS_SUCCEEDED\0\u{1}TASK_STATUS_FAILED\0\u{1}TASK_STATUS_CANCELLED\0\u{1}TASK_STATUS_INTERRUPTED\0")
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0TASK_STATUS_UNSPECIFIED\0\u{1}TASK_STATUS_PENDING\0\u{1}TASK_STATUS_PLANNING\0\u{1}TASK_STATUS_RUNNING\0\u{1}TASK_STATUS_WAITING_FOR_APPROVAL\0\u{1}TASK_STATUS_WAITING_FOR_USER\0\u{1}TASK_STATUS_PAUSED\0\u{1}TASK_STATUS_SUCCEEDED\0\u{1}TASK_STATUS_FAILED\0\u{1}TASK_STATUS_CANCELLED\0\u{1}TASK_STATUS_INTERRUPTED\0\u{1}TASK_STATUS_ANSWERED\0\u{1}TASK_STATUS_PARTIAL\0")
 }
 
 nonisolated extension Sage_Ipc_V2_ResourceEffect: SwiftProtobuf._ProtoNameProviding {
@@ -1554,7 +1968,7 @@ nonisolated extension Sage_Ipc_V2_ResourceEffect: SwiftProtobuf._ProtoNameProvid
 
 nonisolated extension Sage_Ipc_V2_Frame: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".Frame"
-  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}protocol_version\0\u{1}sequence\0\u{4}\u{8}server_challenge\0\u{3}client_authenticate\0\u{3}authentication_result\0\u{3}ui_command\0\u{3}core_event\0\u{1}ping\0\u{1}pong\0\u{3}adapter_hello\0\u{3}adapter_request\0\u{3}adapter_result\0")
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}protocol_version\0\u{1}sequence\0\u{4}\u{8}server_challenge\0\u{3}client_authenticate\0\u{3}authentication_result\0\u{3}ui_command\0\u{3}core_event\0\u{1}ping\0\u{1}pong\0\u{3}adapter_hello\0\u{3}adapter_request\0\u{3}adapter_result\0\u{3}adapter_cancel\0\u{3}adapter_cancel_acknowledged\0")
 
   mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -1694,6 +2108,32 @@ nonisolated extension Sage_Ipc_V2_Frame: SwiftProtobuf.Message, SwiftProtobuf._M
           self.payload = .adapterResult(v)
         }
       }()
+      case 20: try {
+        var v: Sage_Ipc_V2_AdapterCancel?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .adapterCancel(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .adapterCancel(v)
+        }
+      }()
+      case 21: try {
+        var v: Sage_Ipc_V2_AdapterCancelAcknowledged?
+        var hadOneofValue = false
+        if let current = self.payload {
+          hadOneofValue = true
+          if case .adapterCancelAcknowledged(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.payload = .adapterCancelAcknowledged(v)
+        }
+      }()
       default: break
       }
     }
@@ -1751,6 +2191,14 @@ nonisolated extension Sage_Ipc_V2_Frame: SwiftProtobuf.Message, SwiftProtobuf._M
       guard case .adapterResult(let v)? = self.payload else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 19)
     }()
+    case .adapterCancel?: try {
+      guard case .adapterCancel(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 20)
+    }()
+    case .adapterCancelAcknowledged?: try {
+      guard case .adapterCancelAcknowledged(let v)? = self.payload else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 21)
+    }()
     case nil: break
     }
     try unknownFields.traverse(visitor: &visitor)
@@ -1767,7 +2215,7 @@ nonisolated extension Sage_Ipc_V2_Frame: SwiftProtobuf.Message, SwiftProtobuf._M
 
 nonisolated extension Sage_Ipc_V2_ServerChallenge: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".ServerChallenge"
-  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}nonce\0\u{3}minimum_protocol_version\0\u{3}maximum_protocol_version\0\u{3}core_instance_id\0")
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}nonce\0\u{3}minimum_protocol_version\0\u{3}maximum_protocol_version\0\u{3}core_instance_id\0\u{3}supported_features\0")
 
   mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -1779,6 +2227,7 @@ nonisolated extension Sage_Ipc_V2_ServerChallenge: SwiftProtobuf.Message, SwiftP
       case 2: try { try decoder.decodeSingularUInt32Field(value: &self.minimumProtocolVersion) }()
       case 3: try { try decoder.decodeSingularUInt32Field(value: &self.maximumProtocolVersion) }()
       case 4: try { try decoder.decodeSingularStringField(value: &self.coreInstanceID) }()
+      case 5: try { try decoder.decodeRepeatedStringField(value: &self.supportedFeatures) }()
       default: break
       }
     }
@@ -1797,6 +2246,9 @@ nonisolated extension Sage_Ipc_V2_ServerChallenge: SwiftProtobuf.Message, SwiftP
     if !self.coreInstanceID.isEmpty {
       try visitor.visitSingularStringField(value: self.coreInstanceID, fieldNumber: 4)
     }
+    if !self.supportedFeatures.isEmpty {
+      try visitor.visitRepeatedStringField(value: self.supportedFeatures, fieldNumber: 5)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -1805,6 +2257,7 @@ nonisolated extension Sage_Ipc_V2_ServerChallenge: SwiftProtobuf.Message, SwiftP
     if lhs.minimumProtocolVersion != rhs.minimumProtocolVersion {return false}
     if lhs.maximumProtocolVersion != rhs.maximumProtocolVersion {return false}
     if lhs.coreInstanceID != rhs.coreInstanceID {return false}
+    if lhs.supportedFeatures != rhs.supportedFeatures {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -1812,7 +2265,7 @@ nonisolated extension Sage_Ipc_V2_ServerChallenge: SwiftProtobuf.Message, SwiftP
 
 nonisolated extension Sage_Ipc_V2_ClientAuthenticate: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".ClientAuthenticate"
-  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}client_kind\0\u{3}client_version\0\u{3}client_nonce\0\u{1}proof\0")
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}client_kind\0\u{3}client_version\0\u{3}client_nonce\0\u{1}proof\0\u{3}supported_features\0")
 
   mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -1824,6 +2277,7 @@ nonisolated extension Sage_Ipc_V2_ClientAuthenticate: SwiftProtobuf.Message, Swi
       case 2: try { try decoder.decodeSingularStringField(value: &self.clientVersion) }()
       case 3: try { try decoder.decodeSingularBytesField(value: &self.clientNonce) }()
       case 4: try { try decoder.decodeSingularBytesField(value: &self.proof) }()
+      case 5: try { try decoder.decodeRepeatedStringField(value: &self.supportedFeatures) }()
       default: break
       }
     }
@@ -1842,6 +2296,9 @@ nonisolated extension Sage_Ipc_V2_ClientAuthenticate: SwiftProtobuf.Message, Swi
     if !self.proof.isEmpty {
       try visitor.visitSingularBytesField(value: self.proof, fieldNumber: 4)
     }
+    if !self.supportedFeatures.isEmpty {
+      try visitor.visitRepeatedStringField(value: self.supportedFeatures, fieldNumber: 5)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -1850,6 +2307,7 @@ nonisolated extension Sage_Ipc_V2_ClientAuthenticate: SwiftProtobuf.Message, Swi
     if lhs.clientVersion != rhs.clientVersion {return false}
     if lhs.clientNonce != rhs.clientNonce {return false}
     if lhs.proof != rhs.proof {return false}
+    if lhs.supportedFeatures != rhs.supportedFeatures {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -1857,7 +2315,7 @@ nonisolated extension Sage_Ipc_V2_ClientAuthenticate: SwiftProtobuf.Message, Swi
 
 nonisolated extension Sage_Ipc_V2_AuthenticationResult: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".AuthenticationResult"
-  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}accepted\0\u{3}session_id\0\u{3}error_code\0\u{1}message\0\u{3}server_proof\0")
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}accepted\0\u{3}session_id\0\u{3}error_code\0\u{1}message\0\u{3}server_proof\0\u{3}negotiated_features\0")
 
   mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -1870,6 +2328,7 @@ nonisolated extension Sage_Ipc_V2_AuthenticationResult: SwiftProtobuf.Message, S
       case 3: try { try decoder.decodeSingularStringField(value: &self.errorCode) }()
       case 4: try { try decoder.decodeSingularStringField(value: &self.message) }()
       case 5: try { try decoder.decodeSingularBytesField(value: &self.serverProof) }()
+      case 6: try { try decoder.decodeRepeatedStringField(value: &self.negotiatedFeatures) }()
       default: break
       }
     }
@@ -1891,6 +2350,9 @@ nonisolated extension Sage_Ipc_V2_AuthenticationResult: SwiftProtobuf.Message, S
     if !self.serverProof.isEmpty {
       try visitor.visitSingularBytesField(value: self.serverProof, fieldNumber: 5)
     }
+    if !self.negotiatedFeatures.isEmpty {
+      try visitor.visitRepeatedStringField(value: self.negotiatedFeatures, fieldNumber: 6)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -1900,6 +2362,7 @@ nonisolated extension Sage_Ipc_V2_AuthenticationResult: SwiftProtobuf.Message, S
     if lhs.errorCode != rhs.errorCode {return false}
     if lhs.message != rhs.message {return false}
     if lhs.serverProof != rhs.serverProof {return false}
+    if lhs.negotiatedFeatures != rhs.negotiatedFeatures {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -1907,7 +2370,7 @@ nonisolated extension Sage_Ipc_V2_AuthenticationResult: SwiftProtobuf.Message, S
 
 nonisolated extension Sage_Ipc_V2_UiCommand: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".UiCommand"
-  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{4}\u{9}submit_task\0\u{3}control_task\0\u{3}approval_response\0\u{3}get_state\0\u{3}update_permission\0\u{3}undo_last_action\0\u{3}user_answer\0\u{3}save_provider_settings\0\u{3}test_provider_connection\0\u{3}knowledge_command\0\u{3}workflow_command\0\u{3}unlock_storage\0")
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{4}\u{9}submit_task\0\u{3}control_task\0\u{3}approval_response\0\u{3}get_state\0\u{3}update_permission\0\u{3}undo_last_action\0\u{3}user_answer\0\u{3}save_provider_settings\0\u{3}test_provider_connection\0\u{3}knowledge_command\0\u{3}workflow_command\0\u{3}unlock_storage\0\u{3}update_intent\0\u{3}world_model_command\0")
 
   mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -2072,6 +2535,32 @@ nonisolated extension Sage_Ipc_V2_UiCommand: SwiftProtobuf.Message, SwiftProtobu
           self.command = .unlockStorage(v)
         }
       }()
+      case 22: try {
+        var v: Sage_Ipc_V2_UpdateIntent?
+        var hadOneofValue = false
+        if let current = self.command {
+          hadOneofValue = true
+          if case .updateIntent(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.command = .updateIntent(v)
+        }
+      }()
+      case 23: try {
+        var v: Sage_Ipc_V2_WorldModelCommand?
+        var hadOneofValue = false
+        if let current = self.command {
+          hadOneofValue = true
+          if case .worldModelCommand(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.command = .worldModelCommand(v)
+        }
+      }()
       default: break
       }
     }
@@ -2134,6 +2623,14 @@ nonisolated extension Sage_Ipc_V2_UiCommand: SwiftProtobuf.Message, SwiftProtobu
       guard case .unlockStorage(let v)? = self.command else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 21)
     }()
+    case .updateIntent?: try {
+      guard case .updateIntent(let v)? = self.command else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 22)
+    }()
+    case .worldModelCommand?: try {
+      guard case .worldModelCommand(let v)? = self.command else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 23)
+    }()
     case nil: break
     }
     try unknownFields.traverse(visitor: &visitor)
@@ -2166,9 +2663,144 @@ nonisolated extension Sage_Ipc_V2_UnlockStorage: SwiftProtobuf.Message, SwiftPro
   }
 }
 
+nonisolated extension Sage_Ipc_V2_UpdateIntent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  static let protoMessageName: String = _protobuf_package + ".UpdateIntent"
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}stream_id\0\u{1}revision\0\u{1}text\0\u{3}active_task_id\0\u{3}allow_interrupt\0\u{3}folder_roots\0\u{3}voice_input\0")
+
+  mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.streamID) }()
+      case 2: try { try decoder.decodeSingularUInt64Field(value: &self.revision) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.text) }()
+      case 4: try { try decoder.decodeSingularStringField(value: &self.activeTaskID) }()
+      case 5: try { try decoder.decodeSingularBoolField(value: &self.allowInterrupt) }()
+      case 6: try { try decoder.decodeRepeatedStringField(value: &self.folderRoots) }()
+      case 7: try { try decoder.decodeSingularBoolField(value: &self.voiceInput) }()
+      default: break
+      }
+    }
+  }
+
+  func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.streamID.isEmpty {
+      try visitor.visitSingularStringField(value: self.streamID, fieldNumber: 1)
+    }
+    if self.revision != 0 {
+      try visitor.visitSingularUInt64Field(value: self.revision, fieldNumber: 2)
+    }
+    if !self.text.isEmpty {
+      try visitor.visitSingularStringField(value: self.text, fieldNumber: 3)
+    }
+    if !self.activeTaskID.isEmpty {
+      try visitor.visitSingularStringField(value: self.activeTaskID, fieldNumber: 4)
+    }
+    if self.allowInterrupt != false {
+      try visitor.visitSingularBoolField(value: self.allowInterrupt, fieldNumber: 5)
+    }
+    if !self.folderRoots.isEmpty {
+      try visitor.visitRepeatedStringField(value: self.folderRoots, fieldNumber: 6)
+    }
+    if self.voiceInput != false {
+      try visitor.visitSingularBoolField(value: self.voiceInput, fieldNumber: 7)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  static func ==(lhs: Sage_Ipc_V2_UpdateIntent, rhs: Sage_Ipc_V2_UpdateIntent) -> Bool {
+    if lhs.streamID != rhs.streamID {return false}
+    if lhs.revision != rhs.revision {return false}
+    if lhs.text != rhs.text {return false}
+    if lhs.activeTaskID != rhs.activeTaskID {return false}
+    if lhs.allowInterrupt != rhs.allowInterrupt {return false}
+    if lhs.folderRoots != rhs.folderRoots {return false}
+    if lhs.voiceInput != rhs.voiceInput {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Sage_Ipc_V2_IntentPreview: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  static let protoMessageName: String = _protobuf_package + ".IntentPreview"
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}stream_id\0\u{1}revision\0\u{1}steps\0\u{3}compiled_locally\0\u{1}status\0\u{1}detail\0\u{3}compile_micros\0\u{3}streamed_prefix\0\u{3}routine_suggestions\0\u{3}routine_suggestion_detail\0")
+
+  mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.streamID) }()
+      case 2: try { try decoder.decodeSingularUInt64Field(value: &self.revision) }()
+      case 3: try { try decoder.decodeRepeatedStringField(value: &self.steps) }()
+      case 4: try { try decoder.decodeSingularBoolField(value: &self.compiledLocally) }()
+      case 5: try { try decoder.decodeSingularStringField(value: &self.status) }()
+      case 6: try { try decoder.decodeSingularStringField(value: &self.detail) }()
+      case 7: try { try decoder.decodeSingularUInt64Field(value: &self.compileMicros) }()
+      case 8: try { try decoder.decodeSingularStringField(value: &self.streamedPrefix) }()
+      case 9: try { try decoder.decodeRepeatedStringField(value: &self.routineSuggestions) }()
+      case 10: try { try decoder.decodeSingularStringField(value: &self.routineSuggestionDetail) }()
+      default: break
+      }
+    }
+  }
+
+  func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.streamID.isEmpty {
+      try visitor.visitSingularStringField(value: self.streamID, fieldNumber: 1)
+    }
+    if self.revision != 0 {
+      try visitor.visitSingularUInt64Field(value: self.revision, fieldNumber: 2)
+    }
+    if !self.steps.isEmpty {
+      try visitor.visitRepeatedStringField(value: self.steps, fieldNumber: 3)
+    }
+    if self.compiledLocally != false {
+      try visitor.visitSingularBoolField(value: self.compiledLocally, fieldNumber: 4)
+    }
+    if !self.status.isEmpty {
+      try visitor.visitSingularStringField(value: self.status, fieldNumber: 5)
+    }
+    if !self.detail.isEmpty {
+      try visitor.visitSingularStringField(value: self.detail, fieldNumber: 6)
+    }
+    if self.compileMicros != 0 {
+      try visitor.visitSingularUInt64Field(value: self.compileMicros, fieldNumber: 7)
+    }
+    if !self.streamedPrefix.isEmpty {
+      try visitor.visitSingularStringField(value: self.streamedPrefix, fieldNumber: 8)
+    }
+    if !self.routineSuggestions.isEmpty {
+      try visitor.visitRepeatedStringField(value: self.routineSuggestions, fieldNumber: 9)
+    }
+    if !self.routineSuggestionDetail.isEmpty {
+      try visitor.visitSingularStringField(value: self.routineSuggestionDetail, fieldNumber: 10)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  static func ==(lhs: Sage_Ipc_V2_IntentPreview, rhs: Sage_Ipc_V2_IntentPreview) -> Bool {
+    if lhs.streamID != rhs.streamID {return false}
+    if lhs.revision != rhs.revision {return false}
+    if lhs.steps != rhs.steps {return false}
+    if lhs.compiledLocally != rhs.compiledLocally {return false}
+    if lhs.status != rhs.status {return false}
+    if lhs.detail != rhs.detail {return false}
+    if lhs.compileMicros != rhs.compileMicros {return false}
+    if lhs.streamedPrefix != rhs.streamedPrefix {return false}
+    if lhs.routineSuggestions != rhs.routineSuggestions {return false}
+    if lhs.routineSuggestionDetail != rhs.routineSuggestionDetail {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
 nonisolated extension Sage_Ipc_V2_SubmitTask: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".SubmitTask"
-  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}text\0\u{1}source\0\u{3}conversation_id\0\u{1}resources\0")
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}text\0\u{1}source\0\u{3}conversation_id\0\u{1}resources\0\u{3}supersedes_task_id\0\u{3}voice_stream_id\0\u{3}streamed_prefix\0\u{3}finalize_stream\0")
 
   mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -2180,6 +2812,10 @@ nonisolated extension Sage_Ipc_V2_SubmitTask: SwiftProtobuf.Message, SwiftProtob
       case 2: try { try decoder.decodeSingularEnumField(value: &self.source) }()
       case 3: try { try decoder.decodeSingularStringField(value: &self.conversationID) }()
       case 4: try { try decoder.decodeRepeatedMessageField(value: &self.resources) }()
+      case 5: try { try decoder.decodeSingularStringField(value: &self.supersedesTaskID) }()
+      case 6: try { try decoder.decodeSingularStringField(value: &self.voiceStreamID) }()
+      case 7: try { try decoder.decodeSingularBoolField(value: &self.streamedPrefix) }()
+      case 8: try { try decoder.decodeSingularBoolField(value: &self.finalizeStream) }()
       default: break
       }
     }
@@ -2198,6 +2834,18 @@ nonisolated extension Sage_Ipc_V2_SubmitTask: SwiftProtobuf.Message, SwiftProtob
     if !self.resources.isEmpty {
       try visitor.visitRepeatedMessageField(value: self.resources, fieldNumber: 4)
     }
+    if !self.supersedesTaskID.isEmpty {
+      try visitor.visitSingularStringField(value: self.supersedesTaskID, fieldNumber: 5)
+    }
+    if !self.voiceStreamID.isEmpty {
+      try visitor.visitSingularStringField(value: self.voiceStreamID, fieldNumber: 6)
+    }
+    if self.streamedPrefix != false {
+      try visitor.visitSingularBoolField(value: self.streamedPrefix, fieldNumber: 7)
+    }
+    if self.finalizeStream != false {
+      try visitor.visitSingularBoolField(value: self.finalizeStream, fieldNumber: 8)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -2206,6 +2854,10 @@ nonisolated extension Sage_Ipc_V2_SubmitTask: SwiftProtobuf.Message, SwiftProtob
     if lhs.source != rhs.source {return false}
     if lhs.conversationID != rhs.conversationID {return false}
     if lhs.resources != rhs.resources {return false}
+    if lhs.supersedesTaskID != rhs.supersedesTaskID {return false}
+    if lhs.voiceStreamID != rhs.voiceStreamID {return false}
+    if lhs.streamedPrefix != rhs.streamedPrefix {return false}
+    if lhs.finalizeStream != rhs.finalizeStream {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -2372,7 +3024,7 @@ nonisolated extension Sage_Ipc_V2_UpdatePermission: SwiftProtobuf.Message, Swift
 
 nonisolated extension Sage_Ipc_V2_UndoLastAction: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".UndoLastAction"
-  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}task_id\0")
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}task_id\0\u{3}action_id\0")
 
   mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -2381,6 +3033,7 @@ nonisolated extension Sage_Ipc_V2_UndoLastAction: SwiftProtobuf.Message, SwiftPr
       // enabled. https://github.com/apple/swift-protobuf/issues/1034
       switch fieldNumber {
       case 1: try { try decoder.decodeSingularStringField(value: &self.taskID) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.actionID) }()
       default: break
       }
     }
@@ -2390,11 +3043,15 @@ nonisolated extension Sage_Ipc_V2_UndoLastAction: SwiftProtobuf.Message, SwiftPr
     if !self.taskID.isEmpty {
       try visitor.visitSingularStringField(value: self.taskID, fieldNumber: 1)
     }
+    if !self.actionID.isEmpty {
+      try visitor.visitSingularStringField(value: self.actionID, fieldNumber: 2)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
   static func ==(lhs: Sage_Ipc_V2_UndoLastAction, rhs: Sage_Ipc_V2_UndoLastAction) -> Bool {
     if lhs.taskID != rhs.taskID {return false}
+    if lhs.actionID != rhs.actionID {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -2557,7 +3214,7 @@ nonisolated extension Sage_Ipc_V2_TestProviderConnection: SwiftProtobuf.Message,
 
 nonisolated extension Sage_Ipc_V2_CoreEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".CoreEvent"
-  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}event_id\0\u{3}occurred_at_unix_ms\0\u{4}\u{8}state_snapshot\0\u{3}task_update\0\u{3}agent_event\0\u{3}approval_request\0\u{3}model_response_delta\0\u{1}error\0\u{1}notification\0\u{3}permission_request\0\u{3}question_request\0\u{3}provider_connection_result\0\u{3}knowledge_state\0\u{3}workflow_state\0")
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}event_id\0\u{3}occurred_at_unix_ms\0\u{4}\u{8}state_snapshot\0\u{3}task_update\0\u{3}agent_event\0\u{3}approval_request\0\u{3}model_response_delta\0\u{1}error\0\u{1}notification\0\u{3}permission_request\0\u{3}question_request\0\u{3}provider_connection_result\0\u{3}knowledge_state\0\u{3}workflow_state\0\u{3}task_accepted\0\u{3}decision_resolved\0\u{3}intent_preview\0\u{3}world_model_state\0")
 
   mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -2723,6 +3380,58 @@ nonisolated extension Sage_Ipc_V2_CoreEvent: SwiftProtobuf.Message, SwiftProtobu
           self.event = .workflowState(v)
         }
       }()
+      case 22: try {
+        var v: Sage_Ipc_V2_TaskAccepted?
+        var hadOneofValue = false
+        if let current = self.event {
+          hadOneofValue = true
+          if case .taskAccepted(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.event = .taskAccepted(v)
+        }
+      }()
+      case 23: try {
+        var v: Sage_Ipc_V2_DecisionResolved?
+        var hadOneofValue = false
+        if let current = self.event {
+          hadOneofValue = true
+          if case .decisionResolved(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.event = .decisionResolved(v)
+        }
+      }()
+      case 24: try {
+        var v: Sage_Ipc_V2_IntentPreview?
+        var hadOneofValue = false
+        if let current = self.event {
+          hadOneofValue = true
+          if case .intentPreview(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.event = .intentPreview(v)
+        }
+      }()
+      case 25: try {
+        var v: Sage_Ipc_V2_WorldModelState?
+        var hadOneofValue = false
+        if let current = self.event {
+          hadOneofValue = true
+          if case .worldModelState(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.event = .worldModelState(v)
+        }
+      }()
       default: break
       }
     }
@@ -2788,6 +3497,22 @@ nonisolated extension Sage_Ipc_V2_CoreEvent: SwiftProtobuf.Message, SwiftProtobu
       guard case .workflowState(let v)? = self.event else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 21)
     }()
+    case .taskAccepted?: try {
+      guard case .taskAccepted(let v)? = self.event else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 22)
+    }()
+    case .decisionResolved?: try {
+      guard case .decisionResolved(let v)? = self.event else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 23)
+    }()
+    case .intentPreview?: try {
+      guard case .intentPreview(let v)? = self.event else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 24)
+    }()
+    case .worldModelState?: try {
+      guard case .worldModelState(let v)? = self.event else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 25)
+    }()
     case nil: break
     }
     try unknownFields.traverse(visitor: &visitor)
@@ -2797,6 +3522,81 @@ nonisolated extension Sage_Ipc_V2_CoreEvent: SwiftProtobuf.Message, SwiftProtobu
     if lhs.eventID != rhs.eventID {return false}
     if lhs.occurredAtUnixMs != rhs.occurredAtUnixMs {return false}
     if lhs.event != rhs.event {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Sage_Ipc_V2_TaskAccepted: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  static let protoMessageName: String = _protobuf_package + ".TaskAccepted"
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{3}task_id\0")
+
+  mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.requestID) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.taskID) }()
+      default: break
+      }
+    }
+  }
+
+  func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.requestID.isEmpty {
+      try visitor.visitSingularStringField(value: self.requestID, fieldNumber: 1)
+    }
+    if !self.taskID.isEmpty {
+      try visitor.visitSingularStringField(value: self.taskID, fieldNumber: 2)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  static func ==(lhs: Sage_Ipc_V2_TaskAccepted, rhs: Sage_Ipc_V2_TaskAccepted) -> Bool {
+    if lhs.requestID != rhs.requestID {return false}
+    if lhs.taskID != rhs.taskID {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Sage_Ipc_V2_DecisionResolved: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  static let protoMessageName: String = _protobuf_package + ".DecisionResolved"
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}decision_id\0\u{3}task_id\0\u{1}state\0")
+
+  mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.decisionID) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.taskID) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.state) }()
+      default: break
+      }
+    }
+  }
+
+  func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.decisionID.isEmpty {
+      try visitor.visitSingularStringField(value: self.decisionID, fieldNumber: 1)
+    }
+    if !self.taskID.isEmpty {
+      try visitor.visitSingularStringField(value: self.taskID, fieldNumber: 2)
+    }
+    if !self.state.isEmpty {
+      try visitor.visitSingularStringField(value: self.state, fieldNumber: 3)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  static func ==(lhs: Sage_Ipc_V2_DecisionResolved, rhs: Sage_Ipc_V2_DecisionResolved) -> Bool {
+    if lhs.decisionID != rhs.decisionID {return false}
+    if lhs.taskID != rhs.taskID {return false}
+    if lhs.state != rhs.state {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -2854,7 +3654,7 @@ nonisolated extension Sage_Ipc_V2_ProviderConnectionResult: SwiftProtobuf.Messag
 
 nonisolated extension Sage_Ipc_V2_StateSnapshot: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".StateSnapshot"
-  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}tasks\0\u{3}pending_approvals\0\u{3}core_version\0\u{3}protocol_version\0\u{3}provider_settings\0\u{1}knowledge\0\u{3}storage_locked\0")
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}tasks\0\u{3}pending_approvals\0\u{3}core_version\0\u{3}protocol_version\0\u{3}provider_settings\0\u{1}knowledge\0\u{3}storage_locked\0\u{3}pending_questions\0")
 
   mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -2869,6 +3669,7 @@ nonisolated extension Sage_Ipc_V2_StateSnapshot: SwiftProtobuf.Message, SwiftPro
       case 5: try { try decoder.decodeRepeatedMessageField(value: &self.providerSettings) }()
       case 6: try { try decoder.decodeSingularMessageField(value: &self._knowledge) }()
       case 7: try { try decoder.decodeSingularBoolField(value: &self.storageLocked) }()
+      case 8: try { try decoder.decodeRepeatedMessageField(value: &self.pendingQuestions) }()
       default: break
       }
     }
@@ -2900,6 +3701,9 @@ nonisolated extension Sage_Ipc_V2_StateSnapshot: SwiftProtobuf.Message, SwiftPro
     if self.storageLocked != false {
       try visitor.visitSingularBoolField(value: self.storageLocked, fieldNumber: 7)
     }
+    if !self.pendingQuestions.isEmpty {
+      try visitor.visitRepeatedMessageField(value: self.pendingQuestions, fieldNumber: 8)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -2911,6 +3715,7 @@ nonisolated extension Sage_Ipc_V2_StateSnapshot: SwiftProtobuf.Message, SwiftPro
     if lhs.providerSettings != rhs.providerSettings {return false}
     if lhs._knowledge != rhs._knowledge {return false}
     if lhs.storageLocked != rhs.storageLocked {return false}
+    if lhs.pendingQuestions != rhs.pendingQuestions {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -2968,7 +3773,217 @@ nonisolated extension Sage_Ipc_V2_ProviderSettings: SwiftProtobuf.Message, Swift
 
 nonisolated extension Sage_Ipc_V2_TaskUpdate: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".TaskUpdate"
-  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}task_id\0\u{1}request\0\u{1}status\0\u{1}summary\0\u{3}completed_actions\0\u{3}total_actions\0\u{3}current_action\0\u{3}final_outcome\0\u{3}undo_available\0\u{3}conversation_id\0\u{3}message_id\0\u{1}actions\0")
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}task_id\0\u{1}request\0\u{1}status\0\u{1}summary\0\u{3}completed_actions\0\u{3}total_actions\0\u{3}current_action\0\u{3}final_outcome\0\u{3}undo_available\0\u{3}conversation_id\0\u{3}message_id\0\u{1}actions\0\u{3}execution_facts\0\u{3}control_scope_id\0\u{3}continued_task_id\0\u{3}undo_state\0\u{3}undo_summary\0\u{3}undo_action_id\0\u{3}intent_revision\0\u{3}intent_change_summary\0\u{3}routine_summary\0")
+
+  fileprivate class _StorageClass {
+    var _taskID: String = String()
+    var _request: String = String()
+    var _status: Sage_Ipc_V2_TaskStatus = .unspecified
+    var _summary: String = String()
+    var _completedActions: UInt32 = 0
+    var _totalActions: UInt32 = 0
+    var _currentAction: String = String()
+    var _finalOutcome: String = String()
+    var _undoAvailable: Bool = false
+    var _conversationID: String = String()
+    var _messageID: String = String()
+    var _actions: [Sage_Ipc_V2_ActionProgress] = []
+    var _executionFacts: Sage_Ipc_V2_ExecutionFacts? = nil
+    var _controlScopeID: String = String()
+    var _continuedTaskID: String = String()
+    var _undoState: String = String()
+    var _undoSummary: String = String()
+    var _undoActionID: String = String()
+    var _intentRevision: UInt64 = 0
+    var _intentChangeSummary: String = String()
+    var _routineSummary: String = String()
+
+      // This property is used as the initial default value for new instances of the type.
+      // The type itself is protecting the reference to its storage via CoW semantics.
+      // This will force a copy to be made of this reference when the first mutation occurs;
+      // hence, it is safe to mark this as `nonisolated(unsafe)`.
+      static nonisolated(unsafe) let defaultInstance = _StorageClass()
+
+    private init() {}
+
+    init(copying source: _StorageClass) {
+      _taskID = source._taskID
+      _request = source._request
+      _status = source._status
+      _summary = source._summary
+      _completedActions = source._completedActions
+      _totalActions = source._totalActions
+      _currentAction = source._currentAction
+      _finalOutcome = source._finalOutcome
+      _undoAvailable = source._undoAvailable
+      _conversationID = source._conversationID
+      _messageID = source._messageID
+      _actions = source._actions
+      _executionFacts = source._executionFacts
+      _controlScopeID = source._controlScopeID
+      _continuedTaskID = source._continuedTaskID
+      _undoState = source._undoState
+      _undoSummary = source._undoSummary
+      _undoActionID = source._undoActionID
+      _intentRevision = source._intentRevision
+      _intentChangeSummary = source._intentChangeSummary
+      _routineSummary = source._routineSummary
+    }
+  }
+
+  fileprivate mutating func _uniqueStorage() -> _StorageClass {
+    if !isKnownUniquelyReferenced(&_storage) {
+      _storage = _StorageClass(copying: _storage)
+    }
+    return _storage
+  }
+
+  mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    _ = _uniqueStorage()
+    try withExtendedLifetime(_storage) { (_storage: _StorageClass) in
+      while let fieldNumber = try decoder.nextFieldNumber() {
+        // The use of inline closures is to circumvent an issue where the compiler
+        // allocates stack space for every case branch when no optimizations are
+        // enabled. https://github.com/apple/swift-protobuf/issues/1034
+        switch fieldNumber {
+        case 1: try { try decoder.decodeSingularStringField(value: &_storage._taskID) }()
+        case 2: try { try decoder.decodeSingularStringField(value: &_storage._request) }()
+        case 3: try { try decoder.decodeSingularEnumField(value: &_storage._status) }()
+        case 4: try { try decoder.decodeSingularStringField(value: &_storage._summary) }()
+        case 5: try { try decoder.decodeSingularUInt32Field(value: &_storage._completedActions) }()
+        case 6: try { try decoder.decodeSingularUInt32Field(value: &_storage._totalActions) }()
+        case 7: try { try decoder.decodeSingularStringField(value: &_storage._currentAction) }()
+        case 8: try { try decoder.decodeSingularStringField(value: &_storage._finalOutcome) }()
+        case 9: try { try decoder.decodeSingularBoolField(value: &_storage._undoAvailable) }()
+        case 10: try { try decoder.decodeSingularStringField(value: &_storage._conversationID) }()
+        case 11: try { try decoder.decodeSingularStringField(value: &_storage._messageID) }()
+        case 12: try { try decoder.decodeRepeatedMessageField(value: &_storage._actions) }()
+        case 13: try { try decoder.decodeSingularMessageField(value: &_storage._executionFacts) }()
+        case 14: try { try decoder.decodeSingularStringField(value: &_storage._controlScopeID) }()
+        case 15: try { try decoder.decodeSingularStringField(value: &_storage._continuedTaskID) }()
+        case 16: try { try decoder.decodeSingularStringField(value: &_storage._undoState) }()
+        case 17: try { try decoder.decodeSingularStringField(value: &_storage._undoSummary) }()
+        case 18: try { try decoder.decodeSingularStringField(value: &_storage._undoActionID) }()
+        case 19: try { try decoder.decodeSingularUInt64Field(value: &_storage._intentRevision) }()
+        case 20: try { try decoder.decodeSingularStringField(value: &_storage._intentChangeSummary) }()
+        case 21: try { try decoder.decodeSingularStringField(value: &_storage._routineSummary) }()
+        default: break
+        }
+      }
+    }
+  }
+
+  func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    try withExtendedLifetime(_storage) { (_storage: _StorageClass) in
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every if/case branch local when no optimizations
+      // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+      // https://github.com/apple/swift-protobuf/issues/1182
+      if !_storage._taskID.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._taskID, fieldNumber: 1)
+      }
+      if !_storage._request.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._request, fieldNumber: 2)
+      }
+      if _storage._status != .unspecified {
+        try visitor.visitSingularEnumField(value: _storage._status, fieldNumber: 3)
+      }
+      if !_storage._summary.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._summary, fieldNumber: 4)
+      }
+      if _storage._completedActions != 0 {
+        try visitor.visitSingularUInt32Field(value: _storage._completedActions, fieldNumber: 5)
+      }
+      if _storage._totalActions != 0 {
+        try visitor.visitSingularUInt32Field(value: _storage._totalActions, fieldNumber: 6)
+      }
+      if !_storage._currentAction.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._currentAction, fieldNumber: 7)
+      }
+      if !_storage._finalOutcome.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._finalOutcome, fieldNumber: 8)
+      }
+      if _storage._undoAvailable != false {
+        try visitor.visitSingularBoolField(value: _storage._undoAvailable, fieldNumber: 9)
+      }
+      if !_storage._conversationID.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._conversationID, fieldNumber: 10)
+      }
+      if !_storage._messageID.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._messageID, fieldNumber: 11)
+      }
+      if !_storage._actions.isEmpty {
+        try visitor.visitRepeatedMessageField(value: _storage._actions, fieldNumber: 12)
+      }
+      try { if let v = _storage._executionFacts {
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 13)
+      } }()
+      if !_storage._controlScopeID.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._controlScopeID, fieldNumber: 14)
+      }
+      if !_storage._continuedTaskID.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._continuedTaskID, fieldNumber: 15)
+      }
+      if !_storage._undoState.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._undoState, fieldNumber: 16)
+      }
+      if !_storage._undoSummary.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._undoSummary, fieldNumber: 17)
+      }
+      if !_storage._undoActionID.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._undoActionID, fieldNumber: 18)
+      }
+      if _storage._intentRevision != 0 {
+        try visitor.visitSingularUInt64Field(value: _storage._intentRevision, fieldNumber: 19)
+      }
+      if !_storage._intentChangeSummary.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._intentChangeSummary, fieldNumber: 20)
+      }
+      if !_storage._routineSummary.isEmpty {
+        try visitor.visitSingularStringField(value: _storage._routineSummary, fieldNumber: 21)
+      }
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  static func ==(lhs: Sage_Ipc_V2_TaskUpdate, rhs: Sage_Ipc_V2_TaskUpdate) -> Bool {
+    if lhs._storage !== rhs._storage {
+      let storagesAreEqual: Bool = withExtendedLifetime((lhs._storage, rhs._storage)) { (_args: (_StorageClass, _StorageClass)) in
+        let _storage = _args.0
+        let rhs_storage = _args.1
+        if _storage._taskID != rhs_storage._taskID {return false}
+        if _storage._request != rhs_storage._request {return false}
+        if _storage._status != rhs_storage._status {return false}
+        if _storage._summary != rhs_storage._summary {return false}
+        if _storage._completedActions != rhs_storage._completedActions {return false}
+        if _storage._totalActions != rhs_storage._totalActions {return false}
+        if _storage._currentAction != rhs_storage._currentAction {return false}
+        if _storage._finalOutcome != rhs_storage._finalOutcome {return false}
+        if _storage._undoAvailable != rhs_storage._undoAvailable {return false}
+        if _storage._conversationID != rhs_storage._conversationID {return false}
+        if _storage._messageID != rhs_storage._messageID {return false}
+        if _storage._actions != rhs_storage._actions {return false}
+        if _storage._executionFacts != rhs_storage._executionFacts {return false}
+        if _storage._controlScopeID != rhs_storage._controlScopeID {return false}
+        if _storage._continuedTaskID != rhs_storage._continuedTaskID {return false}
+        if _storage._undoState != rhs_storage._undoState {return false}
+        if _storage._undoSummary != rhs_storage._undoSummary {return false}
+        if _storage._undoActionID != rhs_storage._undoActionID {return false}
+        if _storage._intentRevision != rhs_storage._intentRevision {return false}
+        if _storage._intentChangeSummary != rhs_storage._intentChangeSummary {return false}
+        if _storage._routineSummary != rhs_storage._routineSummary {return false}
+        return true
+      }
+      if !storagesAreEqual {return false}
+    }
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Sage_Ipc_V2_ExecutionFacts: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  static let protoMessageName: String = _protobuf_package + ".ExecutionFacts"
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}verified\0\u{1}failed\0\u{1}pending\0\u{1}uncertain\0\u{1}summary\0\u{1}undone\0")
 
   mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -2976,76 +3991,46 @@ nonisolated extension Sage_Ipc_V2_TaskUpdate: SwiftProtobuf.Message, SwiftProtob
       // allocates stack space for every case branch when no optimizations are
       // enabled. https://github.com/apple/swift-protobuf/issues/1034
       switch fieldNumber {
-      case 1: try { try decoder.decodeSingularStringField(value: &self.taskID) }()
-      case 2: try { try decoder.decodeSingularStringField(value: &self.request) }()
-      case 3: try { try decoder.decodeSingularEnumField(value: &self.status) }()
-      case 4: try { try decoder.decodeSingularStringField(value: &self.summary) }()
-      case 5: try { try decoder.decodeSingularUInt32Field(value: &self.completedActions) }()
-      case 6: try { try decoder.decodeSingularUInt32Field(value: &self.totalActions) }()
-      case 7: try { try decoder.decodeSingularStringField(value: &self.currentAction) }()
-      case 8: try { try decoder.decodeSingularStringField(value: &self.finalOutcome) }()
-      case 9: try { try decoder.decodeSingularBoolField(value: &self.undoAvailable) }()
-      case 10: try { try decoder.decodeSingularStringField(value: &self.conversationID) }()
-      case 11: try { try decoder.decodeSingularStringField(value: &self.messageID) }()
-      case 12: try { try decoder.decodeRepeatedMessageField(value: &self.actions) }()
+      case 1: try { try decoder.decodeSingularUInt32Field(value: &self.verified) }()
+      case 2: try { try decoder.decodeSingularUInt32Field(value: &self.failed) }()
+      case 3: try { try decoder.decodeSingularUInt32Field(value: &self.pending) }()
+      case 4: try { try decoder.decodeSingularUInt32Field(value: &self.uncertain) }()
+      case 5: try { try decoder.decodeSingularStringField(value: &self.summary) }()
+      case 6: try { try decoder.decodeSingularUInt32Field(value: &self.undone) }()
       default: break
       }
     }
   }
 
   func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
-    if !self.taskID.isEmpty {
-      try visitor.visitSingularStringField(value: self.taskID, fieldNumber: 1)
+    if self.verified != 0 {
+      try visitor.visitSingularUInt32Field(value: self.verified, fieldNumber: 1)
     }
-    if !self.request.isEmpty {
-      try visitor.visitSingularStringField(value: self.request, fieldNumber: 2)
+    if self.failed != 0 {
+      try visitor.visitSingularUInt32Field(value: self.failed, fieldNumber: 2)
     }
-    if self.status != .unspecified {
-      try visitor.visitSingularEnumField(value: self.status, fieldNumber: 3)
+    if self.pending != 0 {
+      try visitor.visitSingularUInt32Field(value: self.pending, fieldNumber: 3)
+    }
+    if self.uncertain != 0 {
+      try visitor.visitSingularUInt32Field(value: self.uncertain, fieldNumber: 4)
     }
     if !self.summary.isEmpty {
-      try visitor.visitSingularStringField(value: self.summary, fieldNumber: 4)
+      try visitor.visitSingularStringField(value: self.summary, fieldNumber: 5)
     }
-    if self.completedActions != 0 {
-      try visitor.visitSingularUInt32Field(value: self.completedActions, fieldNumber: 5)
-    }
-    if self.totalActions != 0 {
-      try visitor.visitSingularUInt32Field(value: self.totalActions, fieldNumber: 6)
-    }
-    if !self.currentAction.isEmpty {
-      try visitor.visitSingularStringField(value: self.currentAction, fieldNumber: 7)
-    }
-    if !self.finalOutcome.isEmpty {
-      try visitor.visitSingularStringField(value: self.finalOutcome, fieldNumber: 8)
-    }
-    if self.undoAvailable != false {
-      try visitor.visitSingularBoolField(value: self.undoAvailable, fieldNumber: 9)
-    }
-    if !self.conversationID.isEmpty {
-      try visitor.visitSingularStringField(value: self.conversationID, fieldNumber: 10)
-    }
-    if !self.messageID.isEmpty {
-      try visitor.visitSingularStringField(value: self.messageID, fieldNumber: 11)
-    }
-    if !self.actions.isEmpty {
-      try visitor.visitRepeatedMessageField(value: self.actions, fieldNumber: 12)
+    if self.undone != 0 {
+      try visitor.visitSingularUInt32Field(value: self.undone, fieldNumber: 6)
     }
     try unknownFields.traverse(visitor: &visitor)
   }
 
-  static func ==(lhs: Sage_Ipc_V2_TaskUpdate, rhs: Sage_Ipc_V2_TaskUpdate) -> Bool {
-    if lhs.taskID != rhs.taskID {return false}
-    if lhs.request != rhs.request {return false}
-    if lhs.status != rhs.status {return false}
+  static func ==(lhs: Sage_Ipc_V2_ExecutionFacts, rhs: Sage_Ipc_V2_ExecutionFacts) -> Bool {
+    if lhs.verified != rhs.verified {return false}
+    if lhs.failed != rhs.failed {return false}
+    if lhs.pending != rhs.pending {return false}
+    if lhs.uncertain != rhs.uncertain {return false}
     if lhs.summary != rhs.summary {return false}
-    if lhs.completedActions != rhs.completedActions {return false}
-    if lhs.totalActions != rhs.totalActions {return false}
-    if lhs.currentAction != rhs.currentAction {return false}
-    if lhs.finalOutcome != rhs.finalOutcome {return false}
-    if lhs.undoAvailable != rhs.undoAvailable {return false}
-    if lhs.conversationID != rhs.conversationID {return false}
-    if lhs.messageID != rhs.messageID {return false}
-    if lhs.actions != rhs.actions {return false}
+    if lhs.undone != rhs.undone {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -3236,6 +4221,76 @@ nonisolated extension Sage_Ipc_V2_WorkflowState: SwiftProtobuf.Message, SwiftPro
   }
 }
 
+nonisolated extension Sage_Ipc_V2_WorldModelCommand: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  static let protoMessageName: String = _protobuf_package + ".WorldModelCommand"
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}operation\0\u{1}id\0\u{1}json\0")
+
+  mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.operation) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.id) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.json) }()
+      default: break
+      }
+    }
+  }
+
+  func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.operation.isEmpty {
+      try visitor.visitSingularStringField(value: self.operation, fieldNumber: 1)
+    }
+    if !self.id.isEmpty {
+      try visitor.visitSingularStringField(value: self.id, fieldNumber: 2)
+    }
+    if !self.json.isEmpty {
+      try visitor.visitSingularStringField(value: self.json, fieldNumber: 3)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  static func ==(lhs: Sage_Ipc_V2_WorldModelCommand, rhs: Sage_Ipc_V2_WorldModelCommand) -> Bool {
+    if lhs.operation != rhs.operation {return false}
+    if lhs.id != rhs.id {return false}
+    if lhs.json != rhs.json {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Sage_Ipc_V2_WorldModelState: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  static let protoMessageName: String = _protobuf_package + ".WorldModelState"
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}json\0")
+
+  mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.json) }()
+      default: break
+      }
+    }
+  }
+
+  func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.json.isEmpty {
+      try visitor.visitSingularStringField(value: self.json, fieldNumber: 1)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  static func ==(lhs: Sage_Ipc_V2_WorldModelState, rhs: Sage_Ipc_V2_WorldModelState) -> Bool {
+    if lhs.json != rhs.json {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
 nonisolated extension Sage_Ipc_V2_ActionProgress: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".ActionProgress"
   static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}action_id\0\u{1}summary\0\u{1}status\0")
@@ -3278,7 +4333,7 @@ nonisolated extension Sage_Ipc_V2_ActionProgress: SwiftProtobuf.Message, SwiftPr
 
 nonisolated extension Sage_Ipc_V2_AdapterHello: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".AdapterHello"
-  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}domain\0")
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}domain\0\u{3}cancellation_protocol\0")
 
   mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -3287,6 +4342,7 @@ nonisolated extension Sage_Ipc_V2_AdapterHello: SwiftProtobuf.Message, SwiftProt
       // enabled. https://github.com/apple/swift-protobuf/issues/1034
       switch fieldNumber {
       case 1: try { try decoder.decodeSingularStringField(value: &self.domain) }()
+      case 2: try { try decoder.decodeSingularUInt32Field(value: &self.cancellationProtocol) }()
       default: break
       }
     }
@@ -3296,11 +4352,80 @@ nonisolated extension Sage_Ipc_V2_AdapterHello: SwiftProtobuf.Message, SwiftProt
     if !self.domain.isEmpty {
       try visitor.visitSingularStringField(value: self.domain, fieldNumber: 1)
     }
+    if self.cancellationProtocol != 0 {
+      try visitor.visitSingularUInt32Field(value: self.cancellationProtocol, fieldNumber: 2)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
   static func ==(lhs: Sage_Ipc_V2_AdapterHello, rhs: Sage_Ipc_V2_AdapterHello) -> Bool {
     if lhs.domain != rhs.domain {return false}
+    if lhs.cancellationProtocol != rhs.cancellationProtocol {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Sage_Ipc_V2_AdapterCancel: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  static let protoMessageName: String = _protobuf_package + ".AdapterCancel"
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{3}expires_at_unix_ms\0")
+
+  mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.requestID) }()
+      case 2: try { try decoder.decodeSingularInt64Field(value: &self.expiresAtUnixMs) }()
+      default: break
+      }
+    }
+  }
+
+  func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.requestID.isEmpty {
+      try visitor.visitSingularStringField(value: self.requestID, fieldNumber: 1)
+    }
+    if self.expiresAtUnixMs != 0 {
+      try visitor.visitSingularInt64Field(value: self.expiresAtUnixMs, fieldNumber: 2)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  static func ==(lhs: Sage_Ipc_V2_AdapterCancel, rhs: Sage_Ipc_V2_AdapterCancel) -> Bool {
+    if lhs.requestID != rhs.requestID {return false}
+    if lhs.expiresAtUnixMs != rhs.expiresAtUnixMs {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Sage_Ipc_V2_AdapterCancelAcknowledged: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  static let protoMessageName: String = _protobuf_package + ".AdapterCancelAcknowledged"
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0")
+
+  mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.requestID) }()
+      default: break
+      }
+    }
+  }
+
+  func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.requestID.isEmpty {
+      try visitor.visitSingularStringField(value: self.requestID, fieldNumber: 1)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  static func ==(lhs: Sage_Ipc_V2_AdapterCancelAcknowledged, rhs: Sage_Ipc_V2_AdapterCancelAcknowledged) -> Bool {
+    if lhs.requestID != rhs.requestID {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -3308,7 +4433,7 @@ nonisolated extension Sage_Ipc_V2_AdapterHello: SwiftProtobuf.Message, SwiftProt
 
 nonisolated extension Sage_Ipc_V2_AdapterRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".AdapterRequest"
-  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{1}operation\0\u{1}json\0\u{3}expires_at_unix_ms\0\u{1}grant\0\u{3}browser_target\0")
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{1}operation\0\u{1}json\0\u{3}expires_at_unix_ms\0\u{1}grant\0\u{3}browser_target\0\u{3}application_target\0")
 
   fileprivate class _StorageClass {
     var _requestID: String = String()
@@ -3317,6 +4442,7 @@ nonisolated extension Sage_Ipc_V2_AdapterRequest: SwiftProtobuf.Message, SwiftPr
     var _expiresAtUnixMs: Int64 = 0
     var _grant: Sage_Ipc_V2_ExecutionGrant? = nil
     var _browserTarget: Sage_Ipc_V2_BrowserTarget? = nil
+    var _applicationTarget: Sage_Ipc_V2_ApplicationTarget? = nil
 
       // This property is used as the initial default value for new instances of the type.
       // The type itself is protecting the reference to its storage via CoW semantics.
@@ -3333,6 +4459,7 @@ nonisolated extension Sage_Ipc_V2_AdapterRequest: SwiftProtobuf.Message, SwiftPr
       _expiresAtUnixMs = source._expiresAtUnixMs
       _grant = source._grant
       _browserTarget = source._browserTarget
+      _applicationTarget = source._applicationTarget
     }
   }
 
@@ -3357,6 +4484,7 @@ nonisolated extension Sage_Ipc_V2_AdapterRequest: SwiftProtobuf.Message, SwiftPr
         case 4: try { try decoder.decodeSingularInt64Field(value: &_storage._expiresAtUnixMs) }()
         case 5: try { try decoder.decodeSingularMessageField(value: &_storage._grant) }()
         case 6: try { try decoder.decodeSingularMessageField(value: &_storage._browserTarget) }()
+        case 7: try { try decoder.decodeSingularMessageField(value: &_storage._applicationTarget) }()
         default: break
         }
       }
@@ -3387,6 +4515,9 @@ nonisolated extension Sage_Ipc_V2_AdapterRequest: SwiftProtobuf.Message, SwiftPr
       try { if let v = _storage._browserTarget {
         try visitor.visitSingularMessageField(value: v, fieldNumber: 6)
       } }()
+      try { if let v = _storage._applicationTarget {
+        try visitor.visitSingularMessageField(value: v, fieldNumber: 7)
+      } }()
     }
     try unknownFields.traverse(visitor: &visitor)
   }
@@ -3402,10 +4533,66 @@ nonisolated extension Sage_Ipc_V2_AdapterRequest: SwiftProtobuf.Message, SwiftPr
         if _storage._expiresAtUnixMs != rhs_storage._expiresAtUnixMs {return false}
         if _storage._grant != rhs_storage._grant {return false}
         if _storage._browserTarget != rhs_storage._browserTarget {return false}
+        if _storage._applicationTarget != rhs_storage._applicationTarget {return false}
         return true
       }
       if !storagesAreEqual {return false}
     }
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Sage_Ipc_V2_ApplicationTarget: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  static let protoMessageName: String = _protobuf_package + ".ApplicationTarget"
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}platform\0\u{3}bundle_path\0\u{1}identifier\0\u{3}code_digest\0\u{1}signer\0\u{3}code_digests\0")
+
+  mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.platform) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.bundlePath) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.identifier) }()
+      case 4: try { try decoder.decodeSingularStringField(value: &self.codeDigest) }()
+      case 5: try { try decoder.decodeSingularStringField(value: &self.signer) }()
+      case 6: try { try decoder.decodeRepeatedStringField(value: &self.codeDigests) }()
+      default: break
+      }
+    }
+  }
+
+  func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.platform.isEmpty {
+      try visitor.visitSingularStringField(value: self.platform, fieldNumber: 1)
+    }
+    if !self.bundlePath.isEmpty {
+      try visitor.visitSingularStringField(value: self.bundlePath, fieldNumber: 2)
+    }
+    if !self.identifier.isEmpty {
+      try visitor.visitSingularStringField(value: self.identifier, fieldNumber: 3)
+    }
+    if !self.codeDigest.isEmpty {
+      try visitor.visitSingularStringField(value: self.codeDigest, fieldNumber: 4)
+    }
+    if !self.signer.isEmpty {
+      try visitor.visitSingularStringField(value: self.signer, fieldNumber: 5)
+    }
+    if !self.codeDigests.isEmpty {
+      try visitor.visitRepeatedStringField(value: self.codeDigests, fieldNumber: 6)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  static func ==(lhs: Sage_Ipc_V2_ApplicationTarget, rhs: Sage_Ipc_V2_ApplicationTarget) -> Bool {
+    if lhs.platform != rhs.platform {return false}
+    if lhs.bundlePath != rhs.bundlePath {return false}
+    if lhs.identifier != rhs.identifier {return false}
+    if lhs.codeDigest != rhs.codeDigest {return false}
+    if lhs.signer != rhs.signer {return false}
+    if lhs.codeDigests != rhs.codeDigests {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -3473,7 +4660,7 @@ nonisolated extension Sage_Ipc_V2_BrowserTarget: SwiftProtobuf.Message, SwiftPro
 
 nonisolated extension Sage_Ipc_V2_AdapterResult: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".AdapterResult"
-  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{1}success\0\u{1}json\0\u{1}error\0")
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{1}success\0\u{1}json\0\u{1}error\0\u{3}application_target\0\u{3}observed_process_id\0")
 
   mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -3485,12 +4672,18 @@ nonisolated extension Sage_Ipc_V2_AdapterResult: SwiftProtobuf.Message, SwiftPro
       case 2: try { try decoder.decodeSingularBoolField(value: &self.success) }()
       case 3: try { try decoder.decodeSingularStringField(value: &self.json) }()
       case 4: try { try decoder.decodeSingularStringField(value: &self.error) }()
+      case 5: try { try decoder.decodeSingularMessageField(value: &self._applicationTarget) }()
+      case 6: try { try decoder.decodeSingularUInt32Field(value: &self.observedProcessID) }()
       default: break
       }
     }
   }
 
   func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
     if !self.requestID.isEmpty {
       try visitor.visitSingularStringField(value: self.requestID, fieldNumber: 1)
     }
@@ -3503,6 +4696,12 @@ nonisolated extension Sage_Ipc_V2_AdapterResult: SwiftProtobuf.Message, SwiftPro
     if !self.error.isEmpty {
       try visitor.visitSingularStringField(value: self.error, fieldNumber: 4)
     }
+    try { if let v = self._applicationTarget {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 5)
+    } }()
+    if self.observedProcessID != 0 {
+      try visitor.visitSingularUInt32Field(value: self.observedProcessID, fieldNumber: 6)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -3511,6 +4710,8 @@ nonisolated extension Sage_Ipc_V2_AdapterResult: SwiftProtobuf.Message, SwiftPro
     if lhs.success != rhs.success {return false}
     if lhs.json != rhs.json {return false}
     if lhs.error != rhs.error {return false}
+    if lhs._applicationTarget != rhs._applicationTarget {return false}
+    if lhs.observedProcessID != rhs.observedProcessID {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

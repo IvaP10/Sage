@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-07",
+  "result": "passed",
+  "check": "Pinned Qwen3.5-4B artifact digest and safetensors header validation",
+  "command": "SAGE_QWEN35_PACKAGE_DIR=<local-package-dir> cargo test -p sage-core --features qwen35-evaluation --lib --release --locked --offline qwen35::weight_loader::tests::pinned_checkpoint_shard_headers_match_the_first_party_tensor_map -- --ignored --exact --nocapture --test-threads=1",
+  "duration_seconds": 22.28,
+  "host": {
+    "os": "Darwin 27.0.0",
+    "architecture": "arm64",
+    "hardware_model": "Mac15,3",
+    "physical_memory_bytes": 8589934592
+  },
+  "candidate": {
+    "checkpoint_revision": "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a",
+    "artifact_count": 6,
+    "tensor_count": 738,
+    "indexed_weight_bytes": 9319737856,
+    "artifact_digests_match_pinned_record": true,
+    "safetensors_headers_match_tensor_index": true,
+    "weight_tensors_loaded": false,
+    "candidate_admitted": false
+  },
+  "source": {
+    "head_commit": "ee36a78f2b26ec371f6d4e9dcb9335106130e995",
+    "worktree_was_dirty": true,
+    "qwen35_loader_sha256": "1f6a458f9de35088d6e169e537c0867e628221ecbb2b9e8126b5d5f3feb1c154",
+    "candidate_record_sha256": "f59d36071425907a0058277b4d43d1c22ce7144500a816bcdea7bab56dd93f09"
+  },
+  "candidate_load_attempt": {
+    "result": "refused_before_tensor_import",
+    "command": "SAGE_QWEN35_PACKAGE_DIR=<local-package-dir> cargo test -p sage-core --features qwen35-evaluation --lib --release qwen35::weight_loader::tests::pinned_checkpoint_first_party_candidate_loads_and_generates_one_turn -- --ignored --exact --nocapture --test-threads=1",
+    "memory_envelope_bytes": 4629776384,
+    "host_physical_memory_bytes": 8589934592,
+    "package_digests_match_pinned_record": true,
+    "safetensors_headers_match_tensor_index": true,
+    "weight_tensors_loaded": false,
+    "candidate_admitted": false,
+    "qualification_passed": false,
+    "reason": "ResourceGovernor::reserve_current refused the 8K text/vision candidate envelope before importing weights."
+  },
+  "limits": [
+    "No model tensor values were imported or evaluated.",
+    "This does not establish checkpoint numerical parity, task quality, tokenizer or image-preprocessor parity, peak inference memory, or latency.",
+    "The temporary evaluation signing key is not a Sage production trust root."
+  ]
+}

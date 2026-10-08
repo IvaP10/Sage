@@ -1,0 +1,5 @@
+Windows frontend validation on the macOS development host
+
+- `xmllint --noout apps/windows/Sage.Windows/MainWindow.xaml`: passed.
+- `dotnet --info`: unavailable (`dotnet: command not found`). The Windows target and live WinUI interaction were not compiled or exercised in this environment.
+- The C# frontend source now includes the reviewed-routine card, step preview, three-run readiness state, memory dependency, enable review dialog and explicit forget confirmation. This is source evidence only, not Windows runtime evidence.

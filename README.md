@@ -1,190 +1,112 @@
 # Sage
 
-Sage is a native desktop AI agent for macOS and Windows. The product is no longer an Electron application: macOS uses SwiftUI and AppKit, Windows uses C# and WinUI 3, and both clients connect to one long-running Rust control plane named **sage-core**.
+Sage is a local-first desktop agent with a SwiftUI/AppKit Mac client, a WinUI Windows client and a Rust authority broker. **The native runtime rebuild is in progress; this checkout is not a qualified production release.** The [implementation ledger](docs/v3/implementation-ledger.md) tracks current work and evidence.
 
-The language model is an untrusted planner. It never receives an operating-system handle, a shell, a browser debugging connection, or a permanent filesystem grant. Every proposed action travels through resource resolution, policy, a short-lived capability, a domain-specific executor, a fresh observation, and verification.
+Every executable request follows the same authority path. Model inference remains unavailable in product startup until Sage's first-party model package and isolated worker pass their admission gates:
 
-~~~text
-macOS: SwiftUI + AppKit ─┐
-                         ├── authenticated local IPC ── sage-core (Rust)
-Windows: C# + WinUI 3 ───┘
-                                                     │
-                       model proposal ──> action compiler
-                                                     │
-                        policy ──> capability broker ─┤
-                                                     │
-                   native / browser / sandbox / privileged executor
-                                                     │
-                              observation ──> verification
-~~~
+```text
+Native intent and explicit scope
+  → permission-filtered context → supported local intent or admitted local planner
+  → typed action proposal → prepared target and preview → policy/approval
+  → single-use execution grant → execution → independent observation
+  → verification and encrypted journal → next conversation turn
+```
 
-## Repository layout
+Models are untrusted planners. They cannot grant access, install policies, supply their own success test or silently send local data to a provider.
 
-~~~text
-apps/
-  macos/                         SwiftUI/AppKit client
-  windows/                       WinUI 3 client
-crates/
-  sage-core/                     orchestration and security control plane
-  sage-protocol/                 generated Rust protobuf contract
-  sage-worker-common/            private framed worker contract
-  sage-browser-worker/           isolated structured-browser boundary
-  sage-sandbox-worker/           isolated command/code boundary
-  sage-privileged-helper/        narrow privileged-operation allowlist
-proto/sage/ipc/v1/sage.proto     canonical UI/core protocol
-scripts/                         generation, verification, and packaging
-docs/                            architecture, security, and development guides
-~~~
+## Current capabilities
 
-The native clients contain presentation, window and overlay behavior, native approval/authentication prompts, shortcuts, menu-bar or tray surfaces, and operating-system permission UX. Planning, action state, policy, capabilities, execution routing, persistence, audit records, recovery, and verification live in **sage-core**.
+- Bounded model-free local intent paths, iterative verified tool results, cancellation and task continuation.
+- Explicit file read/create scopes, bounded directory discovery, protected internal assets, handle-based operations, atomic replacement and guarded Undo.
+- Public HTTPS fetch with bounded bodies, public-address validation and DNS pinning.
+- User-paired browser navigation bound to the origin, tab, frame and document generation.
+- Mac application launches bound to a prepared bundle path and code signature. Windows application launches remain unavailable until a signed-identity adapter is implemented.
+- SQLCipher history and recovery artifacts, scoped FTS memory, lineage-aware forgetting, reviewed skill drafts and scoped durable schedules.
+- Protocol v2 with role-separated mutual authentication, exact approvals, worker-bound grants, first-party fail-closed authorization and protected audit checkpoints.
 
-## Implemented control-plane guarantees
+Product startup selects `UnconfiguredModelProvider`, so model-generated answers and plans are unavailable. The Qwen3.5 implementation is an offline evaluation candidate: no real checkpoint has been admitted, and its persistent generation lane is still in-process rather than an isolated worker. Hosted model APIs and external inference runtimes are disabled. Arbitrary code execution, generic UI mutations, privileged operations, WASM/MCP tools and full voice qualification remain unavailable; broker/model/network/native process isolation is unfinished.
 
-- Protobuf-framed IPC over a mode-0600 Unix Domain Socket on macOS and a Named Pipe on Windows
-- Challenge-response HMAC authentication using a 256-bit installation key held in an owner-only macOS file or Windows Credential Manager
-- A version field on every frame and an explicit protocol compatibility handshake
-- Strict structured actions instead of arbitrary shell strings
-- Action graphs with dependencies, explicit state, bounded replanning, pause/cancel, approvals, and final outcomes
-- Provenance and trust classes that keep user authority separate from websites, documents, messages, terminal output, and other external data
-- Deterministic risk classification and per-action policy evaluation below the model
-- Approval digests bound to the exact task, action, arguments, expected outcome, and resource
-- Single-use, task-bound, action-bound, executor-bound capabilities with expiration and revocation
-- Native, browser, sandbox, privileged, and user-interaction execution domains
-- Canonical filesystem resolution with authorized-root and symlink-escape checks
-- Recoverable local deletion, rollback metadata, and an explicit Undo path
-- Fresh post-action observation and deterministic verification
-- SQLite WAL storage, FTS-backed local memory tables, interrupted-task marking, and a tamper-evident audit hash chain
-- OS-backed secret storage; secrets are never written to SQLite or plaintext configuration
-- Isolated browser, sandbox, and privileged worker processes that fail closed when a safe backend or paired session is unavailable
+## Build and run
 
-The current browser worker intentionally refuses to act until an authenticated structured browser session is paired. The privileged helper intentionally refuses installation until a signed platform implementation is installed. The Windows sandbox intentionally refuses command execution until its AppContainer backend is present. These are security gates, not coordinate or unsandboxed fallbacks.
+Shared requirements: Rust **1.89.0**, `protoc`, Clang/libclang for SQLCipher pre-update bindings, Python 3 and Node.js for validation. Mac builds require macOS 14+ and Swift 6.1+; XCTest requires a full Xcode installation. The Windows client needs Windows 10 build 19041+, LLVM with `libclang.dll`, .NET 8 and the Visual Studio Windows application workload; exact package versions live in its project file. If libclang is outside the toolchain's search paths, set `LIBCLANG_PATH` to its containing directory.
 
-## Requirements
-
-Shared:
-
-- Rust 1.85.1
-- Protocol Buffers compiler (protoc)
-
-macOS:
-
-- macOS 14 or newer
-- Xcode/Swift 6.1 or newer
-- protoc-gen-swift 1.38.1 only when regenerating the checked-in Swift binding
-
-Windows:
-
-- Windows 10 19041 or newer
-- Visual Studio 2022 with the Windows application development workload
-- .NET 8 SDK
-- Windows App SDK 2.4
-
-## Build and verify
-
-The first command checks formatting, Clippy, Rust tests, Rust targets, the native macOS client, generated protocol state, Electron-removal guards, and common credential patterns:
-
-~~~bash
-make verify
-~~~
-
-Build the Rust daemon and isolated workers:
-
-~~~bash
-cargo build --workspace
-~~~
-
-Build the macOS native client:
-
-~~~bash
-swift build --package-path apps/macos
-~~~
-
-Run the native macOS app from source:
-
-~~~bash
-cargo build --workspace
+```sh
+cargo build --workspace --locked
 make run-macos
-~~~
+```
 
-The run-macos target gives the Swift client the development sage-core location. The client supplies the IPC installation key through an anonymous stdin pipe when it launches a new core; it never places the key in arguments, environment variables, or SQLite. On macOS the transport key is a 32-byte owner-only file with mode `0600`, so opening Sage never presents Keychain UI. If a core is already serving the authenticated socket, the UI reconnects without replacing it.
+The development launcher supplies the built core path. It passes IPC bootstrap material over an anonymous pipe. Startup does not prompt for Keychain access; protected history is unlocked when explicitly requested. Sage's first-party model generator is still under development; [model setup](docs/model_setup.md) records the current availability and migration behavior.
 
-Build the Windows client from a Windows developer shell:
+On Windows, from a developer shell:
 
-~~~powershell
+```powershell
+cargo build --workspace --locked
 dotnet build apps/windows/Sage.Windows/Sage.Windows.csproj -c Release -p:Platform=x64
-~~~
+```
 
-## Protocol generation
+## Checks and evidence
 
-The file [sage.proto](proto/sage/ipc/v1/sage.proto) is canonical. Rust bindings are generated by prost during Cargo builds, C# bindings are generated by Grpc.Tools during the WinUI build, and the Swift binding is checked in so a source build does not require the generator.
+With full Xcode:
 
-To regenerate Swift after changing the schema:
+```sh
+make verify
+```
 
-~~~bash
+Individual checks:
+
+```sh
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --locked
+swift build --package-path apps/macos
+swift test --package-path apps/macos
+node --test integrations/browser/background.test.mjs
+python3 -m unittest discover -s scripts -p 'test_*.py'
+./scripts/check-repository.sh
+python3 scripts/check-v2-release.py
+```
+
+On a Mac with Command Line Tools but no XCTest, `python3 scripts/check-macos-signatures.py` exercises read-only signing checks against the compiled production adapter. It does not launch applications or qualify the full native flow. Full XCTest and platform acceptance remain separate requirements.
+
+The fixed [100-workflow specification](evals/workflows.json) requires five measured runs per workflow. `scripts/evaluate-v2-report.py` validates measured reports; it does not fabricate missing results. A passing build or fixture test does not establish actual model inference, Chrome pairing, Windows operation, microphone behavior or production security.
+
+## Source map
+
+| Path | Role |
+|---|---|
+| `apps/macos`, `apps/windows` | Native clients and current platform adapters |
+| `crates/sage-core` | Conversation, authority, context, storage, scheduling and execution routing |
+| `crates/sage-protocol`, `proto/sage/ipc/v2/sage.proto` | Canonical protobuf v2 contract |
+| `crates/sage-browser-worker`, `integrations/browser` | Role-separated browser host and paired extension |
+| `docs`, `evals`, `scripts` | Architecture, implementation records, evaluation and release checks |
+
+VM execution and privileged installation remain unavailable; Sage does not package placeholder helper binaries for those capabilities.
+
+Rust and C# bindings are build-generated. The matching Swift binding is checked in. Regenerate it with protoc-gen-swift **1.38.1**:
+
+```sh
 PROTOC_GEN_SWIFT=/absolute/path/to/protoc-gen-swift make protocol
-~~~
+```
 
-Use version 1.38.1 of protoc-gen-swift, matching the pinned SwiftProtobuf runtime.
+The v2 schema is the only protocol source used by the current build. Clients and core must ship together; a protocol mismatch must refuse execution.
 
-## Runtime data
+## Local state and release
 
-Sage remains local-first:
+State lives under `~/Library/Application Support/Sage/` on Mac and `%LOCALAPPDATA%\Sage\` on Windows. SQLCipher stores history, memory, task state, audit records and private recovery artifacts. Keys use OS secret storage; legacy provider credentials may remain there but product inference does not read them. Mac transport credentials are separate owner-only `ipc-auth-v2.key` and `browser-ipc-v2.key` files; signed IPC component identity is still a production gate.
 
-- macOS: ~/Library/Application Support/Sage/
-- Windows: %LOCALAPPDATA%\Sage\
+Interrupted effects are reconciled before retry. Old grants are revoked on restart. Audit checkpoints detect anchored tampering and truncation; they do not protect against a compromised OS or administrator.
 
-The sage.db file contains structured task state, redacted events, settings, permission state, audit records, rollback metadata, and local memory. SQLite uses WAL mode and FTS. On macOS the IPC key is `ipc-auth.key` with mode `0600`; on Windows it remains in Credential Manager. Provider credentials use Keychain or Credential Manager only when the configured provider is invoked.
+Local preview packages can be built with `make package-macos` or `pwsh -File scripts/package-windows.ps1`. Signing, notarization, installer acceptance and safe updates are separate requirements. No current test result authorizes publication:
 
-The UI may restart without killing active core tasks. A core restart marks unfinished tasks **interrupted**; it does not silently resume privileged work.
+```sh
+make release-ready
+```
 
-## Packaging
+This intentionally fails while the [qualification gates](evals/release-gates.json) remain pending. Public tag releases require current evidence; manual development packaging cannot invoke the publication job.
 
-Create an explicitly unsigned native macOS preview application and DMG:
-
-~~~bash
-make package-macos
-~~~
-
-Without `SAGE_MACOS_SIGN_IDENTITY`, the package is ad-hoc signed and
-unnotarized. Gatekeeper may reject that preview. A stable public build requires
-a Developer ID identity and notarization:
-
-~~~bash
-SAGE_MACOS_SIGN_IDENTITY="Developer ID Application: …" \
-SAGE_NOTARY_PROFILE="sage-notary" \
-make package-macos
-~~~
-
-Create the Windows x64 preview installer on Windows (Inno Setup must be installed):
-
-~~~powershell
-pwsh -File scripts/package-windows.ps1
-~~~
-
-The preview is an unsigned EXE and SmartScreen may warn. Stable Windows
-distribution still requires Authenticode, a Windows-native packaging run, and
-real install/runtime acceptance. macOS source/tests do not prove Windows UI
-Automation, Windows Hello, AppContainer, signing, or installation behavior.
-
-## Architecture and security
-
-- [Architecture](docs/architecture.md)
-- [Current source map](docs/current-architecture.md)
-- [Security model](docs/security.md)
+- [Sage architecture and source map](docs/architecture.md)
+- [Implementation ledger](docs/v3/implementation-ledger.md)
+- [Threat model](docs/v2/threat-model.md)
+- [Migration and evaluation](docs/v2/migration-and-evaluation.md)
 - [Model setup](docs/model_setup.md)
-- [Provider development](docs/provider_development.md)
 - [Troubleshooting](docs/troubleshooting.md)
-
-The central invariant is:
-
-~~~text
-AI decides WHAT to propose.
-Policy decides WHETHER it may happen.
-Capabilities decide WHICH resources it may access.
-The execution broker decides HOW it may happen.
-The platform executor performs the operation.
-The observer determines WHAT actually happened.
-The verifier decides WHETHER the expected result exists.
-~~~
-
-Those responsibilities are separate types and modules. A prompt, model response, tool description, or external page can never collapse them into one unrestricted agent loop.

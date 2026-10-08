@@ -1,0 +1,33 @@
+Local intent preparation checkpoint (2026-10-06, Asia/Kolkata)
+
+PASS cargo test --workspace --locked
+  sage-core: 178 passed, 0 failed, 3 ignored (release-only benchmarks)
+  sage-browser-worker: 1 passed
+
+PASS cargo clippy --workspace --all-targets --locked -- -D warnings
+PASS SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk swift build --package-path apps/macos
+PASS SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk python3 scripts/check-macos-signatures.py
+PASS XML parse of apps/windows/Sage.Windows/MainWindow.xaml and App.xaml
+PASS git diff --check
+
+Live macOS interaction: the updated debug app authenticated to the local core,
+sent an unfinished three-clause request, located both signed app identities,
+and displayed the ordered two-step prefix. Replacing and then clearing the
+draft updated the card; the final blank state contains no task or preview.
+No app was activated and no task was submitted.
+
+Read-only Security.framework smoke check resolved installed Calculator in
+28,133,125 ns. The check confirmed that preparation did not change its running
+process set. The native smoke check also rejected changed identity fields,
+an unsigned app bundle, an invalid PID, a cancelled request, missing typed
+identity, and an execution grant with the wrong operations.
+
+Ignored release benchmark:
+cargo test --release -p sage-core warm_application_preview_latency --locked -- --ignored --nocapture
+1,000 warmed in-process IPC-dispatch/cache-hit samples: p50 37,292 ns,
+p95 43,958 ns, p99 46,583 ns. It excludes the socket, UI, native signature
+inspection, authorization, app activation, and independent verification.
+
+Windows source and XAML were inspected and the XAML was parsed. Windows
+compilation and live Windows interaction were not run on this host.
+Full Xcode XCTest and release signing/notarization were not run.

@@ -6,6 +6,10 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[features]
+default = []
+qwen35-evaluation = ["dep:sage-kernels", "dep:sage-metal", "dep:sage-model-package", "dep:sage-qwen-tokenizer", "sage-qwen-tokenizer/core-test-support", "dep:sysinfo"]
+
 [lib]
 name = "sage_core"
 path = "src/lib.rs"
@@ -28,6 +32,10 @@ prost.workspace = true
 reqwest.workspace = true
 rusqlite.workspace = true
 sage-protocol = { path = "../sage-protocol" }
+sage-model-package = { path = "../sage-model-package", optional = true }
+sage-kernels = { path = "../sage-kernels", optional = true }
+sage-metal = { path = "../sage-metal", optional = true }
+sage-qwen-tokenizer = { path = "../sage-qwen-tokenizer", optional = true }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -41,11 +49,14 @@ url.workspace = true
 zeroize.workspace = true
 notify.workspace = true
 
-ed25519-dalek.workspace = true
-sysinfo.workspace = true
-cedar-policy.workspace = true
+sysinfo = { workspace = true, optional = true }
 cap-std.workspace = true
 cap-fs-ext.workspace = true
 
 [dev-dependencies]
+ed25519-dalek.workspace = true
 tempfile.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+# Stable by-handle metadata without Rust's unstable windows_by_handle APIs.
+cap-primitives = "=3.4.6"

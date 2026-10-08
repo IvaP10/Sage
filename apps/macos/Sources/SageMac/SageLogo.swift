@@ -18,10 +18,22 @@ struct SageLogo: View {
 
 @MainActor
 struct SageMenuBarIcon: View {
+    var hasLearningRequests = false
+
     var body: some View {
-        Image(nsImage: SageBrand.menuBarIcon)
-            .frame(width: 18, height: 18)
-            .accessibilityHidden(true)
+        ZStack(alignment: .topTrailing) {
+            Image(nsImage: SageBrand.menuBarIcon)
+                .frame(width: 18, height: 18)
+                .accessibilityHidden(true)
+            if hasLearningRequests {
+                Circle()
+                    .fill(Color.orange)
+                    .frame(width: 6, height: 6)
+                    .overlay(Circle().stroke(Color.black.opacity(0.8), lineWidth: 0.75))
+                    .offset(x: 1, y: -1)
+                    .accessibilityHidden(true)
+            }
+        }
     }
 }
 

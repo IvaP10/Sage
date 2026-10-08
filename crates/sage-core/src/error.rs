@@ -8,6 +8,8 @@ pub enum CoreError {
     AuthenticationFailed,
     #[error("protocol error: {0}")]
     Protocol(String),
+    #[error("temporarily unavailable: {0}")]
+    Busy(String),
     #[error("invalid action: {0}")]
     InvalidAction(String),
     #[error("policy denied action: {0}")]
@@ -48,5 +50,19 @@ impl From<rusqlite::Error> for CoreError {
             "Database operation failed ({:?})",
             error.sqlite_error_code()
         ))
+    }
+}
+
+#[cfg(feature = "qwen35-evaluation")]
+impl From<sage_model_package::PackageError> for CoreError {
+    fn from(error: sage_model_package::PackageError) -> Self {
+        Self::Model(error.to_string())
+    }
+}
+
+#[cfg(feature = "qwen35-evaluation")]
+impl From<sage_qwen_tokenizer::TokenizerError> for CoreError {
+    fn from(error: sage_qwen_tokenizer::TokenizerError) -> Self {
+        Self::Model(error.to_string())
     }
 }

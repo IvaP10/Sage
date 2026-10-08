@@ -1,0 +1,45 @@
+Building for debugging...
+[Using on-disk description]
+[2 / 16]
+[5 / 19] SentencepieceTokenizer
+[9 / 23] SentencepieceTokenizer
+[18 / 33] SwiftProtobuf
+[18 / 33] SherpaOnnx
+[19 / 33] SwiftProtobuf
+[21 / 33] SwiftProtobuf
+[23 / 34] SwiftProtobuf
+[26 / 34] SherpaOnnx
+[28 / 34] SwiftProtobuf
+[32 / 37] SageMac-product
+[36 / 46] SageMac-product
+[37 / 46] SageMac-product
+[38 / 46] SageMac-product
+[39 / 46] SageMac-product
+[40 / 46] SageMac-product
+/Users/ivanpadeliya/Desktop/Sage/apps/macos/Sources/SageMac/LocalWakeWordDetector.swift:259:20: warning: reference to captured var 'suppliedInput' in concurrently-executing code [#SendableClosureCaptures]
+257 |         var conversionError: NSError?
+258 |         let status = converter.convert(to: output, error: &conversionError) { _, inputStatus in
+259 |             guard !suppliedInput else {
+    |                    `- warning: reference to captured var 'suppliedInput' in concurrently-executing code [#SendableClosureCaptures]
+260 |                 inputStatus.pointee = .noDataNow
+261 |                 return nil
+
+/Users/ivanpadeliya/Desktop/Sage/apps/macos/Sources/SageMac/LocalWakeWordDetector.swift:263:13: warning: mutation of captured var 'suppliedInput' in concurrently-executing code [#SendableClosureCaptures]
+261 |                 return nil
+262 |             }
+263 |             suppliedInput = true
+    |             `- warning: mutation of captured var 'suppliedInput' in concurrently-executing code [#SendableClosureCaptures]
+264 |             inputStatus.pointee = .haveData
+265 |             return input
+
+[#SendableClosureCaptures]: <https://docs.swift.org/compiler/documentation/diagnostics/sendable-closure-captures>
+[41 / 46] SageMac-product
+[42 / 46] SageMac-product
+[42 / 46] SwiftProtobuf
+[44 / 46] SwiftProtobuf
+[44 / 47] SageMac-product
+/Users/ivanpadeliya/Desktop/Sage/apps/macos/Package.swift: SageMac-product: ld: warning: search path '/Library/Developer/CommandLineTools/Developer/usr/lib' not found
+/Users/ivanpadeliya/Desktop/Sage/apps/macos/Package.swift: SageMac-product: ld: warning: search path '/Library/Developer/CommandLineTools/Developer/Library/Frameworks' not found
+[46 / 47] SageMac-product
+[48 / 48] SageMac-product
+Build complete! (11.66 secs)

@@ -70,15 +70,15 @@ pub fn public_address(ip: IpAddr) -> bool {
     }
 }
 
-pub async fn provider_client(value: &str) -> CoreResult<reqwest::Client> {
+pub async fn safe_http_client(value: &str) -> CoreResult<reqwest::Client> {
     let url = endpoint(value)?;
     let host = url
         .host_str()
-        .ok_or_else(|| denied("Missing provider host"))?
+        .ok_or_else(|| denied("Missing network host"))?
         .trim_matches(['[', ']']);
     let port = url
         .port_or_known_default()
-        .ok_or_else(|| denied("Missing provider port"))?;
+        .ok_or_else(|| denied("Missing network port"))?;
     let addresses: Vec<SocketAddr> = if host == "localhost" {
         vec![SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port)]
     } else {
@@ -87,8 +87,8 @@ pub async fn provider_client(value: &str) -> CoreResult<reqwest::Client> {
             tokio::net::lookup_host((host, port)),
         )
         .await
-        .map_err(|_| denied("Provider DNS lookup timed out"))?
-        .map_err(|_| denied("Provider DNS lookup failed"))?
+        .map_err(|_| denied("Network DNS lookup timed out"))?
+        .map_err(|_| denied("Network DNS lookup failed"))?
         .take(32)
         .collect()
     };
@@ -101,7 +101,7 @@ pub async fn provider_client(value: &str) -> CoreResult<reqwest::Client> {
             }
         })
     {
-        return Err(denied("Provider DNS resolved to a disallowed destination"));
+        return Err(denied("Network DNS resolved to a disallowed destination"));
     }
     reqwest::Client::builder()
         .no_proxy()
@@ -110,7 +110,7 @@ pub async fn provider_client(value: &str) -> CoreResult<reqwest::Client> {
         .connect_timeout(std::time::Duration::from_secs(15))
         .timeout(std::time::Duration::from_secs(90))
         .build()
-        .map_err(|_| denied("Provider network client could not be created"))
+        .map_err(|_| denied("Network client could not be created"))
 }
 
 fn denied(message: &str) -> CoreError {
@@ -121,7 +121,7 @@ fn denied(message: &str) -> CoreError {
 mod tests {
     use super::*;
     #[test]
-    fn public_fetch_cannot_use_provider_loopback_exceptions_or_forged_evidence() {
+    fn public_fetch_rejects_loopback_and_forged_evidence() {
         use sha2::{Digest, Sha256};
         for url in [
             "http://127.0.0.1:8080/",
@@ -183,7 +183,7 @@ mod tests {
 }
 
 /// Public research never uses browser cookies, connector credentials, proxy
-/// settings or the loopback exception available to configured model providers.
+/// settings or the loopback exception available to model providers.
 pub fn public_url(value: &str) -> CoreResult<url::Url> {
     let url = endpoint(value)?;
     if url.scheme() != "https" || exact_loopback(&url) || url.port_or_known_default() != Some(443) {
@@ -229,7 +229,7 @@ pub async fn fetch_public(value: &str, max_bytes: u64) -> CoreResult<FetchedReso
     if !(1..=1_048_576).contains(&max_bytes) {
         return Err(denied("Invalid download budget"));
     }
-    let client = provider_client(url.as_str()).await?;
+    let client = safe_http_client(url.as_str()).await?;
     let mut response = client
         .get(url.clone())
         .header(

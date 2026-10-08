@@ -9,7 +9,10 @@ internal sealed class CoreSupervisor
     public void StartIfNeeded(byte[] secret)
     {
         if (_process is { HasExited: false }) return;
-        var overridePath = Environment.GetEnvironmentVariable("SAGE_CORE_EXECUTABLE");
+        string? overridePath = null;
+#if DEBUG
+        overridePath = Environment.GetEnvironmentVariable("SAGE_CORE_EXECUTABLE");
+#endif
         var executable = string.IsNullOrWhiteSpace(overridePath)
             ? Path.Combine(AppContext.BaseDirectory, "sage-core.exe")
             : overridePath;

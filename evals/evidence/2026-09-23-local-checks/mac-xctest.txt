@@ -1,0 +1,21 @@
+[0/1] Planning build
+[1/1] Compiling plugin SwiftProtobufPlugin
+Building for debugging...
+[1/7] Write sources
+[2/7] Write swift-version--1AB21518FC5DEDBE.txt
+error: emit-module command failed with exit code 1 (use -v to see invocation)
+[4/7] Emitting module SageMacTests
+/Users/ivanpadeliya/Desktop/Sage/apps/macos/Tests/SageMacTests/SignedApplicationIdentityTests.swift:2:8: error: no such module 'XCTest'
+ 1 | import AppKit
+ 2 | import XCTest
+   |        `- error: no such module 'XCTest'
+ 3 | @testable import SageMac
+ 4 | 
+[5/7] Compiling SageMacTests SignedApplicationIdentityTests.swift
+/Users/ivanpadeliya/Desktop/Sage/apps/macos/Tests/SageMacTests/SignedApplicationIdentityTests.swift:2:8: error: no such module 'XCTest'
+ 1 | import AppKit
+ 2 | import XCTest
+   |        `- error: no such module 'XCTest'
+ 3 | @testable import SageMac
+ 4 | 
+error: fatalError

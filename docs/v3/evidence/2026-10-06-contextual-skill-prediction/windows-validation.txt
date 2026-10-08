@@ -1,0 +1,3 @@
+apps/windows/Sage.Windows/MainWindow.xaml: XML parse passed
+apps/windows/Sage.Windows/App.xaml: XML parse passed
+dotnet unavailable; Windows C# compilation not run.

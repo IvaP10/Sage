@@ -1,0 +1,2 @@
+.github/workflows/ci.yml YAML parsed; Windows libclang step present. PowerShell and Windows execution not tested.
+.github/workflows/release.yml YAML parsed; Windows libclang step present. PowerShell and Windows execution not tested.

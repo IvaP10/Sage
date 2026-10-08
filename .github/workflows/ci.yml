@@ -36,10 +36,28 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: Test Rust workspace
-        run: cargo test --workspace --locked
+        run: cargo test --workspace --locked -- --test-threads=4
 
-      - name: Build native macOS client
-        run: swift build --package-path apps/macos
+      - name: Test opt-in Qwen evaluation stack
+        run: cargo test -p sage-core --all-targets --features qwen35-evaluation --locked -- --test-threads=4
+
+      - name: Verify inference worker App Sandbox
+        run: python3 scripts/test-inference-worker-sandbox.py
+
+      - name: Lint inference worker sandbox probe
+        run: cargo clippy -p sage-inference-worker --all-targets --features sandbox-probe --locked -- -D warnings
+
+      - name: Test browser contracts and release gates
+        run: |
+          node --test integrations/browser/background.test.mjs
+          python3 -m unittest discover -s scripts -p 'test_*.py'
+          python3 scripts/check-v2-release.py
+
+      - name: Build and test native macOS client
+        run: swift test --package-path apps/macos
+
+      - name: Test native transport and cancellation control
+        run: sh scripts/test-native-control.sh
 
       - name: Check architecture and credentials
         run: ./scripts/check-repository.sh
@@ -67,11 +85,21 @@ jobs:
         shell: powershell
         run: choco install protoc --no-progress -y
 
+      - name: Configure libclang for SQLCipher hooks
+        shell: pwsh
+        run: |
+          $sageLibclang = Join-Path ${env:ProgramFiles} 'LLVM\bin'
+          if (-not (Test-Path (Join-Path $sageLibclang 'libclang.dll'))) { throw 'LLVM libclang is required for SQLCipher pre-update bindings.' }
+          "LIBCLANG_PATH=$sageLibclang" >> $env:GITHUB_ENV
+
       - name: Check Rust workspace
         run: cargo check --workspace --all-targets --locked
 
       - name: Test Rust workspace
-        run: cargo test --workspace --locked
+        run: cargo test --workspace --locked -- --test-threads=4
+
+      - name: Test opt-in Qwen evaluation stack
+        run: cargo test -p sage-core --all-targets --features qwen35-evaluation --locked -- --test-threads=4
 
       - name: Build WinUI client
         run: dotnet build apps/windows/Sage.Windows/Sage.Windows.csproj -c Release -p:Platform=${{ matrix.platform }}

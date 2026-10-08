@@ -135,7 +135,9 @@ impl PolicyEngine {
 pub fn classify(action: &Action) -> RiskLevel {
     match action {
         Action::AskUser { .. } => RiskLevel::Safe,
-        Action::ReadFile { .. } | Action::WaitForCondition { .. } => RiskLevel::Sensitive,
+        Action::ReadFile { .. }
+        | Action::ListDirectory { .. }
+        | Action::WaitForCondition { .. } => RiskLevel::Sensitive,
         Action::WriteFile {
             overwrite: true, ..
         }
@@ -179,6 +181,7 @@ fn prohibited_reason(action: &Action) -> Option<String> {
             None
         }
         Action::ReadFile { path, .. }
+        | Action::ListDirectory { path, .. }
         | Action::WriteFile { path, .. }
         | Action::DeleteFile { path }
         | Action::CreateFolder { path }
@@ -225,6 +228,101 @@ pub fn approval_digest(proposal: &ActionProposal) -> CoreResult<String> {
     Ok(format!("{:x}", Sha256::digest(canonical)))
 }
 
+pub fn prepared_preview(proposal: &ActionProposal) -> CoreResult<String> {
+    if matches!(proposal.action, Action::OpenApplication { .. }) {
+        let target = crate::application_target::ApplicationTarget::from_proposal(proposal)?;
+        return Ok(format!(
+            "Open {}\nBundle: {}\nSigner: {}\nCode identity: {}",
+            target.identifier, target.bundle_path, target.signer, target.code_digest
+        ));
+    }
+    if let Action::SetApplicationControl {
+        value,
+        system_fingerprint,
+        control_id,
+        ..
+    } = &proposal.action
+    {
+        let target = crate::application_target::ApplicationTarget::from_proposal(proposal)?;
+        let label = proposal
+            .metadata
+            .get("capability_label")
+            .filter(|label| !label.trim().is_empty() && label.len() <= 256)
+            .ok_or_else(|| {
+                CoreError::PermissionRequired(
+                    "The learned control label is unavailable for approval".into(),
+                )
+            })?;
+        return Ok(format!(
+            "Set {label} to {} in {}\nBundle: {}\nSigner: {}\nCode identity: {}\nControl identity: {}",
+            serde_json::to_string(value)?,
+            target.identifier,
+            target.bundle_path,
+            target.signer,
+            system_fingerprint,
+            control_id,
+        ));
+    }
+    if let Action::WriteFile {
+        path,
+        content,
+        overwrite,
+    } = &proposal.action
+        && proposal.metadata.contains_key("procedure_stream_input")
+    {
+        let channel = proposal
+            .metadata
+            .get("procedure_stream_channel_id")
+            .filter(|channel| !channel.trim().is_empty() && channel.len() <= 96)
+            .ok_or_else(|| {
+                CoreError::PermissionRequired(
+                    "The streamed file input has no exact channel for approval".into(),
+                )
+            })?;
+        let source = proposal
+            .metadata
+            .get("procedure_stream_producer_node")
+            .filter(|source| !source.trim().is_empty() && source.len() <= 96)
+            .ok_or_else(|| {
+                CoreError::PermissionRequired(
+                    "The streamed file input has no exact producer for approval".into(),
+                )
+            })?;
+        let maximum_bytes = proposal
+            .metadata
+            .get("procedure_stream_max_bytes")
+            .and_then(|bytes| bytes.parse::<u64>().ok())
+            .filter(|bytes| (1..=crate::execution::files::MAX_BYTES).contains(bytes))
+            .ok_or_else(|| {
+                CoreError::PermissionRequired(
+                    "The streamed file input has no valid byte limit for approval".into(),
+                )
+            })?;
+        if !content.is_empty()
+            || proposal
+                .metadata
+                .get("procedure_stream_node")
+                .map(String::as_str)
+                != Some("true")
+            || proposal
+                .metadata
+                .get("procedure_stream_input")
+                .map(String::as_str)
+                != Some("content")
+        {
+            return Err(CoreError::InvalidAction(
+                "Streamed file preview does not match its content input".into(),
+            ));
+        }
+        return Ok(format!(
+            "{} {}\nInput: procedure node {source}, channel {channel}\nMaximum stream size: {maximum_bytes} bytes",
+            if *overwrite { "Replace" } else { "Create" },
+            path.display(),
+        ));
+    }
+    action_preview(&proposal.action)
+}
+
 pub fn action_preview(action: &Action) -> CoreResult<String> {
     let preview = match action {
         Action::WriteFile {
@@ -241,6 +339,13 @@ pub fn action_preview(action: &Action) -> CoreResult<String> {
             "Read {} (up to {} bytes). Provider disclosure requires a separate decision.",
             path.display(),
             max_bytes
+        ),
+        Action::ListDirectory {
+            path, page_size, ..
+        } => format!(
+            "List names and types in {} (up to {} entries per page). File contents are read separately; provider disclosure requires a separate decision.",
+            path.display(),
+            page_size
         ),
         _ => serde_json::to_string_pretty(action)?,
     };

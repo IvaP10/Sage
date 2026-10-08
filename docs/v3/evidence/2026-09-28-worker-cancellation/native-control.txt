@@ -1,0 +1,2 @@
+Passed: 1,000 ordered concurrent frames, reordered acknowledgements, bounded writes, and stable bounded submission retries.
+Passed: active cancellation, Stop before admission, bounded workers, and cancellation of all workers on disconnect.

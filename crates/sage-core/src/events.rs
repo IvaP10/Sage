@@ -48,6 +48,10 @@ pub enum CoreEventKind {
         action_id: Uuid,
         approved: bool,
     },
+    DecisionResolved {
+        decision_id: Uuid,
+        state: String,
+    },
     ActionStarted {
         action_id: Uuid,
         implementation: String,
@@ -85,8 +89,15 @@ pub enum CoreEventKind {
         status: TaskStatus,
         summary: String,
     },
+    ReferenceContext {
+        summary: String,
+    },
     TaskCompleted {
         outcome: String,
+    },
+    UndoChanged {
+        action_id: Uuid,
+        phase: crate::domain::UndoPhase,
     },
     Error {
         code: String,
@@ -141,10 +152,10 @@ impl EventHub {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StateSnapshot {
     pub tasks: Vec<Task>,
-    pub provider_settings: Vec<crate::model::ProviderSettings>,
     pub core_version: String,
     pub storage_locked: bool,
     pub pending_approvals: Vec<crate::contracts::ApprovalRecord>,
+    pub pending_questions: Vec<crate::decisions::QuestionRecord>,
     pub protocol_version: u32,
     pub knowledge: Option<crate::knowledge::KnowledgeSnapshot>,
 }

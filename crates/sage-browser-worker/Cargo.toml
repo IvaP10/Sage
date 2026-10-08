@@ -8,7 +8,6 @@ publish.workspace = true
 
 [dependencies]
 sage-core = { path = "../sage-core" }
-sage-worker-common = { path = "../sage-worker-common" }
 sage-protocol = { path = "../sage-protocol" }
 serde_json.workspace = true
 getrandom.workspace = true

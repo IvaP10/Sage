@@ -1,8 +1,8 @@
 # Sage security
 
-The detailed [v2 threat model](v2/threat-model.md) defines the assets, adversaries, enforced controls, recovery state machine and remaining production gates. The [architecture](v2/architecture.md) specifies the target process boundaries.
+The detailed [v2 threat model](v2/threat-model.md) defines the assets, adversaries, enforced controls, recovery state machine and remaining production gates. The canonical [architecture](architecture.md) describes current process boundaries and qualification limits.
 
-Current enforcement includes empty default file roots, protected Sage/model/credential paths, typed closed operations, exact preparation and approvals, Cedar dispatch policy, single-use worker-bound grants, cancellation revocation, DNS-pinned egress without redirects/proxies, explicit context release, role-separated mutual IPC authentication, SQLCipher and protected audit checkpoints.
+Current enforcement includes empty default file roots, protected Sage/model/credential paths, typed closed operations, exact preparation and approvals, Sage's first-party fail-closed dispatch gate, single-use worker-bound grants, cancellation revocation, DNS-pinned egress without redirects/proxies, explicit context release, role-separated mutual IPC authentication, SQLCipher and protected audit checkpoints.
 
 Model output, tool results, documents, webpages, repository text and memory are untrusted. Recalled material cannot authorize an operation or transmission. Credentials stay in the credential store; derived context remains private. A model's structural JSON validity, successful dispatch or process exit cannot establish arbitrary task success.
 

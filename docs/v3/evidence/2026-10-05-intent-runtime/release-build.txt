@@ -1,0 +1,2 @@
+   Compiling sage-core v1.0.1 (/Users/ivanpadeliya/Desktop/Sage/crates/sage-core)
+    Finished `release` profile [optimized] target(s) in 19.86s

@@ -2,7 +2,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::{DateTime, Duration, Utc};
-use rusqlite::params;
+use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -19,6 +19,12 @@ pub struct Skill {
     pub schema_version: u32,
     #[serde(default)]
     pub reviewed_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub synthesized_from: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub synthesis_family_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub synthesis_digest: Option<String>,
     pub id: Uuid,
     pub name: String,
     pub description: String,
@@ -31,16 +37,29 @@ pub struct Skill {
 impl Skill {
     pub fn digest(&self) -> CoreResult<String> {
         use sha2::{Digest, Sha256};
-        Ok(format!(
-            "{:x}",
-            Sha256::digest(serde_json::to_vec(&(
-                self.schema_version,
-                &self.name,
-                &self.description,
-                &self.graph,
-                self.source_task_id
-            ))?)
-        ))
+        let body = (
+            self.schema_version,
+            &self.name,
+            &self.description,
+            &self.graph,
+            self.source_task_id,
+        );
+        let bytes = if self.synthesized_from.is_empty()
+            && self.synthesis_family_id.is_none()
+            && self.synthesis_digest.is_none()
+        {
+            // Preserve the digest format of skills created before these
+            // synthesis fields existed.
+            serde_json::to_vec(&body)?
+        } else {
+            serde_json::to_vec(&(
+                body,
+                &self.synthesized_from,
+                &self.synthesis_family_id,
+                &self.synthesis_digest,
+            ))?
+        };
+        Ok(format!("{:x}", Sha256::digest(bytes)))
     }
     pub fn is_reviewed(&self) -> bool {
         self.schema_version == 2
@@ -115,6 +134,7 @@ impl LocalStore {
         self.with_connection(|db| {
             // Import earlier procedures as drafts. Stored traces never carry
             // authority forward across a protocol/security migration.
+            db.execute_batch("CREATE INDEX IF NOT EXISTS schedules_due_identity ON schedules(enabled,next_run_at,id);")?;
             let migrated:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=4)",[],|r|r.get(0))?;
             if !migrated {
                 let tx=db.transaction()?;
@@ -138,6 +158,57 @@ impl LocalStore {
         self.load_definitions("schedules")
     }
 
+    pub fn skill(&self, id: Uuid) -> CoreResult<Option<Skill>> {
+        self.definition("skills", id)
+    }
+    pub fn workflow(&self, id: Uuid) -> CoreResult<Option<Workflow>> {
+        self.definition("workflows", id)
+    }
+    pub fn schedule(&self, id: Uuid) -> CoreResult<Option<Schedule>> {
+        self.definition("schedules", id)
+    }
+
+    fn definition<T: serde::de::DeserializeOwned>(
+        &self,
+        table: &str,
+        id: Uuid,
+    ) -> CoreResult<Option<T>> {
+        self.with_connection(|db| {
+            let json = db
+                .query_row(
+                    &format!("SELECT content_json FROM {table} WHERE id=?1"),
+                    params![id.to_string()],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?;
+            json.map(|json| serde_json::from_str(&json).map_err(Into::into))
+                .transpose()
+        })
+    }
+
+    /// UI display limits must never decide which authorized triggers execute.
+    /// Keyset pages bound each storage read and remain stable as rows advance.
+    pub fn due_schedules(
+        &self,
+        at: DateTime<Utc>,
+        after: Option<(DateTime<Utc>, Uuid)>,
+    ) -> CoreResult<Vec<Schedule>> {
+        self.with_connection(|db| {
+            let (time, id) = after.map(|(time, id)| (time.to_rfc3339(), id.to_string())).unwrap_or_default();
+            let mut statement = db.prepare("SELECT content_json FROM schedules WHERE enabled=1 AND next_run_at<=?1 AND (next_run_at>?2 OR (next_run_at=?2 AND id>?3)) ORDER BY next_run_at,id LIMIT 128")?;
+            statement.query_map(params![at.to_rfc3339(), time, id], |row| row.get::<_, String>(0))?
+                .map(|row| Ok(serde_json::from_str(&row?)?)).collect()
+        })
+    }
+
+    pub fn folder_schedules(&self) -> CoreResult<Vec<Schedule>> {
+        self.with_connection(|db| {
+            let mut statement = db.prepare("SELECT content_json FROM schedules WHERE enabled=1 AND json_extract(content_json,'$.trigger.kind')='folder_changed' ORDER BY id")?;
+            statement.query_map([], |row| row.get::<_, String>(0))?
+                .map(|row| Ok(serde_json::from_str(&row?)?)).collect()
+        })
+    }
+
     fn load_definitions<T: serde::de::DeserializeOwned>(&self, table: &str) -> CoreResult<Vec<T>> {
         self.with_connection(|db| {
             // table names are private compile-time callers, never IPC input.
@@ -151,11 +222,11 @@ impl LocalStore {
 
     pub fn capture_skill(&self, task: &Task, name: &str) -> CoreResult<Skill> {
         if task.status != TaskStatus::Succeeded
+            || task.undo.is_some()
             || task.actions.is_empty()
             || task
-                .actions
-                .values()
-                .any(|a| a.status != ActionStatus::Succeeded)
+                .current_actions()
+                .any(|(_, a)| a.status != ActionStatus::Succeeded)
         {
             return Err(CoreError::InvalidAction(
                 "Only fully verified tasks can become skills.".into(),
@@ -165,8 +236,7 @@ impl LocalStore {
         let graph = ActionGraph {
             goal: task.goal.clone().unwrap_or_else(|| name.clone()),
             nodes: task
-                .actions
-                .iter()
+                .current_actions()
                 .map(|(id, state)| ActionNode {
                     proposal: state.proposal.clone(),
                     depends_on: task.dependencies.get(id).cloned().unwrap_or_default(),
@@ -183,6 +253,9 @@ impl LocalStore {
         let skill = Skill {
             schema_version: 2,
             reviewed_digest: None,
+            synthesized_from: Vec::new(),
+            synthesis_family_id: None,
+            synthesis_digest: None,
             id: Uuid::new_v4(),
             name,
             description: clipped(&task.request, 300),
@@ -233,36 +306,41 @@ impl LocalStore {
                 "A workflow needs a name and 1–16 skills.".into(),
             ));
         }
-        let skills = self.skills()?;
-        if workflow
-            .skill_ids
-            .iter()
-            .any(|id| !skills.iter().any(|s| s.id == *id && s.is_reviewed()))
-        {
-            return Err(CoreError::InvalidAction(
-                "A workflow references an unavailable skill.".into(),
-            ));
+        for id in &workflow.skill_ids {
+            let Some(skill) = self.skill(*id)? else {
+                return Err(CoreError::InvalidAction(
+                    "A workflow references an unavailable skill.".into(),
+                ));
+            };
+            if !skill.is_reviewed() || !self.skill_sources_current(&skill)? {
+                return Err(CoreError::InvalidAction(
+                    "A workflow references an unavailable skill.".into(),
+                ));
+            }
         }
         self.with_connection(|db| {db.execute("INSERT INTO workflows VALUES(?1,?2) ON CONFLICT(id) DO UPDATE SET content_json=excluded.content_json",params![workflow.id.to_string(),serde_json::to_string(workflow)?])?;Ok(())})
     }
 
     pub fn workflow_graph(&self, workflow_id: Uuid, task_id: Uuid) -> CoreResult<ActionGraph> {
         let workflow = self
-            .workflows()?
-            .into_iter()
-            .find(|w| w.id == workflow_id && w.enabled)
+            .workflow(workflow_id)?
+            .filter(|w| w.enabled)
             .ok_or_else(|| CoreError::InvalidAction("Workflow is disabled or missing.".into()))?;
-        let skills = self.skills()?;
         let mut graph = ActionGraph {
             goal: workflow.name,
             nodes: Vec::new(),
         };
         let mut previous = BTreeSet::new();
         for id in workflow.skill_ids {
-            let skill = skills
-                .iter()
-                .find(|s| s.id == id && s.is_reviewed())
+            let skill = self
+                .skill(id)?
+                .filter(|s| s.is_reviewed())
                 .ok_or_else(|| CoreError::InvalidAction("Skill is disabled or missing.".into()))?;
+            if !self.skill_sources_current(&skill)? {
+                return Err(CoreError::InvalidAction(
+                    "A source routine changed or is no longer enabled. Review the skill and workflow before running.".into(),
+                ));
+            }
             let mut expanded = instantiate(&skill.graph, task_id)?;
             for node in &mut expanded.nodes {
                 if node.depends_on.is_empty() {
@@ -279,6 +357,28 @@ impl LocalStore {
         }
         graph.validate(task_id).map_err(CoreError::InvalidAction)?;
         Ok(graph)
+    }
+
+    pub(crate) fn workflow_skill_lineages(
+        &self,
+        workflow_id: Uuid,
+    ) -> CoreResult<Vec<(String, String, Vec<String>)>> {
+        let workflow = self
+            .workflow(workflow_id)?
+            .ok_or_else(|| CoreError::InvalidAction("Workflow is missing.".into()))?;
+        workflow
+            .skill_ids
+            .into_iter()
+            .filter_map(|id| match self.skill(id) {
+                Ok(Some(skill)) if !skill.synthesized_from.is_empty() => Some(Ok((
+                    skill.synthesis_family_id.unwrap_or_default(),
+                    skill.synthesis_digest.unwrap_or_default(),
+                    skill.synthesized_from,
+                ))),
+                Ok(_) => None,
+                Err(error) => Some(Err(error)),
+            })
+            .collect()
     }
 
     pub fn save_schedule(&self, schedule: &Schedule) -> CoreResult<()> {
@@ -536,6 +636,50 @@ mod v2_tests {
             last_error: None,
         }
     }
+    #[test]
+    fn due_queue_and_identity_lookups_include_schedules_beyond_sidebar_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LocalStore::open_encrypted(
+            &dir.path().join("test.db"),
+            &crate::secrets::SecretBytes::new(vec![12; 32]),
+        )
+        .unwrap();
+        store.migrate_workflows().unwrap();
+        let now = Utc::now();
+        let mut expected = BTreeSet::new();
+        for index in 0..273 {
+            let mut value = schedule();
+            value.next_run_at = now - Duration::seconds(10);
+            if index == 0 {
+                value.trigger = Trigger::FolderChanged {
+                    path: std::env::temp_dir(),
+                };
+            }
+            expected.insert(value.id);
+            store.save_schedule(&value).unwrap();
+        }
+        assert_eq!(store.schedules().unwrap().len(), 200);
+        assert_eq!(store.folder_schedules().unwrap().len(), 1);
+        let mut cursor = None;
+        let mut found = BTreeSet::new();
+        loop {
+            let page = store.due_schedules(now, cursor).unwrap();
+            assert!(page.len() <= 128);
+            if page.is_empty() {
+                break;
+            }
+            cursor = page.last().map(|value| (value.next_run_at, value.id));
+            for mut value in page {
+                assert!(found.insert(value.id));
+                assert!(store.schedule(value.id).unwrap().is_some());
+                // A firing advances while the page walk is still in progress.
+                assert!(store.claim_schedule(&mut value).unwrap().is_some());
+            }
+        }
+        assert_eq!(found, expected);
+        assert!(store.due_schedules(now, None).unwrap().is_empty());
+    }
+
     #[test]
     fn claim_is_single_use_and_cannot_reuse_changed_authorization() {
         let dir = tempfile::tempdir().unwrap();

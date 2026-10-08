@@ -1,0 +1,66 @@
+Building for debugging...
+[Pre-planning 1 / 217]
+[Planning 194 / 217]
+[Planning deferred tasks]
+[21 / 58] SentencepieceTokenizer
+[23 / 60] SwiftProtobuf
+[31 / 69] SentencepieceTokenizer
+[33 / 69] SentencepieceTokenizer
+[35 / 68] SwiftProtobuf
+[39 / 71] SwiftProtobuf
+[40 / 72] SageMac
+[47 / 81] SageMac
+[48 / 81] SwiftProtobuf
+[49 / 80] SwiftProtobuf
+/Users/ivanpadeliya/Desktop/Sage/apps/macos/Sources/SageMac/LocalWakeWordDetector.swift:259:20: warning: reference to captured var 'suppliedInput' in concurrently-executing code [#SendableClosureCaptures]
+257 |         var conversionError: NSError?
+258 |         let status = converter.convert(to: output, error: &conversionError) { _, inputStatus in
+259 |             guard !suppliedInput else {
+    |                    `- warning: reference to captured var 'suppliedInput' in concurrently-executing code [#SendableClosureCaptures]
+260 |                 inputStatus.pointee = .noDataNow
+261 |                 return nil
+
+/Users/ivanpadeliya/Desktop/Sage/apps/macos/Sources/SageMac/LocalWakeWordDetector.swift:263:13: warning: mutation of captured var 'suppliedInput' in concurrently-executing code [#SendableClosureCaptures]
+261 |                 return nil
+262 |             }
+263 |             suppliedInput = true
+    |             `- warning: mutation of captured var 'suppliedInput' in concurrently-executing code [#SendableClosureCaptures]
+264 |             inputStatus.pointee = .haveData
+265 |             return input
+
+[#SendableClosureCaptures]: <https://docs.swift.org/compiler/documentation/diagnostics/sendable-closure-captures>
+[52 / 89] SageMac
+[54 / 89] SageMac-product
+[54 / 89] SageMac
+[64 / 89] SageMac-product
+[65 / 89] SageMac-product
+[65 / 89] SageMac
+/Users/ivanpadeliya/Desktop/Sage/apps/macos/Sources/SageMac/LocalWakeWordDetector.swift:259:20: warning: reference to captured var 'suppliedInput' in concurrently-executing code [#SendableClosureCaptures]
+257 |         var conversionError: NSError?
+258 |         let status = converter.convert(to: output, error: &conversionError) { _, inputStatus in
+259 |             guard !suppliedInput else {
+    |                    `- warning: reference to captured var 'suppliedInput' in concurrently-executing code [#SendableClosureCaptures]
+260 |                 inputStatus.pointee = .noDataNow
+261 |                 return nil
+
+/Users/ivanpadeliya/Desktop/Sage/apps/macos/Sources/SageMac/LocalWakeWordDetector.swift:263:13: warning: mutation of captured var 'suppliedInput' in concurrently-executing code [#SendableClosureCaptures]
+261 |                 return nil
+262 |             }
+263 |             suppliedInput = true
+    |             `- warning: mutation of captured var 'suppliedInput' in concurrently-executing code [#SendableClosureCaptures]
+264 |             inputStatus.pointee = .haveData
+265 |             return input
+
+[#SendableClosureCaptures]: <https://docs.swift.org/compiler/documentation/diagnostics/sendable-closure-captures>
+[67 / 89] SageMac-product
+[67 / 89] SageMac
+/Users/ivanpadeliya/Desktop/Sage/apps/macos/Package.swift: SageMac: ld: warning: search path '/Library/Developer/CommandLineTools/Developer/Library/Frameworks' not found
+[69 / 89] SageMac
+[69 / 89] SageMac-product
+[76 / 89] SageMacTests-product
+error: clang dependency scanning failure: 
+error: /Users/ivanpadeliya/Desktop/Sage/apps/macos/Tests/SageMacTests/SignedApplicationIdentityTests.swift:2:8 unable to resolve module dependency: 'XCTest'
+error: SwiftDriver SageMacTests normal arm64 com.apple.xcode.tools.swift.compiler failed with a nonzero exit code. Command line:     cd /Users/ivanpadeliya/Desktop/Sage/apps
+    builtin-SwiftDriver -- /Library/Developer/CommandLineTools/usr/bin/swiftc -parse-as-library -module-name SageMacTests -Onone @/Users/ivanpadeliya/Desktop/Sage/apps/macos/.build/out/Intermediates.noindex/SageMac.build/Debug/SageMacTests-p.build/Objects-normal/arm64/SageMacTests.SwiftFileList -DSWIFT_PACKAGE -DDEBUG -DXcode -external-plugin-path /Library/Developer/CommandLineTools/usr/lib/swift/host/plugins/testing\#/Library/Developer/CommandLineTools/usr/bin/swift-plugin-server -enable-experimental-feature DebugDescriptionMacro -sdk /Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk -target arm64-apple-macos14.0 -g -module-cache-path /Users/ivanpadeliya/Desktop/Sage/apps/macos/.build/out/ModuleCache.noindex -Xfrontend -serialize-debugging-options -enable-testing -index-store-path /Users/ivanpadeliya/Desktop/Sage/apps/macos/.build/out -Xcc -D_LIBCPP_HARDENING_MODE\=_LIBCPP_HARDENING_MODE_DEBUG -swift-version 6 -I /Users/ivanpadeliya/Desktop/Sage/apps/macos/.build/out/Products/Debug -Isystem /Library/Developer/CommandLineTools/Developer/usr/lib -F /Users/ivanpadeliya/Desktop/Sage/apps/macos/.build/out/Products/Debug/PackageFrameworks -F /Users/ivanpadeliya/Desktop/Sage/apps/macos/.build/out/Products/Debug -F /Library/Developer/CommandLineTools/Library/Developer/Frameworks -F /Library/Developer/CommandLineTools/Developer/Library/Frameworks -c -j8 -enable-batch-mode -incremental -Xcc -ivfsstatcache -Xcc /Users/ivanpadeliya/Desktop/Sage/apps/macos/.build/out/SDKStatCaches.noindex/macosx26.5-25F70-1aa54e4a50e311dbd51de5aafe7eca3d742078817fd907cefe959747f00b8bba.sdkstatcache -output-file-map /Users/ivanpadeliya/Desktop/Sage/apps/macos/.build/out/Intermediates.noindex/SageMac.build/Debug/SageMacTests-p.build/Objects-normal/arm64/SageMacTests-OutputFileMap.json -save-temps -no-color-diagnostics -explicit-module-build -module-cache-path /Users/ivanpadeliya/Desktop/Sage/apps/macos/.build/out/Intermediates.noindex/SwiftExplicitPrecompiledModules -clang-scanner-module-cache-path /Users/ivanpadeliya/Desktop/Sage/apps/macos/.build/out/ModuleCache.noindex -sdk-module-cache-path /Users/ivanpadeliya/Desktop/Sage/apps/macos/.build/out/SDKExplicitPrecompiledModules -emit-dependencies -emit-module -emit-module-path /Users/ivanpadeliya/Desktop/Sage/apps/macos/.build/out/Intermediates.noindex/SageMac.build/Debug/SageMacTests-p.build/Objects-normal/arm64/SageMacTests.swiftmodule -serialize-diagnostics -dependency-scan-serialize-diagnostics-path /Users/ivanpadeliya/Desktop/Sage/apps/macos/.build/out/Intermediates.noindex/SageMac.build/Debug/SageMacTests-p.build/Objects-normal/arm64/SageMacTests-dependency-scan.dia -validate-clang-modules-once -clang-build-session-file /Users/ivanpadeliya/Desktop/Sage/apps/macos/.build/out/ModuleCache.noindex/Session.modulevalidation -Xcc -fmodules-prune-interval\=86400 -Xcc -fmodules-prune-after\=345600 -package-name macos -emit-const-values -const-gather-protocols-list /Users/ivanpadeliya/Desktop/Sage/apps/macos/.build/out/Intermediates.noindex/SageMac.build/Debug/SageMacTests-p.build/Objects-normal/arm64/SageMacTests_const_extract_protocols.json -Xcc -I/Users/ivanpadeliya/Desktop/Sage/apps/macos/.build/out/Products/Debug/include -Xcc -I/Users/ivanpadeliya/Desktop/Sage/apps/macos/.build/out/Intermediates.noindex/SageMac.build/Debug/SageMacTests-p.build/DerivedSources-normal/arm64 -Xcc -I/Users/ivanpadeliya/Desktop/Sage/apps/macos/.build/out/Intermediates.noindex/SageMac.build/Debug/SageMacTests-p.build/DerivedSources/arm64 -Xcc -I/Users/ivanpadeliya/Desktop/Sage/apps/macos/.build/out/Intermediates.noindex/SageMac.build/Debug/SageMacTests-p.build/DerivedSources -Xcc -DSWIFT_PACKAGE -Xcc -DDEBUG\=1 -working-directory /Users/ivanpadeliya/Desktop/Sage/apps -experimental-emit-module-separately -disable-cmo
+error: Build failed
+error: fatalError

@@ -21,10 +21,13 @@ def evaluate(report, suite, enforce=False):
     if report.get("schema_version") != 2 or report.get("suite_id") != suite["suite_id"]:
         raise ValueError("Report does not identify this versioned workflow suite")
     cases = {case["id"] for case in suite["cases"]}
-    if len(cases) != 100 or suite["repeats"] != 5:
+    if suite.get("schema_version") != 2 or len(cases) != 100 or len(suite["cases"]) != 100 or type(suite["repeats"]) is not int or suite["repeats"] != 5:
         raise ValueError("The qualified suite requires 100 distinct workflows and five repeats")
     expected = {(case, repeat) for case in cases for repeat in range(1, 6)}
     results = report.get("results", [])
+    if not isinstance(results, list) or any(not isinstance(result, dict) or not isinstance(result.get("workflow_id"), str)
+        or type(result.get("repeat")) is not int or not 1 <= result["repeat"] <= 5 for result in results):
+        raise ValueError("Workflow results require a string identity and integer repeat from one to five")
     keys = [(result["workflow_id"], result["repeat"]) for result in results]
     if len(keys) != len(set(keys)) or set(keys) != expected:
         raise ValueError("Every workflow needs five results; missing, duplicated or unavailable work cannot disappear from the denominator")

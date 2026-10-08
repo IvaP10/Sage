@@ -89,7 +89,9 @@ impl RunContract {
             return false;
         }
         let (path, effect) = match action {
-            Action::ReadFile { path, .. } => (path, Effect::Read),
+            Action::ReadFile { path, .. } | Action::ListDirectory { path, .. } => {
+                (path, Effect::Read)
+            }
             Action::WriteFile {
                 path,
                 overwrite: false,
@@ -174,7 +176,7 @@ pub enum PreparedTarget {
         document: crate::browser_target::BrowserTarget,
     },
     Application {
-        identifier: String,
+        identity: crate::application_target::ApplicationTarget,
     },
     Network {
         url: String,
@@ -219,7 +221,9 @@ impl PreparedAction {
             })
         };
         let (target, effects) = match &proposal.action {
-            Action::ReadFile { path, .. } => (file(path)?, BTreeSet::from([Effect::Read])),
+            Action::ReadFile { path, .. } | Action::ListDirectory { path, .. } => {
+                (file(path)?, BTreeSet::from([Effect::Read]))
+            }
             Action::WriteFile {
                 path, overwrite, ..
             } => (
@@ -235,9 +239,19 @@ impl PreparedAction {
                 PreparedTarget::Network { url: url.clone() },
                 BTreeSet::from([Effect::Read, Effect::ReleaseData]),
             ),
-            Action::OpenApplication { application } => (
+            Action::OpenApplication { .. } => (
                 PreparedTarget::Application {
-                    identifier: application.clone(),
+                    identity: crate::application_target::ApplicationTarget::from_proposal(
+                        proposal,
+                    )?,
+                },
+                BTreeSet::from([Effect::ControlApplication]),
+            ),
+            Action::SetApplicationControl { .. } => (
+                PreparedTarget::Application {
+                    identity: crate::application_target::ApplicationTarget::from_proposal(
+                        proposal,
+                    )?,
                 },
                 BTreeSet::from([Effect::ControlApplication]),
             ),
@@ -273,7 +287,7 @@ impl PreparedAction {
             policy_version: POLICY_VERSION,
             target,
             effects,
-            preview: crate::policy::action_preview(&proposal.action)?,
+            preview: crate::policy::prepared_preview(proposal)?,
             prepared_at: Utc::now(),
         })
     }
@@ -328,33 +342,37 @@ pub struct ApprovalRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::{ActionProposal, ApplicationControlValue, Provenance};
+    use std::collections::BTreeMap;
+
     #[test]
     fn scope_never_grants_overwrite_or_external_effects() {
+        let root = PathBuf::from(if cfg!(windows) { r"C:\work" } else { "/work" });
         let mut contract = RunContract::local(Uuid::new_v4());
         contract.resources.push(ResourceScope {
-            root: "/work".into(),
+            root: root.clone(),
             effects: BTreeSet::from([Effect::Read, Effect::Create]),
         });
         assert!(contract.covers(&Action::ReadFile {
-            path: "/work/a".into(),
+            path: root.join("a"),
             max_bytes: 64
         }));
         assert!(!contract.covers(&Action::ReadFile {
-            path: "/work-other/a".into(),
+            path: root.with_file_name("work-other").join("a"),
             max_bytes: 64
         }));
         assert!(!contract.covers(&Action::ReadFile {
-            path: "/work/../private/key".into(),
+            path: root.join("..").join("private/key"),
             max_bytes: 64
         }));
         assert!(!contract.covers(&Action::WriteFile {
-            path: "/work/a".into(),
+            path: root.join("a"),
             content: "x".into(),
             overwrite: true
         }));
         contract.expires_at = Utc::now() - Duration::seconds(1);
         assert!(!contract.covers(&Action::ReadFile {
-            path: "/work/a".into(),
+            path: root.join("a"),
             max_bytes: 64
         }));
     }
@@ -371,5 +389,56 @@ mod tests {
             a.derive(&DataLabel::private(Uuid::new_v4(), "other".into()))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn prepared_learned_control_binds_the_signed_application_target() {
+        let task_id = Uuid::new_v4();
+        let target = crate::application_target::ApplicationTarget {
+            platform: "macos".into(),
+            bundle_path: "/Applications/Example.app".into(),
+            identifier: "com.example.Editor".into(),
+            code_digest: crate::application_target::ApplicationTarget::code_set_digest(&[
+                "ab".repeat(20)
+            ]),
+            code_digests: vec!["ab".repeat(20)],
+            signer: "TEAM".into(),
+        };
+        let proposal = ActionProposal {
+            id: Uuid::new_v4(),
+            task_id,
+            action: Action::SetApplicationControl {
+                application: target.identifier.clone(),
+                system_id: Uuid::new_v4(),
+                system_fingerprint: "a".repeat(64),
+                capability_id: "ui.control.slider.test".into(),
+                control_id: "b".repeat(64),
+                value: ApplicationControlValue::Number(0.5),
+            },
+            expected_outcome: crate::domain::ExpectedOutcome::ApplicationControlValue {
+                target: target.clone(),
+                control_id: "b".repeat(64),
+                value: ApplicationControlValue::Number(0.5),
+            },
+            target_resource: target.identifier.clone(),
+            provenance: Provenance::user(),
+            metadata: BTreeMap::from([
+                (
+                    "application_target".into(),
+                    serde_json::to_string(&target).unwrap(),
+                ),
+                ("capability_label".into(), "Set Volume".into()),
+            ]),
+        };
+
+        let prepared = PreparedAction::new(&proposal, BTreeSet::new()).unwrap();
+        assert_eq!(
+            prepared.effects,
+            BTreeSet::from([Effect::ControlApplication])
+        );
+        assert!(matches!(
+            prepared.target,
+            PreparedTarget::Application { identity } if identity == target
+        ));
     }
 }

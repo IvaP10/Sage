@@ -1,0 +1,1 @@
+`scripts/generate-protocol.sh` passed with SwiftProtobuf 1.38.1, the version pinned by `apps/macos/Package.resolved`. It regenerated the checked-in Swift binding, including `TaskUpdate.routine_summary` (field 21). The Windows project generates its C# binding from the same schema during a Windows build; that build could not run on this host.

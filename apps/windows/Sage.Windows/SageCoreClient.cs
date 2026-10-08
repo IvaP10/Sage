@@ -15,13 +15,23 @@ internal sealed class SageCoreClient : IDisposable
     private readonly SemaphoreSlim _writeLock = new(1, 1);
     private readonly CancellationTokenSource _stopping = new();
     private NamedPipeClientStream? _pipe;
+    private AdapterOperations _adapterOperations = new();
     private long _sequence;
+    private readonly object _submissionLock = new();
+    private readonly List<UiCommand> _pendingSubmissions = new();
 
     public event EventHandler<CoreEvent>? EventReceived;
-    public Func<AdapterRequest, Task<AdapterResult>>? AdapterHandler { get; set; }
+    public event EventHandler<Exception>? Disconnected;
+    public Func<AdapterRequest, CancellationToken, Task<AdapterResult>>? AdapterHandler { get; set; }
 
     public async Task ConnectAsync()
     {
+        var previous = _pipe;
+        _pipe = null;
+        previous?.Dispose();
+        _adapterOperations.Close();
+        var operations = new AdapterOperations();
+        _adapterOperations = operations;
         var pipe = new NamedPipeClientStream(
             ".",
             "sage-core-v2",
@@ -30,23 +40,37 @@ internal sealed class SageCoreClient : IDisposable
         );
         await pipe.ConnectAsync(1_000, _stopping.Token);
         _pipe = pipe;
-        await AuthenticateAsync(pipe, _stopping.Token);
-        _ = Task.Run(() => ReceiveLoopAsync(pipe, _stopping.Token));
-        await WriteFrameAsync(pipe, new Frame { ProtocolVersion = ProtocolVersion, Sequence = NextSequence(), AdapterHello = new AdapterHello { Domain = "native" } }, _stopping.Token);
+        try { await AuthenticateAsync(pipe, _stopping.Token); }
+        catch { if (ReferenceEquals(_pipe, pipe)) _pipe = null; pipe.Dispose(); throw; }
+        _ = Task.Run(() => ReceiveLoopAsync(pipe, operations, _stopping.Token));
+        await WriteFrameAsync(pipe, new Frame { ProtocolVersion = ProtocolVersion, AdapterHello = new AdapterHello { Domain = "native", CancellationProtocol = 1 } }, _stopping.Token);
+        UiCommand[] pending;
+        lock (_submissionLock) pending = _pendingSubmissions.ToArray();
+        foreach (var command in pending) await SendCommandAsync(command);
     }
 
-    public Task SubmitTaskAsync(string text, string conversationId = "", string? folder = null)
+    public Task SubmitTaskAsync(string text, string conversationId = "", string? folder = null, string supersedesTaskId = "")
     {
-        var submit = new SubmitTask { Text = text, Source = InputSource.Typed, ConversationId = conversationId };
+        var submit = new SubmitTask { Text = text, Source = InputSource.Typed, ConversationId = conversationId, SupersedesTaskId = supersedesTaskId };
         if (!string.IsNullOrEmpty(folder)) { var scope = new ResourceScope { Root = folder }; scope.Effects.Add(ResourceEffect.Read); submit.Resources.Add(scope); }
-        return SendCommandAsync(new UiCommand
+        UiCommand command;
+        lock (_submissionLock)
         {
-            RequestId = Guid.NewGuid().ToString(),
-            SubmitTask = submit,
-        });
+            command = _pendingSubmissions.FirstOrDefault(item => item.SubmitTask.Equals(submit))!;
+            if (command is null)
+            {
+                if (_pendingSubmissions.Count >= 16 || submit.CalculateSize() > 1024 * 1024 - _pendingSubmissions.Sum(item => item.CalculateSize()))
+                    throw new InvalidOperationException("Waiting for the core to confirm earlier requests. Reconnect before sending more.");
+                command = new UiCommand { RequestId = Guid.NewGuid().ToString(), SubmitTask = submit };
+                _pendingSubmissions.Add(command);
+            }
+        }
+        return SendCommandAsync(command);
     }
 
     public Task UnlockStorageAsync() => SendCommandAsync(new UiCommand { RequestId = Guid.NewGuid().ToString(), UnlockStorage = new UnlockStorage() });
+
+    public Task UpdateIntentAsync(UpdateIntent input) => SendCommandAsync(new UiCommand { RequestId = Guid.NewGuid().ToString(), UpdateIntent = input });
 
     public Task ControlTaskAsync(string taskId, ControlTask.Types.Operation operation)
     {
@@ -61,12 +85,12 @@ internal sealed class SageCoreClient : IDisposable
         });
     }
 
-    public Task UndoAsync(string taskId)
+    public Task UndoAsync(string taskId, string actionId)
     {
         return SendCommandAsync(new UiCommand
         {
             RequestId = Guid.NewGuid().ToString(),
-            UndoLastAction = new UndoLastAction { TaskId = taskId },
+            UndoLastAction = new UndoLastAction { TaskId = taskId, ActionId = actionId },
         });
     }
 
@@ -76,52 +100,6 @@ internal sealed class SageCoreClient : IDisposable
         {
             RequestId = Guid.NewGuid().ToString(),
             GetState = new GetState { IncludeCompletedTasks = includeCompleted },
-        });
-    }
-
-    public Task SaveProviderSettingsAsync(
-        string provider,
-        string model,
-        string endpoint,
-        string apiKey,
-        bool removeSavedKey,
-        bool nativeAuthenticationSatisfied
-    )
-    {
-        return SendCommandAsync(new UiCommand
-        {
-            RequestId = Guid.NewGuid().ToString(),
-            SaveProviderSettings = new SaveProviderSettings
-            {
-                Role = "reasoning",
-                Provider = provider,
-                Model = model,
-                Endpoint = endpoint,
-                ApiKey = apiKey,
-                RemoveSavedKey = removeSavedKey,
-                NativeAuthenticationSatisfied = nativeAuthenticationSatisfied,
-            },
-        });
-    }
-
-    public Task TestProviderConnectionAsync(
-        string provider,
-        string model,
-        string endpoint,
-        string apiKey
-    )
-    {
-        return SendCommandAsync(new UiCommand
-        {
-            RequestId = Guid.NewGuid().ToString(),
-            TestProviderConnection = new TestProviderConnection
-            {
-                Role = "reasoning",
-                Provider = provider,
-                Model = model,
-                Endpoint = endpoint,
-                ApiKey = apiKey,
-            },
         });
     }
 
@@ -190,7 +168,6 @@ internal sealed class SageCoreClient : IDisposable
         await WriteFrameAsync(pipe, new Frame
         {
             ProtocolVersion = ProtocolVersion,
-            Sequence = NextSequence(),
             ClientAuthenticate = authentication,
         }, cancellationToken);
         var result = await ReadFrameAsync(pipe, cancellationToken);
@@ -218,7 +195,6 @@ internal sealed class SageCoreClient : IDisposable
         await WriteFrameAsync(pipe, new Frame
         {
             ProtocolVersion = ProtocolVersion,
-            Sequence = NextSequence(),
             UiCommand = command,
         }, _stopping.Token);
     }
@@ -226,7 +202,7 @@ internal sealed class SageCoreClient : IDisposable
     public Task KnowledgeAsync(KnowledgeCommand command) => SendCommandAsync(new UiCommand { RequestId = Guid.NewGuid().ToString(), KnowledgeCommand = command });
     public Task WorkflowAsync(WorkflowCommand command) => SendCommandAsync(new UiCommand { RequestId = Guid.NewGuid().ToString(), WorkflowCommand = command });
 
-    private async Task ReceiveLoopAsync(Stream pipe, CancellationToken cancellationToken)
+    private async Task ReceiveLoopAsync(NamedPipeClientStream pipe, AdapterOperations operations, CancellationToken cancellationToken)
     {
         try
         {
@@ -235,33 +211,80 @@ internal sealed class SageCoreClient : IDisposable
                 var frame = await ReadFrameAsync(pipe, cancellationToken);
                 if (frame.PayloadCase == Frame.PayloadOneofCase.CoreEvent)
                 {
+                    var requestId = frame.CoreEvent.EventCase switch
+                    {
+                        CoreEvent.EventOneofCase.TaskAccepted => frame.CoreEvent.TaskAccepted.RequestId,
+                        CoreEvent.EventOneofCase.Error when frame.CoreEvent.Error.Code != "ipc_command_retryable" => frame.CoreEvent.Error.RequestId,
+                        _ => null,
+                    };
+                    if (requestId is not null)
+                        lock (_submissionLock) _pendingSubmissions.RemoveAll(item => item.RequestId == requestId);
                     EventReceived?.Invoke(this, frame.CoreEvent);
                 }
-                if (frame.PayloadCase == Frame.PayloadOneofCase.AdapterRequest && AdapterHandler is not null)
+                if (frame.PayloadCase == Frame.PayloadOneofCase.AdapterRequest && AdapterHandler is { } handler)
                 {
                     if (frame.AdapterRequest.Operation == "execute" && frame.AdapterRequest.Grant?.WorkerSession != _authenticatedSessionId)
                         throw new UnauthorizedAccessException("Grant belongs to another worker session");
-                    var response = await AdapterHandler(frame.AdapterRequest);
-                    await WriteFrameAsync(pipe, new Frame { ProtocolVersion = ProtocolVersion, Sequence = NextSequence(), AdapterResult = response }, cancellationToken);
+                    var request = frame.AdapterRequest;
+                    try
+                    {
+                        var started = operations.Start(request.RequestId, request.ExpiresAtUnixMs, async cancellation =>
+                        {
+                            AdapterResult response;
+                            try { response = await handler(request, cancellation); }
+                            catch (OperationCanceledException) { response = new() { RequestId = request.RequestId, Error = "Worker cancelled before completion" }; }
+                            catch (Exception error) { response = new() { RequestId = request.RequestId, Error = error.Message }; }
+                            try { await WriteFrameAsync(pipe, new Frame { ProtocolVersion = ProtocolVersion, AdapterResult = response }, _stopping.Token); }
+                            catch (Exception error) { FailSession(pipe, operations, error); }
+                        });
+                        if (!started) await SendAdapterFailureAsync(pipe, request.RequestId, "Stopped before worker admission");
+                    }
+                    catch (InvalidOperationException error) { await SendAdapterFailureAsync(pipe, request.RequestId, error.Message); }
+                }
+                if (frame.PayloadCase == Frame.PayloadOneofCase.AdapterCancel)
+                {
+                    var cancellation = frame.AdapterCancel;
+                    operations.Cancel(cancellation.RequestId, cancellation.ExpiresAtUnixMs);
+                    await WriteFrameAsync(pipe, new Frame { ProtocolVersion = ProtocolVersion,
+                        AdapterCancelAcknowledged = new() { RequestId = cancellation.RequestId } }, _stopping.Token);
                 }
             }
         }
         catch (OperationCanceledException) { }
         catch (IOException) when (cancellationToken.IsCancellationRequested) { }
+        catch (Exception error)
+        {
+            FailSession(pipe, operations, error);
+        }
+        finally { operations.Close(); }
+    }
+
+    private Task SendAdapterFailureAsync(NamedPipeClientStream pipe, string id, string message) =>
+        WriteFrameAsync(pipe, new Frame { ProtocolVersion = ProtocolVersion, AdapterResult = new() { RequestId = id, Error = message } }, _stopping.Token);
+
+    private void FailSession(NamedPipeClientStream pipe, AdapterOperations operations, Exception error)
+    {
+        var wasCurrent = ReferenceEquals(Interlocked.CompareExchange(ref _pipe, null, pipe), pipe);
+        operations.Close();
+        pipe.Dispose();
+        if (wasCurrent && !_stopping.IsCancellationRequested) Disconnected?.Invoke(this, error);
     }
 
     private async Task WriteFrameAsync(Stream stream, Frame frame, CancellationToken cancellationToken)
     {
-        var payload = frame.ToByteArray();
-        if (payload.Length == 0 || payload.Length > MaximumFrameBytes)
-        {
-            throw new InvalidDataException("IPC frame is outside the accepted size range");
-        }
-        var header = new byte[4];
-        BinaryPrimitives.WriteUInt32BigEndian(header, (uint)payload.Length);
         await _writeLock.WaitAsync(cancellationToken);
         try
         {
+            if (!ReferenceEquals(stream, _pipe))
+                throw new IOException("The IPC session changed before this request was sent");
+            // Allocate sequence at transmission, under the same lock as bytes.
+            // A caller must never reserve an earlier sequence then write later.
+            frame.Sequence = NextSequence();
+            var payload = frame.ToByteArray();
+            if (payload.Length == 0 || payload.Length > MaximumFrameBytes)
+                throw new InvalidDataException("IPC frame is outside the accepted size range");
+            var header = new byte[4];
+            BinaryPrimitives.WriteUInt32BigEndian(header, (uint)payload.Length);
             await stream.WriteAsync(header, cancellationToken);
             await stream.WriteAsync(payload, cancellationToken);
             await stream.FlushAsync(cancellationToken);
@@ -315,6 +338,7 @@ internal sealed class SageCoreClient : IDisposable
 
     public void Dispose()
     {
+        _adapterOperations.Close();
         _stopping.Cancel();
         _pipe?.Dispose();
         _writeLock.Dispose();

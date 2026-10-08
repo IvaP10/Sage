@@ -1,0 +1,6 @@
+    Checking sage-core v1.0.1 (/Users/ivanpadeliya/Desktop/Sage/crates/sage-core)
+    Checking sage-worker-common v1.0.1 (/Users/ivanpadeliya/Desktop/Sage/crates/sage-worker-common)
+    Checking sage-privileged-helper v1.0.1 (/Users/ivanpadeliya/Desktop/Sage/crates/sage-privileged-helper)
+    Checking sage-sandbox-worker v1.0.1 (/Users/ivanpadeliya/Desktop/Sage/crates/sage-sandbox-worker)
+    Checking sage-browser-worker v1.0.1 (/Users/ivanpadeliya/Desktop/Sage/crates/sage-browser-worker)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.43s

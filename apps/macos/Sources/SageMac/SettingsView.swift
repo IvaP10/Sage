@@ -2,35 +2,12 @@ import SwiftUI
 
 struct SettingsView: View {
     @Bindable var model: AppModel
-    @State private var provider = "openai"
-    @State private var modelName = "gpt-5.4"
-    @State private var endpoint = ""
-    @State private var apiKey = ""
-    @State private var removeSavedKey = false
     @State private var wakePhraseDraft = "Hey Sage"
-    @State private var savedProviderDraft: ProviderDraft?
     @FocusState private var focusedField: Field?
 
     private enum Field: Hashable {
-        case provider
-        case model
-        case endpoint
-        case apiKey
         case wakePhrase
     }
-
-    private struct ProviderDraft: Equatable {
-        let provider: String
-        let model: String
-        let endpoint: String
-        let hasNewAPIKey: Bool
-        let removesSavedKey: Bool
-    }
-
-    private let providers = [
-        ("openai", "OpenAI"),
-        ("openai-compatible", "OpenAI-compatible endpoint"),
-    ]
 
     var body: some View {
         VStack(spacing: 0) {
@@ -41,7 +18,7 @@ struct SettingsView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
                     connectionCard
-                    modelCard
+                    localInferenceCard
                     voiceCard
                     MemorySettingsView(model: model)
                     WorkflowSettingsView(model: model)
@@ -57,20 +34,6 @@ struct SettingsView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(SageTheme.canvas)
         .onAppear(perform: loadSettings)
-        .onChange(of: model.providerSettings?.provider) {
-            loadProviderSettings()
-        }
-        .onChange(of: model.providerSaveMessage) {
-            if model.providerSaveMessage != nil {
-                savedProviderDraft = currentProviderDraft
-                removeSavedKey = false
-            }
-        }
-        .onChange(of: currentProviderDraft) {
-            if !model.providerSaving {
-                model.providerSaveMessage = nil
-            }
-        }
     }
 
     private var settingsHeader: some View {
@@ -107,96 +70,18 @@ struct SettingsView: View {
         }
     }
 
-    private var modelCard: some View {
+    private var localInferenceCard: some View {
         SettingsCard(
-            title: "Model",
+            title: "Sage local inference",
             systemImage: "sparkles"
         ) {
-            VStack(alignment: .leading, spacing: 14) {
-                HStack(alignment: .top, spacing: 14) {
-                    settingsField("Provider", field: .provider) {
-                        providerMenu
-                    }
-                    settingsField("Model", field: .model) {
-                        TextField("Model name", text: $modelName)
-                            .textFieldStyle(.plain)
-                            .focused($focusedField, equals: .model)
-                    }
-                }
-
-                settingsField("Endpoint", field: .endpoint) {
-                    TextField(
-                        provider == "openai-compatible" ? "https://your-host/v1" : "https://api.openai.com/v1 (optional)",
-                        text: $endpoint
-                    )
-                    .textFieldStyle(.plain)
-                    .focused($focusedField, equals: .endpoint)
-                }
-
-                settingsField("API key", field: .apiKey) {
-                    SecureField(
-                        "API key",
-                        text: $apiKey
-                    )
-                    .textFieldStyle(.plain)
-                    .focused($focusedField, equals: .apiKey)
-                }
-
-                if model.providerSettings?.hasApiKey_p == true {
-                    Toggle("Remove the saved Keychain credential", isOn: $removeSavedKey)
-                        .toggleStyle(.checkbox)
-                        .font(.system(size: 12))
-                }
-
-                HStack(spacing: 10) {
-                    if let message = model.providerSaveMessage {
-                        Label(message, systemImage: "checkmark.circle.fill")
-                            .font(.system(size: 11.5, weight: .medium))
-                            .foregroundStyle(SageTheme.success)
-                    } else if model.providerSettings?.hasApiKey_p == true {
-                        Label("Credential saved in Keychain", systemImage: "key.fill")
-                            .font(.system(size: 11.5))
-                            .foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                    Button(model.providerTesting ? "Testing…" : "Test connection") {
-                        model.testProviderConnection(
-                            provider: provider,
-                            model: modelName,
-                            endpoint: endpoint,
-                            apiKey: apiKey
-                        )
-                    }
-                    .buttonStyle(.bordered)
-                    .disabled(model.providerTesting || !validProviderDraft)
-                    .help("Test the provider without saving the credential")
-                    Button(model.providerSaving ? "Saving…" : "Save model settings") {
-                        let key = apiKey
-                        apiKey = ""
-                        model.saveProviderSettings(
-                            provider: provider,
-                            model: modelName,
-                            endpoint: endpoint,
-                            apiKey: key,
-                            removeSavedKey: removeSavedKey
-                        )
-                        removeSavedKey = false
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(
-                        model.providerSaving
-                            || !hasModelChanges
-                            || !validProviderDraft
-                    )
-                    .help("Save changed model settings")
-                }
-                if let message = model.providerTestMessage {
-                    Text(message)
-                        .font(.system(size: 11.5))
-                        .foregroundStyle(message.hasPrefix("Connected") ? SageTheme.success : SageTheme.danger)
-                        .textSelection(.enabled)
-                }
-            }
+            StatusRow(title: "Target", value: "Qwen3.5-4B", positive: nil)
+            Divider()
+            StatusRow(title: "Engine", value: "In development", positive: false)
+            Text("Sage is building its own tokenizer, weight reader, CPU and Metal kernels, and persistent inference worker. Model-based tasks stay unavailable until that path passes numerical, quality, memory, latency, and hardware qualification.")
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -207,15 +92,25 @@ struct SettingsView: View {
         ) {
             VStack(alignment: .leading, spacing: 14) {
                 HStack {
-                    Text("Listen for a wake word")
-                        .font(.system(size: 13, weight: .medium))
                     Spacer()
-                    Toggle("", isOn: Binding(
+                    Toggle("Enable wake word", isOn: Binding(
                         get: { model.wakeWordEnabled },
                         set: { enabled in model.setWakeWordEnabled(enabled) }
                     ))
                     .labelsHidden()
                     .toggleStyle(.switch)
+                }
+
+                if model.isSpeaking {
+                    HStack(spacing: 8) {
+                        Label("Speaking", systemImage: "speaker.wave.2.fill")
+                        Spacer()
+                        Button("Stop speaking", action: model.stopSpokenReply)
+                            .buttonStyle(SageBorderlessButtonStyle())
+                            .accessibilityLabel("Stop spoken reply")
+                    }
+                    .font(.system(size: 11.5, weight: .medium))
+                    .foregroundStyle(.secondary)
                 }
 
                 settingsField("Wake phrase", field: .wakePhrase) {
@@ -284,36 +179,6 @@ struct SettingsView: View {
         }
     }
 
-    private var providerMenu: some View {
-        Menu {
-            ForEach(providers, id: \.0) { value, label in
-                Button {
-                    provider = value
-                } label: {
-                    if provider == value {
-                        Label(label, systemImage: "checkmark")
-                    } else {
-                        Text(label)
-                    }
-                }
-            }
-        } label: {
-            Text(selectedProviderLabel)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .contentShape(Rectangle())
-        }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
-        .buttonStyle(.plain)
-        .focused($focusedField, equals: .provider)
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private var selectedProviderLabel: String {
-        providers.first(where: { $0.0 == provider })?.1
-            ?? (provider.isEmpty ? "Unconfigured provider" : "Unconfigured legacy provider (\(provider))")
-    }
-
     private func settingsField<Content: View>(
         _ label: String,
         field: Field,
@@ -326,37 +191,6 @@ struct SettingsView: View {
 
     private func loadSettings() {
         wakePhraseDraft = model.wakePhrase
-        loadProviderSettings()
-        savedProviderDraft = currentProviderDraft
-    }
-
-    private func loadProviderSettings() {
-        guard let saved = model.providerSettings else { return }
-        provider = saved.provider
-        modelName = saved.model
-        endpoint = saved.endpoint
-        savedProviderDraft = currentProviderDraft
-    }
-
-    private var currentProviderDraft: ProviderDraft {
-        ProviderDraft(
-            provider: provider,
-            model: modelName.trimmingCharacters(in: .whitespacesAndNewlines),
-            endpoint: endpoint.trimmingCharacters(in: .whitespacesAndNewlines),
-            hasNewAPIKey: !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-            removesSavedKey: removeSavedKey
-        )
-    }
-
-    private var hasModelChanges: Bool {
-        guard let savedProviderDraft else { return false }
-        return currentProviderDraft != savedProviderDraft
-    }
-
-    private var validProviderDraft: Bool {
-        !modelName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && (provider != "openai-compatible"
-                || !endpoint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
     }
 }
 

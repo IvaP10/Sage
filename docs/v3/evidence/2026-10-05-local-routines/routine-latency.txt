@@ -1,0 +1,16 @@
+   Compiling sage-core v1.0.1 (/Users/ivanpadeliya/Desktop/Sage/crates/sage-core)
+    Finished `release` profile [optimized] target(s) in 30.41s
+     Running unittests src/lib.rs (target/release/deps/sage_core-349919b266bf7571)
+
+running 1 test
+reviewed_routine_lookup samples=10000 p50_ns=58917 p95_ns=61708 p99_ns=67084; excludes UI, IPC, folder resolution, approval, broker, and effects
+test engine::tests::reviewed_local_routines_need_verified_examples_and_fresh_run_scope ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 170 filtered out; finished in 0.94s
+
+     Running unittests src/main.rs (target/release/deps/sage_core-d2c185f362abcc85)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

@@ -2,12 +2,22 @@ using System.Text.Json;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Sage.Ipc.V2;
+using Windows.UI;
 
 namespace Sage.Windows;
 
 public sealed partial class MainWindow
 {
     private static string J(JsonElement record, string key) => record.ValueKind == JsonValueKind.Object && record.TryGetProperty(key, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() ?? "" : "";
+    private static string[] Strings(JsonElement record, string key) =>
+        record.ValueKind == JsonValueKind.Object && record.TryGetProperty(key, out var values) && values.ValueKind == JsonValueKind.Array
+            ? values.EnumerateArray().Where(value => value.ValueKind == JsonValueKind.String).Select(value => value.GetString() ?? "").ToArray()
+            : Array.Empty<string>();
+    private static string EffectClasses(JsonElement record, string key)
+    {
+        var values = Strings(record, key);
+        return values.Length == 0 ? "none" : string.Join(", ", values);
+    }
 
     private void LoadKnowledge(string json)
     {
@@ -20,6 +30,7 @@ public sealed partial class MainWindow
             var messages = data.GetProperty("messages").EnumerateArray().Where(e => J(e, "conversation_id") == _selectedConversationId).Select(e => e.Clone()).ToList();
             if (messages.Count > 0) { _messages.Clear(); _messages.AddRange(messages); }
             RenderMemories();
+            if (_connected) _ = _client.WorkflowAsync(new WorkflowCommand { Operation = "list" });
         }
         catch (JsonException) { }
     }
@@ -64,25 +75,211 @@ public sealed partial class MainWindow
     {
         if (_workflowPanel is null) return;
         using var document = JsonDocument.Parse(json);
+        var root = document.RootElement;
+        _routineLearningEnabled = root.TryGetProperty("routine_learning_enabled", out var learning) && learning.GetBoolean();
+        _routines.Clear();
+        if (root.TryGetProperty("routines", out var routineList) && routineList.ValueKind == JsonValueKind.Array)
+            _routines.AddRange(routineList.EnumerateArray().Select(item => item.Clone()));
+        _routineFamilies.Clear();
+        if (root.TryGetProperty("routine_families", out var familyList) && familyList.ValueKind == JsonValueKind.Array)
+            _routineFamilies.AddRange(familyList.EnumerateArray().Select(item => item.Clone()));
         _workflowPanel.Children.Clear();
         _workflowPanel.Children.Add(new TextBlock { Text = "Skills and background tasks", FontSize = 18 });
+        var learningCard = new StackPanel { Spacing = 8, Margin = new Thickness(0, 8, 0, 12) };
+        learningCard.Children.Add(new TextBlock { Text = "Learn and reuse routines", FontSize = 16, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold });
+        var learn = new ToggleSwitch { Header = "Use reviewed routines", IsOn = _routineLearningEnabled, IsEnabled = _memoryEnabled };
+        learn.Toggled += async (_, _) => await _client.WorkflowAsync(new WorkflowCommand {
+            Operation = "configure_learning", Json = JsonSerializer.Serialize(new { enabled = learn.IsOn })
+        });
+        learningCard.Children.Add(learn);
+        learningCard.Children.Add(new TextBlock {
+            Text = _memoryEnabled
+                ? "Sage can suggest repeated steps after three verified runs. Review each routine before use. Every run checks folder access again."
+                : "Turn on Memory to learn routines. Examples stay on this device; every run still checks folder access.",
+            TextWrapping = TextWrapping.Wrap
+        });
+        foreach (var routine in _routines)
+        {
+            var requests = routine.TryGetProperty("requests", out var requestArray) && requestArray.ValueKind == JsonValueKind.Array
+                ? requestArray.EnumerateArray().Where(value => value.ValueKind == JsonValueKind.String).Select(value => value.GetString() ?? "").ToArray()
+                : Array.Empty<string>();
+            var steps = routine.TryGetProperty("steps", out var stepArray) && stepArray.ValueKind == JsonValueKind.Array
+                ? stepArray.EnumerateArray().Where(value => value.ValueKind == JsonValueKind.String).Select(value => value.GetString() ?? "").ToArray()
+                : Array.Empty<string>();
+            var ready = routine.TryGetProperty("ready", out var readyValue) && readyValue.GetBoolean();
+            var enabled = routine.TryGetProperty("enabled", out var enabledValue) && enabledValue.GetBoolean();
+            var card = new StackPanel { Spacing = 7 };
+            card.Children.Add(new TextBlock { Text = requests.FirstOrDefault() ?? "Repeated task", FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, TextWrapping = TextWrapping.Wrap });
+            if (requests.Length > 1) card.Children.Add(new TextBlock { Text = $"Also seen as: {string.Join(" · ", requests.Skip(1))}", TextWrapping = TextWrapping.Wrap });
+            var count = routine.TryGetProperty("verified_runs", out var countValue) ? countValue.GetInt32() : 0;
+            card.Children.Add(new TextBlock { Text = $"Observed in {count} verified tasks", Opacity = 0.75 });
+            if (routine.TryGetProperty("evolution", out var evolution) && evolution.ValueKind == JsonValueKind.Object)
+            {
+                var sourceRuns = evolution.TryGetProperty("source_verified_runs", out var sourceCount) ? sourceCount.GetInt32() : 0;
+                card.Children.Add(new TextBlock {
+                    Text = $"Corrected variation of ‘{J(evolution, "source_request")}’ ({sourceRuns} source runs).",
+                    Opacity = 0.8, TextWrapping = TextWrapping.Wrap
+                });
+                card.Children.Add(new TextBlock {
+                    Text = $"Effect classes — same: {EffectClasses(evolution, "unchanged_effect_classes")}; added: {EffectClasses(evolution, "added_effect_classes")}; removed: {EffectClasses(evolution, "removed_effect_classes")}. This stays a draft until three independent runs and review.",
+                    Opacity = 0.8, TextWrapping = TextWrapping.Wrap
+                });
+            }
+            if (!ready)
+                card.Children.Add(new TextBlock { Text = "Review opens after three verified tasks.", Opacity = 0.75, TextWrapping = TextWrapping.Wrap });
+            else if (!_routineLearningEnabled)
+                card.Children.Add(new TextBlock { Text = "Turn on routine learning to review and use this routine.", Opacity = 0.75, TextWrapping = TextWrapping.Wrap });
+            for (var index = 0; index < steps.Length; index++)
+                card.Children.Add(new TextBlock { Text = $"{index + 1}. {steps[index]}", TextWrapping = TextWrapping.Wrap });
+            if (enabled)
+                card.Children.Add(new TextBlock { Text = "Reviewed and ready · fresh access is still required", Opacity = 0.8 });
+            else
+            {
+                var review = new Button { Content = "Review and enable", IsEnabled = ready && _routineLearningEnabled };
+                review.Click += async (_, _) =>
+                {
+                    var preview = string.Join("\n", steps.Select((step, index) => $"{index + 1}. {step}"));
+                    var dialog = new ContentDialog {
+                        XamlRoot = Content.XamlRoot,
+                        Title = "Review repeated steps",
+                        Content = new ScrollViewer { Content = new TextBlock {
+                            Text = $"Sage observed this request in {count} verified tasks:\n\n{string.Join("\n", requests)}\n\nSteps:\n{preview}\n\nEach run asks for fresh access to its resources.",
+                            TextWrapping = TextWrapping.Wrap, IsTextSelectionEnabled = true
+                        }, MaxHeight = 400 },
+                        PrimaryButtonText = "Enable routine", CloseButtonText = "Cancel"
+                    };
+                    if (await dialog.ShowAsync() == ContentDialogResult.Primary)
+                        await _client.WorkflowAsync(new WorkflowCommand {
+                            Operation = "review_routine", Id = J(routine, "id"),
+                            Json = JsonSerializer.Serialize(new { digest = J(routine, "review_digest") })
+                        });
+                };
+                card.Children.Add(review);
+            }
+            var forget = new Button { Content = "Forget routine" };
+            forget.Click += async (_, _) =>
+            {
+                var dialog = new ContentDialog {
+                    XamlRoot = Content.XamlRoot,
+                    Title = "Forget this routine?",
+                    Content = "This removes the observed examples and your review from this device.",
+                    PrimaryButtonText = "Forget routine", CloseButtonText = "Cancel"
+                };
+                if (await dialog.ShowAsync() == ContentDialogResult.Primary)
+                    await _client.WorkflowAsync(new WorkflowCommand { Operation = "forget_routine", Id = J(routine, "id") });
+            };
+            card.Children.Add(forget);
+            learningCard.Children.Add(new Border {
+                Padding = new Thickness(10), Margin = new Thickness(0, 6, 0, 0), CornerRadius = new CornerRadius(8),
+                Background = new Microsoft.UI.Xaml.Media.SolidColorBrush(Color.FromArgb(10, 255, 255, 255)),
+                BorderBrush = new Microsoft.UI.Xaml.Media.SolidColorBrush(Color.FromArgb(24, 255, 255, 255)),
+                BorderThickness = new Thickness(1), Child = card
+            });
+        }
+        foreach (var family in _routineFamilies)
+        {
+            var branches = family.TryGetProperty("branches", out var branchValues)
+                && branchValues.ValueKind == JsonValueKind.Array ? branchValues : default;
+            var card = new StackPanel { Spacing = 8 };
+            card.Children.Add(new TextBlock {
+                Text = $"{(branches.ValueKind == JsonValueKind.Array ? branches.GetArrayLength() : 0)} reviewed routines share these steps",
+                FontSize = 14, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, TextWrapping = TextWrapping.Wrap
+            });
+            card.Children.Add(new TextBlock {
+                Text = "Sage found the same verified steps across these routines. Different next steps stay separate from the skill draft.",
+                Opacity = 0.75, TextWrapping = TextWrapping.Wrap
+            });
+            card.Children.Add(new TextBlock {
+                Text = "COMMON STEPS", FontSize = 11, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, Opacity = 0.75
+            });
+            var shared = Strings(family, "shared_steps");
+            for (var index = 0; index < shared.Length; index++)
+                card.Children.Add(new TextBlock { Text = $"{index + 1}. {shared[index]}", TextWrapping = TextWrapping.Wrap });
+            card.Children.Add(new TextBlock {
+                Text = "DIFFERENT NEXT STEPS", FontSize = 11, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, Opacity = 0.75,
+                Margin = new Thickness(0, 4, 0, 0)
+            });
+            if (branches.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var branch in branches.EnumerateArray())
+                {
+                    var branchCard = new StackPanel { Spacing = 4 };
+                    var requests = Strings(branch, "requests");
+                    var count = branch.TryGetProperty("verified_runs", out var branchCount) ? branchCount.GetInt32() : 0;
+                    branchCard.Children.Add(new TextBlock {
+                        Text = $"When you ask · {count} verified runs",
+                        FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, TextWrapping = TextWrapping.Wrap
+                    });
+                    branchCard.Children.Add(new TextBlock { Text = string.Join(" · ", requests), TextWrapping = TextWrapping.Wrap });
+                    var next = Strings(branch, "next_steps");
+                    if (next.Length == 0)
+                        branchCard.Children.Add(new TextBlock { Text = "No additional steps in this branch.", Opacity = 0.75 });
+                    for (var index = 0; index < next.Length; index++)
+                        branchCard.Children.Add(new TextBlock { Text = $"Then {index + 1}. {next[index]}", TextWrapping = TextWrapping.Wrap });
+                    card.Children.Add(new Border {
+                        Padding = new Thickness(9), CornerRadius = new CornerRadius(8),
+                        Background = new Microsoft.UI.Xaml.Media.SolidColorBrush(Color.FromArgb(10, 255, 255, 255)),
+                        BorderBrush = new Microsoft.UI.Xaml.Media.SolidColorBrush(Color.FromArgb(24, 255, 255, 255)),
+                        BorderThickness = new Thickness(1), Child = branchCard
+                    });
+                }
+            }
+            var skillName = new TextBox { PlaceholderText = "Name this shared skill", MaxLength = 100 };
+            var createDraft = new Button { Content = "Create skill draft", IsEnabled = false };
+            skillName.TextChanged += (_, _) => createDraft.IsEnabled = !string.IsNullOrWhiteSpace(skillName.Text);
+            createDraft.Click += async (_, _) => await _client.WorkflowAsync(new WorkflowCommand {
+                Operation = "synthesize_skill", Id = J(family, "id"), Name = skillName.Text,
+                Json = JsonSerializer.Serialize(new { digest = J(family, "review_digest") })
+            });
+            card.Children.Add(skillName);
+            card.Children.Add(createDraft);
+            card.Children.Add(new TextBlock {
+                Text = "Review the draft before enabling it. Each run checks access again.",
+                Opacity = 0.75, TextWrapping = TextWrapping.Wrap
+            });
+            learningCard.Children.Add(new Border {
+                Padding = new Thickness(12), Margin = new Thickness(0, 8, 0, 0), CornerRadius = new CornerRadius(10),
+                Background = new Microsoft.UI.Xaml.Media.SolidColorBrush(Color.FromArgb(14, 255, 255, 255)),
+                BorderBrush = new Microsoft.UI.Xaml.Media.SolidColorBrush(Color.FromArgb(32, 255, 255, 255)),
+                BorderThickness = new Thickness(1), Child = card
+            });
+        }
+        if (_routines.Count == 0)
+            learningCard.Children.Add(new TextBlock {
+                Text = _routineLearningEnabled
+                    ? "Repeated tasks will appear here after Sage verifies them three times."
+                    : "Turn on reviewed routines to let Sage learn from successful tasks.",
+                Opacity = 0.75, TextWrapping = TextWrapping.Wrap
+            });
+        _workflowPanel.Children.Add(new Border {
+            Padding = new Thickness(12), Margin = new Thickness(0, 8, 0, 12), CornerRadius = new CornerRadius(12),
+            Background = new Microsoft.UI.Xaml.Media.SolidColorBrush(Color.FromArgb(14, 255, 255, 255)),
+            BorderBrush = new Microsoft.UI.Xaml.Media.SolidColorBrush(Color.FromArgb(32, 255, 255, 255)),
+            BorderThickness = new Thickness(1), Child = learningCard
+        });
         var selectedSkills = new List<string>();
         foreach (var kind in new[] { "skills", "workflows", "schedules" })
         {
             foreach (var item in document.RootElement.GetProperty(kind).EnumerateArray())
             {
                 var id = J(item, "id"); var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
+                var sourcePaused = item.TryGetProperty("source_paused", out var sourcePausedValue)
+                    && sourcePausedValue.ValueKind == JsonValueKind.True;
                 if (kind == "skills")
                 {
                     var pick = new CheckBox { Content = J(item, "name"), IsEnabled = item.GetProperty("enabled").GetBoolean() };
                     pick.Checked += (_, _) => selectedSkills.Add(id); pick.Unchecked += (_, _) => selectedSkills.Remove(id); row.Children.Add(pick);
                 }
                 else row.Children.Add(new TextBlock { Text = J(item, "name") });
+                if (sourcePaused)
+                    row.Children.Add(new TextBlock { Text = "Paused: review source routines", Opacity = 0.75, TextWrapping = TextWrapping.Wrap });
+                if (kind == "schedules" && item.TryGetProperty("enabled", out var scheduleEnabled))
+                    row.Children.Add(new TextBlock { Text = scheduleEnabled.GetBoolean() ? "Scheduled" : "Inactive", Opacity = 0.75 });
                 if (kind != "schedules")
                 {
                     var run = new Button { Content = "Run", IsEnabled = item.GetProperty("enabled").GetBoolean() };
                     run.Click += async (_, _) => await _client.WorkflowAsync(new WorkflowCommand { Operation = kind == "skills" ? "run_skill" : "run_workflow", Id = id, ConversationId = _selectedConversationId ?? "" }); row.Children.Add(run);
-                    if (kind == "skills" && !item.GetProperty("enabled").GetBoolean())
+                    if (kind == "skills" && !item.GetProperty("enabled").GetBoolean() && !sourcePaused)
                     {
                         var preview = J(item, "preview"); var digest = J(item, "review_digest_candidate"); var title = J(item, "name");
                         var review = new Button { Content = "Review draft" };

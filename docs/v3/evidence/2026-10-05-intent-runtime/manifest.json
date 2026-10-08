@@ -1,0 +1,71 @@
+{
+  "created_at": "2026-10-05T08:53:38.396473+00:00",
+  "objective_complete": false,
+  "base_commit": "ee36a78f2b26ec371f6d4e9dcb9335106130e995",
+  "branch": "codex/sage-runtime-rebuild",
+  "host": {
+    "platform": "macOS-27.0.1-arm64-arm-64bit",
+    "cpu": "Apple M3"
+  },
+  "scope": "Local bounded intent, selective corrections, local read DAG, native preview/progress source. Full 36-feature scope remains in continuous-agency.md.",
+  "source_sha256": {
+    "crates/sage-core/src/intent.rs": "66dd18bc70962443ac9591558621e4164a268d3e99acfb438efcd20f98d116af",
+    "crates/sage-core/src/reconciliation.rs": "38df4c1da6a771112ab85886be3cfb372a1318e462ea8d58cae880587514f630",
+    "crates/sage-core/src/scheduling.rs": "8ae3a60e31d314f5657e25fab0508ba949cc6fbb6db83d3a0f79e440e7fd50eb",
+    "crates/sage-core/src/runtime.rs": "8a2e65920db13920b6eb31b93bf1c7c894d502b0bd819cccea9070b1e931e05c",
+    "crates/sage-core/src/engine.rs": "a9123815b4878a7d380b3dcc128d767ed61ba046982c0774ad5c00c3d53f8717",
+    "crates/sage-core/src/capability.rs": "f424dbfdc1dd6dcb3e1fd128cb48aca52fac705bf7d3970b0600169632796c9e",
+    "crates/sage-core/src/transitions.rs": "fc5bf88050986075df12683ae11067b7d58dcdf56354f45c88a20cb9c2f28db9",
+    "crates/sage-core/src/finalization.rs": "d19614f3840431bb269327298857db001999340fc2d55d926978a426f59a11de",
+    "crates/sage-core/src/domain/task.rs": "4f201d0593ac2ba48316d0a4e54ec88e44d1722f3fd004cdab6d5b87bf614b8e",
+    "crates/sage-core/src/domain/completion.rs": "7252cf48bbbab19c96181807c95f0395ccf9dc2892acb6b4c15716f5d18948de",
+    "crates/sage-core/src/workflows.rs": "dd13fff3a9c133f223d52761e7a36fac20c8f4a5c6d37c7dc567c66b6867ac9d",
+    "crates/sage-core/src/knowledge.rs": "fd1bbabad4afdd48dfad6061650b40258b361cefef9c100ca540634e3c8c134e",
+    "crates/sage-core/src/execution/io.rs": "c3274b473b260df1d9e3929ab0bfb0e87e1131962dd0443e47a2feaad3f8e652",
+    "crates/sage-core/src/execution/files.rs": "8e0b52b7f266893fc2be563dc8155e725abc825b19192720ad26eed237003fcc",
+    "crates/sage-core/src/execution/native.rs": "1088889df5cdf2947785ee35caa38c54d1dd61585c7b4184da9643aaf3e2526b",
+    "crates/sage-core/src/execution/directory.rs": "ddc42c10a0dcc8d692c5ef960477b338f442ddb98fd9214451fbc95476d965b8",
+    "crates/sage-core/src/ipc/dispatch.rs": "f6061d9114de3817c558abc6cb88f21d31d0c9d178526addd1c699fea5bab667",
+    "crates/sage-core/src/ipc/server.rs": "182db8c8b9907030d38574469a92462cbc67b5c7f0eb1850f686bfcbf0e6271d",
+    "crates/sage-core/src/ipc/mod.rs": "c8f49196fe36bf23bbee2940fac7086b2d8d8a8b43aa72fb0d570488f3526c80",
+    "crates/sage-core/src/lib.rs": "1e862b858a9f24910e9209ce7f99805db6a927ee49b4240875940875b3cb1495",
+    "crates/sage-core/examples/intent_latency.rs": "3c259a9bff7d829c24a27adbf863d9be3c0821c1d684f5aa8d61db66dffe29be",
+    "crates/sage-protocol/build.rs": "3872c26a3430df4bcd277145140c5dac865dccdef0d272be5121627e4bec1486",
+    "proto/sage/ipc/v2/sage.proto": "2e9620a7d0ca5f1049c7fbfe6c6ad7f26a367df99b6ecf46b592dbb56a8abbd2",
+    "apps/macos/Sources/SageMac/AppModel.swift": "431132b476b7c9950912d9589619505aed5ed52fa0260a53918313c921ed94d4",
+    "apps/macos/Sources/SageMac/MainView.swift": "e9838fad32a7d9c8250b020eb926c939c2a7b9004f22335b676b2b71e1dba29f",
+    "apps/macos/Sources/SageMac/SageCoreClient.swift": "3b96a96de3a986e7eea27907bb8a22488699ef76f51262ef6c094a8cebfb3648",
+    "apps/macos/Sources/SageMac/VoiceReflex.swift": "795896c9830dc73e6d0dca165bf64540c008e0a599d82690d8a24a9232f488e4",
+    "apps/macos/Sources/SageMac/Generated/sage/ipc/v2/sage.pb.swift": "9dfca4cd63f3b95cd6b28a55263f339189d79d3800da07d7df4d367098bb49be",
+    "apps/windows/Sage.Windows/MainWindow.xaml": "a31076f614af43b7904960679ec23c03284e2ba955450dbe4e4af568526e9873",
+    "apps/windows/Sage.Windows/MainWindow.xaml.cs": "90e668cf6e1925c64000e87242a22e2c73b232de794d2fe3e44cc09be645893c",
+    "apps/windows/Sage.Windows/SageCoreClient.cs": "0ffdf85e6f00fa674318c988018a9ae77f38500238a29faa210e6dbf122f4719"
+  },
+  "evidence_sha256": {
+    "workspace-tests.txt": "7ae50d8a6b2cb427823b091ecc802ba3ec9dc1737e12d10dec0d918a774e73cf",
+    "clippy.txt": "4cdcbca267e8f9a38c72013f155442dcbaa5ca88e9ef75b0039b21c473bb7152",
+    "macos-build.txt": "59e7eb55a605cff36241736388237049e3052d971a5d302e85526b66629899fe",
+    "native-control.txt": "5c0a7ea7b35aa27b74295c61f7f4030393fb8714457df20b86f4145372f038f6",
+    "intent-latency.txt": "68652256e5189832b959f96939b5fe16a7d949aadd2befde0f0d8e9e50ce4305",
+    "revision-latency.txt": "eb1af7cbd640e9bbc3e15a270f8a8237229828ec5198957b587a6fb94b6302eb",
+    "release-build.txt": "bb4479e58831aa3724b8794979fab38175b6b434998720fd6bee109978c70040"
+  },
+  "validation": {
+    "workspace": "169 core tests plus one browser-worker test pass; one release benchmark ignored by ordinary suite and separately passed in release mode",
+    "clippy": "workspace and all targets, warnings denied, passed",
+    "macos_build": "Swift native build with MacOSX26.5.sdk passed",
+    "native_controls": "focused standalone Swift fixtures passed",
+    "windows": "XAML parse passed; no .NET SDK or Windows runtime available",
+    "diff_check": "passed",
+    "release_build": "optimized sage-core build passed; current preview app was not restarted while its Keychain unlock is pending"
+  },
+  "live_acceptance": {
+    "macos_preview": "Inspected partial preparation card; screenshot retained. Earlier submitted read reached preparation and Stop persisted.",
+    "macos_full_approval_execution": "Unverified. OS file syscall stalled; later Mac lock blocked Keychain. Bounded I/O and owned hydration subsequently tested in core fixtures.",
+    "latest_ui_probe": "Mac still locked; no live validation of selective-correction UI.",
+    "voice_hardware": "unverified",
+    "windows_runtime": "unverified",
+    "device_mesh": "not implemented"
+  },
+  "latency_boundaries": "CPU microbenchmarks exclude speech, IPC, persistent commits, approval, native effects and connected devices."
+}

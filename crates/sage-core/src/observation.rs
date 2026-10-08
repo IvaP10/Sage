@@ -11,6 +11,24 @@ use crate::execution::ExecutionReceipt;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Evidence {
+    DirectoryPage {
+        path: String,
+        page_size: u32,
+        cursor: Option<String>,
+        page_sha256: String,
+        snapshot_sha256: String,
+        total_entries: u32,
+    },
+    SignedApplication {
+        target: crate::application_target::ApplicationTarget,
+        process_id: u32,
+    },
+    ApplicationControlValue {
+        target: crate::application_target::ApplicationTarget,
+        process_id: u32,
+        control_id: String,
+        value: crate::domain::ApplicationControlValue,
+    },
     FetchedResource {
         url: String,
         status: u16,
@@ -26,6 +44,14 @@ pub enum Evidence {
     FileHash {
         path: String,
         sha256: String,
+    },
+    FileStreamHash {
+        path: String,
+        channel_id: String,
+        producer_node: String,
+        file_sha256: String,
+        stream_sha256: String,
+        bytes: u64,
     },
     ApplicationState {
         application: String,
@@ -78,6 +104,52 @@ impl Observer for DeterministicObserver {
         receipt: &ExecutionReceipt,
     ) -> CoreResult<Observation> {
         let evidence = match &proposal.expected_outcome {
+            ExpectedOutcome::DirectoryPage {
+                path,
+                page_size,
+                cursor,
+            } => {
+                let fresh = crate::execution::directory::inspect(
+                    None,
+                    path.clone(),
+                    *page_size,
+                    cursor.clone(),
+                    None,
+                )
+                .await?;
+                let returned: crate::execution::directory::DirectoryPage =
+                    serde_json::from_value(receipt.transient_data.clone())?;
+                let before: Option<crate::contracts::FileIdentity> = serde_json::from_str(
+                    proposal.metadata.get("file_precondition").ok_or_else(|| {
+                        CoreError::VerificationFailed(
+                            "Prepared directory identity is missing".into(),
+                        )
+                    })?,
+                )?;
+                if fresh != returned || before.as_ref() != Some(&fresh.directory_identity) {
+                    return Err(CoreError::VerificationFailed(
+                        "Directory result differs from the fresh independent listing".into(),
+                    ));
+                }
+                vec![Evidence::DirectoryPage {
+                    path: fresh.path.clone(),
+                    page_size: *page_size,
+                    cursor: cursor.clone(),
+                    page_sha256: fresh.digest()?,
+                    snapshot_sha256: fresh.snapshot_sha256,
+                    total_entries: fresh.total_entries,
+                }]
+            }
+            ExpectedOutcome::SignedApplication { .. } => {
+                return Err(CoreError::VerificationFailed(
+                    "A fresh signed application observation is required".into(),
+                ));
+            }
+            ExpectedOutcome::ApplicationControlValue { .. } => {
+                return Err(CoreError::VerificationFailed(
+                    "A fresh signed accessibility-control observation is required".into(),
+                ));
+            }
             ExpectedOutcome::PublicResource { url } => {
                 let document: crate::network::FetchedResource =
                     serde_json::from_value(receipt.transient_data.clone())?;
@@ -98,6 +170,74 @@ impl Observer for DeterministicObserver {
                 path: path.to_string_lossy().into_owned(),
                 sha256: hash_file(path).await?,
             }],
+            ExpectedOutcome::FileMatchesStream {
+                path,
+                channel_id,
+                producer_node,
+                maximum_bytes,
+            } => {
+                let stream_channel_id = receipt
+                    .transient_data
+                    .get("stream_channel_id")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| {
+                        CoreError::VerificationFailed(
+                            "Streamed write receipt has no channel identity".into(),
+                        )
+                    })?;
+                let stream_producer_node = receipt
+                    .transient_data
+                    .get("stream_producer_node")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| {
+                        CoreError::VerificationFailed(
+                            "Streamed write receipt has no producer identity".into(),
+                        )
+                    })?;
+                let stream_sha256 = receipt
+                    .transient_data
+                    .get("stream_sha256")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|digest| valid_sha256(digest))
+                    .ok_or_else(|| {
+                        CoreError::VerificationFailed(
+                            "Streamed write receipt has no valid content digest".into(),
+                        )
+                    })?;
+                let bytes = receipt
+                    .transient_data
+                    .get("bytes_written")
+                    .and_then(serde_json::Value::as_u64)
+                    .filter(|bytes| {
+                        *maximum_bytes > 0
+                            && *maximum_bytes <= crate::execution::files::MAX_BYTES
+                            && *bytes <= *maximum_bytes
+                    })
+                    .ok_or_else(|| {
+                        CoreError::VerificationFailed(
+                            "Streamed write receipt has no valid byte count".into(),
+                        )
+                    })?;
+                let (file_sha256, file_bytes) = hash_file_with_size(path).await?;
+                if receipt.executor != "native-os-executor"
+                    || stream_channel_id != channel_id
+                    || stream_producer_node != producer_node
+                    || file_sha256 != stream_sha256
+                    || file_bytes != bytes
+                {
+                    return Err(CoreError::VerificationFailed(
+                        "Fresh file contents do not match the completed input stream".into(),
+                    ));
+                }
+                vec![Evidence::FileStreamHash {
+                    path: path.to_string_lossy().into_owned(),
+                    channel_id: channel_id.clone(),
+                    producer_node: producer_node.clone(),
+                    file_sha256,
+                    stream_sha256: stream_sha256.to_owned(),
+                    bytes: file_bytes,
+                }]
+            }
             ExpectedOutcome::CommandExit { .. } => {
                 let code = receipt
                     .transient_data
@@ -142,6 +282,13 @@ impl Observer for DeterministicObserver {
     }
 }
 
+fn valid_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 async fn observe_condition(condition: &Condition) -> CoreResult<Evidence> {
     match condition {
         Condition::FileExists { path }
@@ -168,13 +315,40 @@ async fn observe_condition(condition: &Condition) -> CoreResult<Evidence> {
 }
 
 async fn hash_file(path: &Path) -> CoreResult<String> {
-    crate::execution::files::hash_file(path)
+    let path = path.to_path_buf();
+    crate::execution::io::bounded_read(move |_| crate::execution::files::hash_file(&path)).await
+}
+
+async fn hash_file_with_size(path: &Path) -> CoreResult<(String, u64)> {
+    let path = path.to_path_buf();
+    crate::execution::io::bounded_read(move |_| crate::execution::files::hash_file_with_size(&path))
+        .await
 }
 
 fn summarize(evidence: &[Evidence]) -> String {
     evidence
         .iter()
         .map(|item| match item {
+            Evidence::DirectoryPage {
+                path,
+                total_entries,
+                ..
+            } => format!("Verified directory page from {total_entries} entries in {path}"),
+            Evidence::SignedApplication { target, process_id } => format!(
+                "Signed application {} at {}, process {}",
+                target.identifier, target.bundle_path, process_id
+            ),
+            Evidence::ApplicationControlValue {
+                target,
+                control_id,
+                value,
+                ..
+            } => format!(
+                "Application control {} on {} now reads {}",
+                control_id,
+                target.identifier,
+                serde_json::to_string(value).unwrap_or_else(|_| "[invalid]".into())
+            ),
             Evidence::FetchedResource { url, status, .. } => {
                 format!("Fetched {url}; HTTP {status}")
             }
@@ -186,6 +360,15 @@ fn summarize(evidence: &[Evidence]) -> String {
             Evidence::FileHash { path, sha256 } => {
                 format!("file hash: {path}, sha256={sha256}")
             }
+            Evidence::FileStreamHash {
+                path,
+                channel_id,
+                producer_node,
+                bytes,
+                ..
+            } => format!(
+                "streamed file {path} received {bytes} bytes from {producer_node} via {channel_id}"
+            ),
             Evidence::ApplicationState {
                 application,
                 running,

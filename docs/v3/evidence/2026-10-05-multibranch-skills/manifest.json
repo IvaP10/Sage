@@ -1,0 +1,38 @@
+{
+  "date": "2026-10-05",
+  "workstream": "local multi-branch skill synthesis and native review-card clarity",
+  "status": "implemented and tested as a partial contribution to the active 36-feature goal",
+  "behavior": [
+    "Two or more separately reviewed local routines can expose an exact shared typed-action and dependency prefix when their request aliases remain unambiguous.",
+    "Distinct branch suffixes stay visible to the user and are excluded from the disabled skill draft.",
+    "The synthesis draft retains all source routine identities; ordinary review, per-run resource authorization, broker execution, verification, learning-off pause and forget cascades still apply.",
+    "macOS and Windows cards label the shared steps, distinct next steps, request branches, verified-run counts and review/access boundary.",
+    "No new external API, model, open-source model weights or package dependency is used by family grouping or skill synthesis."
+  ],
+  "validation": {
+    "focused_end_to_end": "Three distinct request branches trained from real temporary files; exact common prefix and separate suffixes checked; composed workflow ran without another planner call but with fresh approval; learning-off pause, source forget, task cancellation, derived-skill deletion, workflow disablement and the remaining two-branch family verified.",
+    "workspace_tests": "172 sage-core tests passed, 2 ignored release-only benchmarks; 1 browser-worker test passed; all other workspace targets and doc tests passed.",
+    "clippy": "cargo clippy --workspace --all-targets --locked -- -D warnings passed.",
+    "format_and_diff": "cargo fmt --all --check and git diff --check passed.",
+    "macos": "SwiftUI package build passed with SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk; the two edited Swift files also passed swiftc frontend parsing. Build emitted pre-existing Sendable-capture and linker search-path warnings.",
+    "windows": "Both Windows XAML files parsed. dotnet is unavailable on this Mac; Windows C# compilation and live WinUI interaction are unverified.",
+    "latency": "Apple M3 release benchmark, 1,000 calls over the maximum 16 reviewed-routine candidates: p50 947250 ns, p95 1003666 ns, p99 1509208 ns. This includes candidate queries and graph processing in in-memory SQLite; it excludes encryption, IPC, UI, resource resolution, approval, broker dispatch and filesystem effects.",
+    "runtime_ui": "The updated settings cards were source/build checked but not opened for live visual or accessibility acceptance."
+  },
+  "evidence_files": [
+    "workspace-tests.txt",
+    "clippy.txt",
+    "macos-build.txt",
+    "routine-family-latency.txt",
+    "swift-source-parse.txt",
+    "windows-validation.txt"
+  ],
+  "source_sha256": {
+    "crates/sage-core/src/learning.rs": "1d8a608d4c3e97a36f53f3d705e0862b02c8a9612fcfabf5548fb7cd6b1b2d43",
+    "crates/sage-core/src/engine.rs": "528a2bc4a2f6f0200f085a93ef71de9c7af7b8565b82b7f9b3d187a5ecb148ad",
+    "crates/sage-core/src/execution/directory.rs": "cc75a70a6e4e48d26ab131c25629668614a1ad0cca58a1e01e7018a446e50676",
+    "apps/macos/Sources/SageMac/MemorySettingsView.swift": "9220c9f4a058e392b96896a3ba44c521569982dab2df11a960d0230bbca16db3",
+    "apps/windows/Sage.Windows/KnowledgeUi.cs": "9b7a67277c8f314d864f0822ec7f7aa8b56f83330d976112d598472d44fa0d24",
+    "docs/v3/continuous-agency.md": "9822ec13a22f0b3b549996179c9bdae17564fcfbc8abe322676cd78615df7217"
+  }
+}

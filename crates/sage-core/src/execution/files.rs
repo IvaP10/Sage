@@ -14,12 +14,16 @@ use std::{
     sync::Mutex,
 };
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
-const MAX_BYTES: u64 = 16 * 1024 * 1024;
+pub(crate) const MAX_BYTES: u64 = 16 * 1024 * 1024;
 
 use crate::contracts::FileIdentity as Identity;
 
 fn identity(metadata: cap_std::fs::Metadata) -> CoreResult<Identity> {
+    #[cfg(windows)]
+    use cap_primitives::fs::_WindowsByHandle;
+    #[cfg(unix)]
     use cap_std::fs::MetadataExt;
     #[cfg(unix)]
     let key = {
@@ -32,16 +36,23 @@ fn identity(metadata: cap_std::fs::Metadata) -> CoreResult<Identity> {
     };
     #[cfg(windows)]
     let key = {
+        if metadata.file_attributes() & 0x400 != 0 {
+            return Err(CoreError::PolicyDenied(
+                "Windows reparse points are unavailable to file tools".into(),
+            ));
+        }
         if metadata.number_of_links().is_none_or(|n| n != 1) && metadata.is_file() {
             return Err(CoreError::PolicyDenied(
                 "File link identity is unavailable".into(),
             ));
         }
-        format!(
-            "{:?}:{:?}",
-            metadata.volume_serial_number(),
-            metadata.file_index()
-        )
+        let volume = metadata
+            .volume_serial_number()
+            .ok_or_else(|| CoreError::PolicyDenied("File volume identity is unavailable".into()))?;
+        let index = metadata
+            .file_index()
+            .ok_or_else(|| CoreError::PolicyDenied("File identity is unavailable".into()))?;
+        format!("{volume}:{index}")
     };
     #[cfg(not(any(unix, windows)))]
     let key = return Err(CoreError::ExecutorUnavailable(
@@ -61,7 +72,51 @@ pub struct PinnedPath {
     before: Option<Identity>,
 }
 
+pub(crate) enum StreamWriteInput {
+    Chunk(Zeroizing<Vec<u8>>),
+    Finish,
+}
+
 impl PinnedPath {
+    pub(crate) fn open_directory(path: &Path) -> CoreResult<Self> {
+        let pinned = if path.is_absolute() && path.parent().is_none() {
+            crate::resources::validate_file_path(path)?;
+            let parent = Dir::open_ambient_dir(path, cap_std::ambient_authority())?;
+            let before = Some(identity(parent.dir_metadata()?)?);
+            Self {
+                parent,
+                leaf: OsString::from("."),
+                before,
+            }
+        } else {
+            Self::open(path)?
+        };
+        if !pinned.is_directory() {
+            return Err(CoreError::InvalidAction(
+                "Select a directory to list".into(),
+            ));
+        }
+        Ok(pinned)
+    }
+
+    pub(crate) fn directory_handle(&self) -> CoreResult<Dir> {
+        self.revalidate()?;
+        let directory = self.parent.open_dir_nofollow(&self.leaf)?;
+        self.validate_directory_handle(&directory)?;
+        Ok(directory)
+    }
+
+    pub(crate) fn validate_directory_handle(&self, directory: &Dir) -> CoreResult<Identity> {
+        self.revalidate()?;
+        let observed = identity(directory.dir_metadata()?)?;
+        if !observed.directory || Some(&observed) != self.before.as_ref() {
+            return Err(CoreError::VerificationFailed(
+                "Directory changed during inspection; start its listing again".into(),
+            ));
+        }
+        Ok(observed)
+    }
+
     pub fn open(path: &Path) -> CoreResult<Self> {
         crate::resources::validate_file_path(path)?;
         let parent_path = path
@@ -129,6 +184,23 @@ impl PinnedPath {
             .map(|identity| identity.key)
             .ok_or_else(|| CoreError::VerificationFailed("File identity is missing".into()))
     }
+    pub(crate) fn snapshot_identity(&self) -> CoreResult<Option<Identity>> {
+        self.revalidate()?;
+        Ok(self.before.clone())
+    }
+    pub(crate) fn parent_identity(&self) -> CoreResult<String> {
+        Ok(identity(self.parent.dir_metadata()?)?.key)
+    }
+    pub(crate) fn require_empty_directory(&self) -> CoreResult<()> {
+        self.revalidate()?;
+        let directory = self.parent.open_dir_nofollow(&self.leaf)?;
+        if directory.entries()?.next().transpose()?.is_some() {
+            return Err(CoreError::ApprovalRejected(
+                "Undo refused: folder contains files".into(),
+            ));
+        }
+        self.revalidate()
+    }
     pub fn remove_verified(&self, expected: &str) -> CoreResult<()> {
         if format!("{:x}", Sha256::digest(self.read(MAX_BYTES)?)) != expected {
             return Err(CoreError::ApprovalRejected(
@@ -137,6 +209,7 @@ impl PinnedPath {
         }
         self.revalidate()?;
         self.parent.remove_file(&self.leaf)?;
+        self.parent.try_clone()?.into_std_file().sync_all()?;
         Ok(())
     }
     pub fn remove_empty_verified(&self, expected: &str) -> CoreResult<()> {
@@ -147,6 +220,7 @@ impl PinnedPath {
         }
         self.revalidate()?;
         self.parent.remove_dir(&self.leaf)?;
+        self.parent.try_clone()?.into_std_file().sync_all()?;
         Ok(())
     }
 
@@ -185,6 +259,10 @@ impl PinnedPath {
     }
 
     pub fn digest(&self, limit: u64) -> CoreResult<String> {
+        self.digest_with_size(limit).map(|(digest, _)| digest)
+    }
+
+    pub fn digest_with_size(&self, limit: u64) -> CoreResult<(String, u64)> {
         self.revalidate()?;
         let mut options = OpenOptions::new();
         options.read(true).follow(FollowSymlinks::No);
@@ -219,7 +297,7 @@ impl PinnedPath {
             ));
         }
         self.revalidate()?;
-        Ok(format!("{:x}", hash.finalize()))
+        Ok((format!("{:x}", hash.finalize()), total))
     }
 
     pub fn write(&self, content: &[u8], overwrite: bool) -> CoreResult<()> {
@@ -251,25 +329,133 @@ impl PinnedPath {
             file.write_all(content)?;
             file.sync_all()?;
             self.revalidate()?;
-            if overwrite {
-                // Atomic same-directory replacement. Never remove the old
-                // destination first. External concurrent writers remain a
-                // documented platform limitation until CAS support is qualified.
-                self.parent.rename(&temporary, &self.parent, &self.leaf)?;
-            } else {
-                // Atomic no-clobber publication, even if another process creates
-                // the destination between revalidation and commit.
-                self.parent
-                    .hard_link(&temporary, &self.parent, &self.leaf)?;
-                self.parent.remove_file(&temporary)?;
-            }
-            self.parent.try_clone()?.into_std_file().sync_all()?;
+            self.publish_temporary(&temporary, overwrite)?;
             Ok(())
         })();
         if result.is_err() {
             let _ = self.parent.remove_file(&temporary);
         }
         result
+    }
+
+    pub(crate) fn write_stream<R>(
+        &self,
+        mut receiver: tokio::sync::mpsc::Receiver<StreamWriteInput>,
+        limit: u64,
+        overwrite: bool,
+        cancelled: &std::sync::atomic::AtomicBool,
+        before_publish: impl FnOnce(&str, u64) -> CoreResult<R>,
+    ) -> CoreResult<(String, u64, R)> {
+        self.revalidate()?;
+        if limit == 0 || limit > MAX_BYTES {
+            return Err(CoreError::InvalidAction(
+                "Streamed file write exceeds its authorized byte bound".into(),
+            ));
+        }
+        if self.before.is_some() && !overwrite {
+            return Err(CoreError::ExecutionFailed(
+                "Destination already exists".into(),
+            ));
+        }
+        if self
+            .before
+            .as_ref()
+            .is_some_and(|identity| identity.directory)
+        {
+            return Err(CoreError::PolicyDenied("Cannot replace a directory".into()));
+        }
+
+        let temporary = OsString::from(format!(".sage-{}.tmp", Uuid::new_v4()));
+        let mut options = OpenOptions::new();
+        options
+            .write(true)
+            .create_new(true)
+            .follow(FollowSymlinks::No);
+        #[cfg(unix)]
+        {
+            use cap_std::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+
+        let result = (|| {
+            let mut file = self.parent.open_with(&temporary, &options)?;
+            let mut buffer = Zeroizing::new([0u8; 64 * 1024]);
+            let mut digest = Sha256::new();
+            let mut total_bytes = 0u64;
+            let mut current = Zeroizing::new(Vec::new());
+            let mut current_offset = 0usize;
+            let mut finished = false;
+            loop {
+                if cancelled.load(std::sync::atomic::Ordering::Acquire) {
+                    return Err(CoreError::Cancelled);
+                }
+                if current_offset == current.len() && !finished {
+                    match receiver.blocking_recv() {
+                        Some(StreamWriteInput::Chunk(chunk)) => {
+                            current = chunk;
+                            current_offset = 0;
+                        }
+                        Some(StreamWriteInput::Finish) => finished = true,
+                        None => {
+                            return Err(CoreError::VerificationFailed(
+                                "Streamed file input closed before its explicit end".into(),
+                            ));
+                        }
+                    }
+                }
+                if finished && current_offset == current.len() {
+                    break;
+                }
+                let count = if current_offset < current.len() {
+                    let count = (current.len() - current_offset).min(buffer.len());
+                    buffer[..count]
+                        .copy_from_slice(&current[current_offset..current_offset + count]);
+                    current_offset += count;
+                    count
+                } else {
+                    0
+                };
+                let next_total = total_bytes.checked_add(count as u64).ok_or_else(|| {
+                    CoreError::InvalidAction("Streamed file size overflowed".into())
+                })?;
+                if next_total > limit {
+                    return Err(CoreError::InvalidAction(
+                        "Streamed file exceeds its authorized byte bound".into(),
+                    ));
+                }
+                file.write_all(&buffer[..count])?;
+                digest.update(&buffer[..count]);
+                total_bytes = next_total;
+            }
+            file.sync_all()?;
+            self.revalidate()?;
+            let stream_sha256 = format!("{:x}", digest.finalize());
+            let commit_value = before_publish(&stream_sha256, total_bytes)?;
+            self.revalidate()?;
+            self.publish_temporary(&temporary, overwrite)?;
+            Ok((stream_sha256, total_bytes, commit_value))
+        })();
+        if result.is_err() {
+            let _ = self.parent.remove_file(&temporary);
+        }
+        result
+    }
+
+    fn publish_temporary(&self, temporary: &OsString, overwrite: bool) -> CoreResult<()> {
+        self.revalidate()?;
+        if overwrite {
+            // Atomic same-directory replacement. Never remove the old
+            // destination first. External concurrent writers remain a
+            // documented platform limitation until CAS support is qualified.
+            self.parent.rename(temporary, &self.parent, &self.leaf)?;
+        } else {
+            // Atomic no-clobber publication, even if another process creates
+            // the destination between revalidation and commit.
+            self.parent.hard_link(temporary, &self.parent, &self.leaf)?;
+            self.parent.remove_file(temporary)?;
+        }
+        self.parent.try_clone()?.into_std_file().sync_all()?;
+        Ok(())
     }
 
     pub fn create_folder(&self) -> CoreResult<()> {
@@ -292,14 +478,28 @@ pub struct FileBroker {
 }
 
 impl FileBroker {
-    pub fn prepare(&self, proposal: &mut ActionProposal) -> CoreResult<()> {
+    pub(crate) fn preparation_guard(&self, id: Uuid) -> PreparationGuard<'_> {
+        PreparationGuard { files: self, id }
+    }
+
+    pub async fn prepare(&self, proposal: &mut ActionProposal) -> CoreResult<()> {
         let path = match &proposal.action {
             Action::ReadFile { path, .. }
+            | Action::ListDirectory { path, .. }
             | Action::WriteFile { path, .. }
             | Action::CreateFolder { path } => path,
             _ => return Ok(()),
         };
-        let pinned = PinnedPath::open(path)?;
+        let path = path.clone();
+        let directory = matches!(proposal.action, Action::ListDirectory { .. });
+        let pinned = super::io::bounded_read(move |_| {
+            if directory {
+                PinnedPath::open_directory(&path)
+            } else {
+                PinnedPath::open(&path)
+            }
+        })
+        .await?;
         proposal.metadata.insert(
             "file_precondition".into(),
             serde_json::to_string(&pinned.before)?,
@@ -342,11 +542,22 @@ impl FileBroker {
     }
 }
 
+pub(crate) struct PreparationGuard<'a> {
+    files: &'a FileBroker,
+    id: Uuid,
+}
+impl Drop for PreparationGuard<'_> {
+    fn drop(&mut self) {
+        self.files.discard(self.id);
+    }
+}
+
 pub fn hash_file(path: &Path) -> CoreResult<String> {
-    Ok(format!(
-        "{:x}",
-        Sha256::digest(PinnedPath::open(path)?.read(MAX_BYTES)?)
-    ))
+    hash_file_with_size(path).map(|(digest, _)| digest)
+}
+
+pub fn hash_file_with_size(path: &Path) -> CoreResult<(String, u64)> {
+    PinnedPath::open(path)?.digest_with_size(MAX_BYTES)
 }
 
 #[cfg(test)]

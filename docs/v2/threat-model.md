@@ -12,7 +12,7 @@ Trusted components are the OS, hypervisor, authority/credential brokers and vali
 
 | Threat | Current control/evidence | Remaining production gate |
 |---|---|---|
-| Model invents permission | No grant-setting tool; closed actions; broker Cedar gate; untrusted provenance | Adversarial real-model evaluation, smaller runtime boundary |
+| Model invents permission | No grant-setting tool; closed actions; first-party broker dispatch gate; untrusted provenance | Adversarial real-model evaluation, smaller runtime boundary |
 | Prompt injection from memory/history/tool output | Source separation, bounded context, scoped retrieval, independent action authorization | AgentDojo/computer-use red-team runs; no claim of universal detection |
 | Unauthorized cloud disclosure | Per-call exact destination/context approval; settings are not consent; loopback remains external | Source-specific release leases and fully typed data-release IPC |
 | Browser impersonates UI | Separate derived role credential and server-side role restriction | Signed peer/component verification and protected per-component key provisioning |
@@ -21,6 +21,7 @@ Trusted components are the OS, hypervisor, authority/credential brokers and vali
 | Replayed/changed execution | Single-use grants, task/action/digest/policy/worker session, cancellation revocation | Attenuation model checking and platform revocation timing acceptance |
 | Private-network/metadata SSRF | Address classification, DNS pinning, no proxies, no redirects | Device/network test matrix, explicitly scoped edge/private routes |
 | Browser target changes after preview | Tab/window/frame/document/navigation identity; immediate pre-dispatch check | Chrome end-to-end race tests; no claim of atomic tabs API compare-and-swap |
+| Arbitrary executable masquerades as an app | Mac bundle/identifier/signer/all-architecture signature binding and dynamic process validation; Windows launch handler removed | Full approval/launch/lock/cancellation acceptance, concurrent bundle replacement and signed native service |
 | Generic UI click commits unknown effect | Click/type/submit/upload handlers not enabled | Effect classification, value/recipient/submission evidence and signed native service |
 | File path replaced with symlink/hardlink | Component-wise no-follow handles, identity validation, hardlink rejection | Windows reparse/ADS/UNC qualification; third-party writer compare-and-replace race |
 | File destroyed during replacement | Exclusive staging, flush, same-directory atomic replacement, encrypted backup | Filesystem crash/power-loss matrix and cross-volume export policy |
@@ -74,6 +75,8 @@ The small state machine should be model-checked for grant consumption, revocatio
 
 SQLCipher protects the stored database and WAL pages under its key. It cannot revoke plaintext previously shown to a user, sent to an explicitly approved service, retained in OS backups, or read before migration. The migration's encrypted rollback contains historical data and must be subject to a user-visible retention/deletion policy. Deleting a memory retains inspectable original conversation history but excludes the identified material from future model context.
 
-Audit hashes make a chain tamper-evident when checked against a separately protected checkpoint. The current chain alone does not protect against truncation or replacement by an attacker holding the database key. Protected checkpoints and their verification are release gates. Never call this audit log immutable against a compromised host.
+Audit hashes are verified against a separately stored OS-secret checkpoint on unlock, before effects and after verification. Tampering, truncation behind an anchored sequence and a missing required checkpoint fail closed. Records after the last checkpoint are an unanchored tail; an attacker controlling both the database and OS credential store can rewrite both. Protected checkpoints have fixture coverage; real OS-store availability and timing remain release gates. The log is not immutable against a compromised host.
 
 A development binary with file-based UI credentials, a same-process native adapter, or a catalog root supplied on a command line does not meet the target production identity model. Production distribution remains blocked until those boundaries, signed updates and platform acceptance are completed.
+
+Application signatures are checked using Apple Code Signing Services, including all universal-binary architectures. A signed third-party application can still behave maliciously; a trusted signature is not a security endorsement. Signature checking cannot make validation and launch atomic against a concurrent writer. Read-only device signing checks do not qualify the full host-control boundary.

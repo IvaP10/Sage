@@ -8,6 +8,13 @@ use crate::secrets::SecretBytes;
 type HmacSha256 = Hmac<Sha256>;
 const DOMAIN: &[u8] = b"SAGE-LOCAL-IPC-AUTH-V2\0";
 
+pub struct FeatureAuthentication<'a> {
+    pub protocol_version: u32,
+    pub client_kind: i32,
+    pub client_version: &'a str,
+    pub features: &'a [String],
+}
+
 #[derive(Debug)]
 pub struct IpcAuthenticator {
     secret: SecretBytes,
@@ -47,6 +54,21 @@ impl IpcAuthenticator {
         server_authentication_proof(self.role_secret(kind)?.expose(), client_proof, session)
     }
 
+    pub fn server_proof_with_features(
+        &self,
+        kind: i32,
+        client_proof: &[u8],
+        session: &str,
+        features: &[String],
+    ) -> CoreResult<[u8; 32]> {
+        server_authentication_proof_with_features(
+            self.role_secret(kind)?.expose(),
+            client_proof,
+            session,
+            features,
+        )
+    }
+
     pub fn verify(
         &self,
         server_nonce: &[u8],
@@ -73,6 +95,33 @@ impl IpcAuthenticator {
             Err(CoreError::AuthenticationFailed)
         }
     }
+
+    pub fn verify_with_features(
+        &self,
+        server_nonce: &[u8],
+        client_nonce: &[u8],
+        authentication: FeatureAuthentication<'_>,
+        proof: &[u8],
+    ) -> CoreResult<()> {
+        if server_nonce.len() != 32 || client_nonce.len() != 32 || proof.len() != 32 {
+            return Err(CoreError::AuthenticationFailed);
+        }
+        validate_features(authentication.features)?;
+        let expected = authentication_proof_with_features(
+            self.role_secret(authentication.client_kind)?.expose(),
+            server_nonce,
+            client_nonce,
+            authentication.protocol_version,
+            authentication.client_kind,
+            authentication.client_version,
+            authentication.features,
+        )?;
+        if expected.ct_eq(proof).into() {
+            Ok(())
+        } else {
+            Err(CoreError::AuthenticationFailed)
+        }
+    }
 }
 
 pub fn derive_browser_secret(secret: &SecretBytes) -> SecretBytes {
@@ -86,12 +135,23 @@ pub fn server_authentication_proof(
     client_proof: &[u8],
     session: &str,
 ) -> CoreResult<[u8; 32]> {
+    server_authentication_proof_with_features(secret, client_proof, session, &[])
+}
+
+pub fn server_authentication_proof_with_features(
+    secret: &[u8],
+    client_proof: &[u8],
+    session: &str,
+    features: &[String],
+) -> CoreResult<[u8; 32]> {
+    validate_features(features)?;
     let mut mac =
         HmacSha256::new_from_slice(secret).map_err(|_| CoreError::AuthenticationFailed)?;
     mac.update(b"SAGE-CORE-PROOF-V2\0");
     mac.update(client_proof);
     mac.update(&(session.len() as u32).to_be_bytes());
     mac.update(session.as_bytes());
+    update_feature_transcript(&mut mac, features);
     Ok(mac.finalize().into_bytes().into())
 }
 
@@ -103,6 +163,27 @@ pub fn authentication_proof(
     client_kind: i32,
     client_version: &str,
 ) -> CoreResult<[u8; 32]> {
+    authentication_proof_with_features(
+        secret,
+        server_nonce,
+        client_nonce,
+        protocol_version,
+        client_kind,
+        client_version,
+        &[],
+    )
+}
+
+pub fn authentication_proof_with_features(
+    secret: &[u8],
+    server_nonce: &[u8],
+    client_nonce: &[u8],
+    protocol_version: u32,
+    client_kind: i32,
+    client_version: &str,
+    features: &[String],
+) -> CoreResult<[u8; 32]> {
+    validate_features(features)?;
     let mut mac = HmacSha256::new_from_slice(secret)
         .map_err(|_| CoreError::Protocol("invalid IPC authentication key".into()))?;
     mac.update(DOMAIN);
@@ -112,7 +193,40 @@ pub fn authentication_proof(
     mac.update(&client_kind.to_be_bytes());
     mac.update(&(client_version.len() as u32).to_be_bytes());
     mac.update(client_version.as_bytes());
+    update_feature_transcript(&mut mac, features);
     Ok(mac.finalize().into_bytes().into())
+}
+
+fn validate_features(features: &[String]) -> CoreResult<()> {
+    if features.len() > 32
+        || features.iter().any(|feature| {
+            feature.is_empty()
+                || feature.len() > 96
+                || !feature.bytes().all(|byte| {
+                    byte.is_ascii_lowercase()
+                        || byte.is_ascii_digit()
+                        || byte == b'_'
+                        || byte == b'.'
+                })
+        })
+        || features.windows(2).any(|pair| pair[0] >= pair[1])
+    {
+        return Err(CoreError::AuthenticationFailed);
+    }
+    Ok(())
+}
+
+fn update_feature_transcript(mac: &mut HmacSha256, features: &[String]) {
+    if features.is_empty() {
+        // Empty capability lists retain the v2 transcript for older clients.
+        return;
+    }
+    mac.update(b"SAGE-IPC-FEATURES-V1\0");
+    mac.update(&(features.len() as u32).to_be_bytes());
+    for feature in features {
+        mac.update(&(feature.len() as u32).to_be_bytes());
+        mac.update(feature.as_bytes());
+    }
 }
 
 #[cfg(test)]

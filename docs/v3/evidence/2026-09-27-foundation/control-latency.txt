@@ -1,0 +1,16 @@
+    Blocking waiting for file lock on package cache
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.52s
+     Running unittests src/lib.rs (target/debug/deps/sage_core-d1804b7bad3b4cda)
+
+running 1 test
+Fixture Stop committed and Ping replied in 3.269834ms while the ordinary lane remained stalled
+test ipc::server::protocol_v2_tests::stop_and_ping_bypass_a_stalled_and_saturated_ordinary_lane ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 58 filtered out; finished in 0.11s
+
+     Running unittests src/main.rs (target/debug/deps/sage_core-0ebb7b482518d5e4)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

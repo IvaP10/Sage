@@ -1,0 +1,46 @@
+TAP version 13
+# Subtest: each stale browser identity field prevents navigation
+ok 1 - each stale browser identity field prevents navigation
+  ---
+  duration_ms: 13.706
+  type: 'test'
+  ...
+# Subtest: Stop before admission prevents a browser effect
+ok 2 - Stop before admission prevents a browser effect
+  ---
+  duration_ms: 0.423084
+  type: 'test'
+  ...
+# Subtest: Stop bypasses a blocked identity read and cancels both active and queued requests
+ok 3 - Stop bypasses a blocked identity read and cancels both active and queued requests
+  ---
+  duration_ms: 0.556583
+  type: 'test'
+  ...
+# Subtest: Stop after navigation dispatch reports uncertainty rather than prevented navigation
+ok 4 - Stop after navigation dispatch reports uncertainty rather than prevented navigation
+  ---
+  duration_ms: 0.410875
+  type: 'test'
+  ...
+# Subtest: a valid navigation returns the new document and consumes its grant
+ok 5 - a valid navigation returns the new document and consumes its grant
+  ---
+  duration_ms: 0.494833
+  type: 'test'
+  ...
+# Subtest: unsupported operations, other origins, expired and revoked grants do not dispatch
+ok 6 - unsupported operations, other origins, expired and revoked grants do not dispatch
+  ---
+  duration_ms: 5.29175
+  type: 'test'
+  ...
+1..6
+# tests 6
+# suites 0
+# pass 6
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 115.418292

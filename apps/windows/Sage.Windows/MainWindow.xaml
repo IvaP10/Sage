@@ -7,7 +7,13 @@
     mc:Ignorable="d"
     Title="Sage">
     <Grid x:Name="Root" RequestedTheme="Dark" Background="{ThemeResource ApplicationPageBackgroundThemeBrush}">
+        <Grid.KeyboardAccelerators>
+            <KeyboardAccelerator Key="N" Modifiers="Control" Invoked="NewChatAccelerator_Invoked" />
+            <KeyboardAccelerator Key="F" Modifiers="Control" Invoked="SearchAccelerator_Invoked" />
+            <KeyboardAccelerator Key="L" Modifiers="Control" Invoked="ComposerAccelerator_Invoked" />
+        </Grid.KeyboardAccelerators>
         <Grid.Resources>
+            <SolidColorBrush x:Key="SageAccentBrush" Color="#93CEC3" />
             <Style x:Key="SidebarButtonStyle" TargetType="Button">
                 <Setter Property="HorizontalContentAlignment" Value="Left" />
                 <Setter Property="Padding" Value="10,0" />
@@ -30,16 +36,16 @@
                 <Setter Property="Margin" Value="0" />
                 <Setter Property="Background" Value="Transparent" />
                 <Setter Property="BorderThickness" Value="0" />
-                <Setter Property="UseSystemFocusVisuals" Value="False" />
+                <Setter Property="UseSystemFocusVisuals" Value="True" />
             </Style>
         </Grid.Resources>
 
         <Grid.ColumnDefinitions>
-            <ColumnDefinition Width="252" MinWidth="216" />
+            <ColumnDefinition Width="268" MinWidth="216" />
             <ColumnDefinition Width="*" />
         </Grid.ColumnDefinitions>
 
-        <Grid Grid.Column="0" Background="{ThemeResource LayerFillColorDefaultBrush}">
+        <Grid Grid.Column="0" Background="{ThemeResource LayerFillColorDefaultBrush}" BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}" BorderThickness="0,0,1,0">
             <Grid.RowDefinitions>
                 <RowDefinition Height="Auto" />
                 <RowDefinition Height="Auto" />
@@ -59,14 +65,17 @@
                 <TextBlock Grid.Column="1" Text="Sage" Margin="8,0,0,0" FontSize="16" FontWeight="SemiBold" VerticalAlignment="Center" />
             </Grid>
 
-            <Button x:Name="NewTaskButton" Grid.Row="1" Margin="10,0" Style="{StaticResource SidebarButtonStyle}" HorizontalAlignment="Stretch" Click="NewTask_Click" ToolTipService.ToolTip="Start a new chat">
+            <Button x:Name="NewTaskButton" Grid.Row="1" Margin="10,0" Style="{StaticResource SidebarButtonStyle}" HorizontalAlignment="Stretch" Click="NewTask_Click" ToolTipService.ToolTip="Start a new chat (Ctrl+N)">
                 <StackPanel Orientation="Horizontal" Spacing="9">
                     <FontIcon Glyph="&#xE70F;" FontSize="14" />
                     <TextBlock Text="New chat" FontWeight="SemiBold" />
                 </StackPanel>
             </Button>
 
-            <TextBlock Grid.Row="2" Text="Recent" Margin="18,22,18,8" FontSize="11" Opacity="0.72" />
+            <StackPanel Grid.Row="2" Margin="14,18,14,8" Spacing="14">
+                <TextBox x:Name="HistorySearch" PlaceholderText="Search chats" TextChanged="HistorySearch_TextChanged" AutomationProperties.Name="Search chats" ToolTipService.ToolTip="Search chats (Ctrl+F)" />
+                <TextBlock Text="Recent chats" Margin="4,0" FontSize="12" Opacity="0.72" />
+            </StackPanel>
 
             <ListView x:Name="TaskList" Grid.Row="3" SelectionChanged="TaskList_SelectionChanged" SelectionMode="Single" IsItemClickEnabled="False" Padding="8,0" HorizontalContentAlignment="Stretch">
                 <ListView.ItemContainerStyle>
@@ -76,7 +85,7 @@
                         <Setter Property="Margin" Value="0,0,0,2" />
                         <Setter Property="Background" Value="Transparent" />
                         <Setter Property="BorderThickness" Value="0" />
-                        <Setter Property="UseSystemFocusVisuals" Value="False" />
+                        <Setter Property="UseSystemFocusVisuals" Value="True" />
                     </Style>
                 </ListView.ItemContainerStyle>
                 <ListView.ItemTemplate>
@@ -89,7 +98,7 @@
                                             <SymbolIcon Symbol="Edit" />
                                         </MenuFlyoutItem.Icon>
                                     </MenuFlyoutItem>
-                                    <MenuFlyoutItem Text="Pin / unpin" Tag="{Binding}" Click="TogglePin_Click">
+                                    <MenuFlyoutItem Text="{Binding PinMenuLabel}" Tag="{Binding}" Click="TogglePin_Click">
                                         <MenuFlyoutItem.Icon>
                                             <SymbolIcon Symbol="Pin" />
                                         </MenuFlyoutItem.Icon>
@@ -102,22 +111,45 @@
                                     </MenuFlyoutItem>
                                 </MenuFlyout>
                             </Border.ContextFlyout>
-                            <Grid>
-                                <StackPanel Padding="0,0,4,0">
-                                    <TextBlock Text="{Binding Request}" TextTrimming="CharacterEllipsis" MaxLines="1" />
+                            <Grid ColumnSpacing="6">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <SymbolIcon Grid.Column="0" Symbol="Pin" Visibility="{Binding PinVisibility}" AutomationProperties.AccessibilityView="Raw" VerticalAlignment="Center" />
+                                <StackPanel Grid.Column="1" Spacing="4" VerticalAlignment="Center">
+                                    <TextBlock Text="{Binding Request}" AutomationProperties.Name="{Binding AccessibleName}" TextTrimming="CharacterEllipsis" MaxLines="1" />
+                                    <TextBlock Text="{Binding StatusLabel}" FontSize="11" Opacity="0.62" TextTrimming="CharacterEllipsis" />
                                 </StackPanel>
+                                <Button x:Name="TaskOptionsButton" Grid.Column="2" Style="{StaticResource IconButtonStyle}" Tag="{Binding}" Click="TaskOptions_Click" GotFocus="TaskOptionsButton_GotFocus" LostFocus="TaskOptionsButton_LostFocus" Opacity="{Binding OptionsOpacity}" ToolTipService.ToolTip="More chat actions" AutomationProperties.Name="More chat actions" AutomationProperties.HelpText="Rename, pin, or delete this chat">
+                                    <FontIcon Glyph="&#xE712;" FontSize="14" />
+                                </Button>
                             </Grid>
                         </Border>
                     </DataTemplate>
                 </ListView.ItemTemplate>
             </ListView>
 
-            <Button Grid.Row="4" Margin="10,12,10,14" Style="{StaticResource SidebarButtonStyle}" HorizontalAlignment="Stretch" Click="Settings_Click" ToolTipService.ToolTip="Open settings">
-                <StackPanel Orientation="Horizontal" Spacing="9">
-                    <FontIcon Glyph="&#xE713;" FontSize="14" />
-                    <TextBlock Text="Settings" />
-                </StackPanel>
-            </Button>
+            <StackPanel Grid.Row="4" Margin="14,12,14,14" Spacing="10">
+                <Button x:Name="ReviewDecisionsButton" Content="Review requests" Visibility="Collapsed" HorizontalAlignment="Stretch" Click="ReviewDecisions_Click" />
+                <Border BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}" BorderThickness="0,1,0,0" Padding="4,14,4,2">
+                    <StackPanel Spacing="5">
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <Ellipse x:Name="ConnectionDot" Width="6" Height="6" Fill="{ThemeResource TextFillColorSecondaryBrush}" />
+                            <TextBlock x:Name="ConnectionStatus" Text="Connecting to Sage" FontSize="12" AutomationProperties.LiveSetting="Polite" />
+                        </StackPanel>
+                        <TextBlock x:Name="ModelStatus" Text="Checking model settings" FontSize="11" Opacity="0.6" TextTrimming="CharacterEllipsis" Margin="14,0,0,0" />
+                    </StackPanel>
+                </Border>
+                <Button x:Name="ReconnectButton" Content="Connecting…" IsEnabled="False" HorizontalAlignment="Stretch" Click="Reconnect_Click" />
+                <Button Style="{StaticResource SidebarButtonStyle}" HorizontalAlignment="Stretch" Click="Settings_Click" ToolTipService.ToolTip="Open settings">
+                    <StackPanel Orientation="Horizontal" Spacing="9">
+                        <FontIcon Glyph="&#xE713;" FontSize="14" />
+                        <TextBlock Text="Settings" />
+                    </StackPanel>
+                </Button>
+            </StackPanel>
         </Grid>
 
         <Grid Grid.Column="1" Background="{ThemeResource ApplicationPageBackgroundThemeBrush}">
@@ -132,8 +164,15 @@
                     <ColumnDefinition Width="*" />
                     <ColumnDefinition Width="Auto" />
                 </Grid.ColumnDefinitions>
-                <StackPanel>
-                    <TextBlock x:Name="TaskTitle" FontSize="16" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
+                <StackPanel Spacing="7" Margin="0,0,16,0">
+                    <TextBlock x:Name="TaskTitle" FontSize="17" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
+                    <StackPanel Orientation="Horizontal" Spacing="9">
+                        <TextBlock x:Name="TaskStatusText" FontSize="12" Foreground="{StaticResource SageAccentBrush}" AutomationProperties.LiveSetting="Polite" />
+                        <TextBlock x:Name="ActionProgressText" FontSize="12" Opacity="0.6" />
+                    </StackPanel>
+                    <TextBlock x:Name="CurrentActionText" FontSize="12" Opacity="0.72" TextWrapping="Wrap" MaxLines="2" Visibility="Collapsed" />
+                    <TextBlock x:Name="IntentChangeText" FontSize="12" Opacity="0.72" TextWrapping="Wrap" Visibility="Collapsed" AutomationProperties.LiveSetting="Polite" />
+                    <TextBlock x:Name="RoutineText" FontSize="12" Opacity="0.72" TextWrapping="Wrap" Visibility="Collapsed" AutomationProperties.LiveSetting="Polite" />
                 </StackPanel>
                 <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8">
                     <Button x:Name="UndoButton" Visibility="Collapsed" Click="Undo_Click" ToolTipService.ToolTip="Undo the last reversible action">
@@ -148,58 +187,86 @@
             </Grid>
 
             <Grid Grid.Row="1">
-                <ListView x:Name="Timeline" Padding="32,10" IsItemClickEnabled="False" HorizontalContentAlignment="Stretch" ItemContainerStyle="{StaticResource TimelineItemStyle}">
+                <ListView x:Name="Timeline" Padding="32,12" SelectionMode="None" IsItemClickEnabled="False" HorizontalContentAlignment="Stretch" ItemContainerStyle="{StaticResource TimelineItemStyle}" ScrollViewer.VerticalScrollBarVisibility="Auto" Loaded="Timeline_Loaded">
                     <ListView.ItemTemplate>
                         <DataTemplate>
-                            <Grid MaxWidth="920" HorizontalAlignment="Center" Padding="0,12">
-                                <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="30" />
-                                    <ColumnDefinition Width="*" />
-                                </Grid.ColumnDefinitions>
-                                <Border Width="24" Height="24" CornerRadius="7" Background="{ThemeResource SubtleFillColorSecondaryBrush}" VerticalAlignment="Top">
-                                    <FontIcon Glyph="&#xE734;" FontSize="12" Opacity="0.72" HorizontalAlignment="Center" VerticalAlignment="Center" />
-                                </Border>
-                                <StackPanel Grid.Column="1" Spacing="5">
-                                    <TextBlock Text="{Binding Title}" FontWeight="SemiBold" />
-                                    <TextBlock Text="{Binding Detail}" TextWrapping="Wrap" Opacity="0.7" IsTextSelectionEnabled="True" />
+                            <Border MaxWidth="880" HorizontalAlignment="Stretch" Margin="0,0,0,20" Padding="20,17" CornerRadius="14" Background="{Binding Background}" BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}" BorderThickness="1">
+                                <StackPanel Spacing="10">
+                                    <StackPanel Orientation="Horizontal" Spacing="8">
+                                        <FontIcon Glyph="{Binding Glyph}" FontSize="13" Foreground="{StaticResource SageAccentBrush}" AutomationProperties.AccessibilityView="Raw" />
+                                        <TextBlock Text="{Binding Title}" FontSize="12" FontWeight="SemiBold" Opacity="0.78" />
+                                    </StackPanel>
+                                    <TextBlock Text="{Binding Detail}" FontSize="15" LineHeight="24" TextWrapping="Wrap" IsTextSelectionEnabled="True" />
                                 </StackPanel>
-                                <Rectangle Grid.Column="1" Height="1" Fill="{ThemeResource DividerStrokeColorDefaultBrush}" VerticalAlignment="Bottom" Margin="0,12,0,0" />
-                            </Grid>
+                            </Border>
                         </DataTemplate>
                     </ListView.ItemTemplate>
+                    <ListView.Footer>
+                        <Expander x:Name="ActivityExpander" Header="Activity" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch" MaxWidth="880" Margin="0,0,0,20" Visibility="Collapsed">
+                            <ItemsControl x:Name="ActivityList">
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <Grid ColumnSpacing="12" Margin="0,0,0,16">
+                                            <Grid.ColumnDefinitions><ColumnDefinition Width="20" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                                            <FontIcon Glyph="{Binding Glyph}" FontSize="12" Opacity="0.6" VerticalAlignment="Top" AutomationProperties.AccessibilityView="Raw" />
+                                            <StackPanel Grid.Column="1" Spacing="4">
+                                                <TextBlock Text="{Binding Title}" FontSize="13" FontWeight="SemiBold" TextWrapping="Wrap" />
+                                                <TextBlock Text="{Binding Detail}" FontSize="12" Opacity="0.65" TextWrapping="Wrap" IsTextSelectionEnabled="True" />
+                                            </StackPanel>
+                                        </Grid>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                        </Expander>
+                    </ListView.Footer>
                 </ListView>
-                <Grid x:Name="EmptyState" IsHitTestVisible="False" Visibility="Collapsed">
-                    <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,0,0,64" Spacing="14">
-                        <Image Source="ms-appx:///Assets/sage-logo.png" Width="46" Height="46" Stretch="Uniform" />
-                        <TextBlock Text="What should we build?" FontSize="24" FontWeight="SemiBold" HorizontalAlignment="Center" />
+                <Grid x:Name="EmptyState" Visibility="Collapsed">
+                    <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Margin="28,0,28,64" Spacing="18" MaxWidth="500">
+                        <Image Source="ms-appx:///Assets/sage-logo.png" Width="48" Height="48" Stretch="Uniform" />
+                        <TextBlock Text="What would you like to do?" FontSize="28" FontWeight="SemiBold" TextWrapping="Wrap" TextAlignment="Center" />
+                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Spacing="8">
+                            <Button Content="Explore a folder" Tag="List files" Click="Starter_Click" />
+                            <Button Content="Ask a question" Tag="Help me understand " Click="Starter_Click" />
+                        </StackPanel>
                     </StackPanel>
                 </Grid>
             </Grid>
 
             <Grid Grid.Row="2" Padding="28,8,28,22">
-                <Border MaxWidth="920" HorizontalAlignment="Center" Background="{ThemeResource LayerFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="17" Padding="14,10,14,10">
-                    <Grid>
-                        <Grid.RowDefinitions>
-                            <RowDefinition Height="Auto" />
-                        </Grid.RowDefinitions>
-                        <Grid ColumnSpacing="10">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="*" />
-                                <ColumnDefinition Width="Auto" />
-                                <ColumnDefinition Width="Auto" />
-                            </Grid.ColumnDefinitions>
-                            <TextBox x:Name="Composer" Grid.Column="0" PlaceholderText="Ask to build something…" AcceptsReturn="True" TextWrapping="Wrap" MaxHeight="140" MinHeight="34" Background="Transparent" BorderThickness="0" Padding="0,5,0,5" TextChanged="Composer_TextChanged" KeyDown="Composer_KeyDown" />
-                            <Button x:Name="UnlockHistoryButton" Grid.Column="0" HorizontalAlignment="Right" Content="Open protected history" Click="UnlockHistory_Click" />
-                            <Button x:Name="ScopeButton" Grid.Column="2" Content="Folder" Click="Scope_Click" ToolTipService.ToolTip="Choose a folder this task can read" />
-                            <Button x:Name="SendButton" Grid.Column="1" Style="{StaticResource IconButtonStyle}" Click="Send_Click" ToolTipService.ToolTip="Send task">
-                                <FontIcon Glyph="&#xE72A;" FontSize="14" />
-                            </Button>
-                            <Button x:Name="StopButton" Grid.Column="1" Style="{StaticResource IconButtonStyle}" Visibility="Collapsed" Click="Stop_Click" ToolTipService.ToolTip="Stop task">
-                                <FontIcon Glyph="&#xE71A;" FontSize="12" />
-                            </Button>
-                        </Grid>
-                    </Grid>
-                </Border>
+                <StackPanel MaxWidth="880" HorizontalAlignment="Stretch" Spacing="10">
+                    <InfoBar x:Name="SetupNotice" IsOpen="False" IsClosable="False" Severity="Informational" Title="Basic commands run locally" Message="Sage's first-party local model engine is in development. Open-ended model tasks are unavailable during qualification.">
+                        <InfoBar.ActionButton><Button Content="Open settings" Click="Settings_Click" /></InfoBar.ActionButton>
+                    </InfoBar>
+                    <Border x:Name="IntentCard" Visibility="Collapsed" Padding="14" CornerRadius="12" Background="{ThemeResource LayerFillColorDefaultBrush}">
+                        <StackPanel Spacing="8" AutomationProperties.LiveSetting="Polite">
+                            <TextBlock x:Name="IntentHeading" FontSize="12" FontWeight="SemiBold" Foreground="{StaticResource SageAccentBrush}" />
+                            <TextBlock x:Name="IntentSteps" FontSize="12" TextWrapping="Wrap" />
+                            <TextBlock x:Name="IntentDetail" FontSize="11" Opacity="0.65" TextWrapping="Wrap" />
+                            <StackPanel x:Name="IntentSuggestionPanel" Spacing="6" Visibility="Collapsed">
+                                <TextBlock x:Name="IntentSuggestionDetail" FontSize="11" Opacity="0.75" TextWrapping="Wrap" />
+                                <ScrollViewer HorizontalScrollMode="Enabled" HorizontalScrollBarVisibility="Auto" VerticalScrollMode="Disabled" VerticalScrollBarVisibility="Disabled">
+                                    <StackPanel x:Name="IntentSuggestions" Orientation="Horizontal" Spacing="8" />
+                                </ScrollViewer>
+                                <TextBlock Text="Choosing a path fills the message box. Send starts it." FontSize="10" Opacity="0.65" TextWrapping="Wrap" />
+                            </StackPanel>
+                        </StackPanel>
+                    </Border>
+                    <Border Background="{ThemeResource LayerFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="17" Padding="16,12">
+                        <StackPanel Spacing="10">
+                            <TextBox x:Name="Composer" PlaceholderText="Ask Sage anything…" AutomationProperties.Name="Message Sage" AutomationProperties.HelpText="Enter to send, Shift+Enter for a new line" AcceptsReturn="True" TextWrapping="Wrap" MaxHeight="180" MinHeight="48" Background="Transparent" BorderThickness="0" Padding="0,5" TextChanged="Composer_TextChanged" KeyDown="Composer_KeyDown" />
+                            <Grid ColumnSpacing="8">
+                                <Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="Auto" /><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /><ColumnDefinition Width="Auto" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                                <Button x:Name="ScopeButton" Grid.Column="0" Click="Scope_Click" ToolTipService.ToolTip="Choose a folder this task can read" AutomationProperties.Name="Choose a folder this task can read">
+                                    <StackPanel Orientation="Horizontal" Spacing="7"><FontIcon Glyph="&#xE8B7;" FontSize="13" /><TextBlock x:Name="ScopeLabel" Text="Add folder" MaxWidth="200" TextTrimming="CharacterEllipsis" /></StackPanel>
+                                </Button>
+                                <Button x:Name="RemoveScopeButton" Grid.Column="1" Style="{StaticResource IconButtonStyle}" Visibility="Collapsed" Click="RemoveScope_Click" ToolTipService.ToolTip="Remove folder access from this request" AutomationProperties.Name="Remove folder access"><FontIcon Glyph="&#xE711;" FontSize="11" /></Button>
+                                <Button x:Name="UnlockHistoryButton" Grid.Column="3" Content="Open protected history" Visibility="Collapsed" Click="UnlockHistory_Click" />
+                                <Button x:Name="SendButton" Grid.Column="5" Style="{StaticResource IconButtonStyle}" Background="{StaticResource SageAccentBrush}" Foreground="#122622" Click="Send_Click" ToolTipService.ToolTip="Send (Enter)" AutomationProperties.Name="Send" AutomationProperties.HelpText="Submit your prompt"><FontIcon Glyph="&#xE72A;" FontSize="14" /></Button>
+                                <Button x:Name="StopButton" Grid.Column="4" Style="{StaticResource IconButtonStyle}" Visibility="Collapsed" Click="Stop_Click" ToolTipService.ToolTip="Stop task" AutomationProperties.Name="Stop task"><FontIcon Glyph="&#xE71A;" FontSize="12" /></Button>
+                            </Grid>
+                        </StackPanel>
+                    </Border>
+                </StackPanel>
             </Grid>
         </Grid>
     </Grid>

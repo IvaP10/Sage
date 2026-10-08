@@ -4,9 +4,15 @@ struct MainView: View {
     @Bindable var model: AppModel
     @FocusState private var composerFocused: Bool
     @FocusState private var renameFocused: Bool
+    @FocusState private var focusedTaskOptionsID: String?
+    @FocusState private var searchFocused: Bool
     @State private var questionAnswer = ""
     @State private var composerHovering = false
     @State private var hoveredTaskID: String?
+    @State private var searchText = ""
+    @State private var activityExpanded = false
+    @State private var followingLatest = true
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         HStack(spacing: 0) {
@@ -24,6 +30,13 @@ struct MainView: View {
         .background(SageTheme.canvas)
         .onChange(of: model.composerFocusToken) {
             composerFocused = true
+        }
+        .onChange(of: model.composerText) { model.prepareIntent(model.composerText) }
+        .onChange(of: model.taskFolders) { model.prepareIntent(model.composerText) }
+        .onChange(of: model.pendingDecision?.id) { questionAnswer = "" }
+        .onChange(of: model.selectedTaskID) {
+            activityExpanded = false
+            followingLatest = true
         }
         .onChange(of: model.renameFocusToken) {
             renameFocused = true
@@ -50,16 +63,39 @@ struct MainView: View {
         } message: {
             Text("Remove “\(model.deleteCandidateTitle)” from Recent chats?")
         }
-        .sheet(item: $model.pendingApproval) { approval in
-            ApprovalView(
-                approval: approval,
-                approve: { model.approve(approval) },
-                deny: { model.deny(approval) }
-            )
-            .interactiveDismissDisabled()
-        }
-        .sheet(item: $model.pendingQuestion) { question in
-            questionSheet(question)
+        .sheet(item: $model.pendingDecision) { decision in
+            switch decision {
+            case .approval(let approval):
+                ApprovalView(
+                    approval: approval,
+                    resolving: model.resolvingDecision,
+                    approve: { model.approve(approval) },
+                    deny: { model.deny(approval) },
+                    stop: { model.cancel(taskID: approval.taskID) },
+                    later: { model.deferDecision() }
+                )
+                .interactiveDismissDisabled()
+            case .question(let question):
+                questionSheet(question)
+            case .learning(let candidate):
+                LearningApprovalView(
+                    candidate: candidate,
+                    busy: model.worldModelBusy,
+                    sessionActive: model.learningSessionID != nil,
+                    approve: { model.approveLearningCandidate(candidate) },
+                    later: { model.deferDecision() }
+                )
+                .interactiveDismissDisabled()
+            case .controllerDraft(let draft):
+                ControllerReviewView(
+                    draft: draft,
+                    busy: model.worldModelBusy,
+                    status: model.controllerDraftStatus,
+                    review: { model.reviewControllerDraft(draft) },
+                    later: { model.deferDecision() }
+                )
+                .interactiveDismissDisabled()
+            }
         }
     }
 
@@ -83,26 +119,50 @@ struct MainView: View {
             .focusEffectDisabled()
             .padding(.horizontal, 10)
             .padding(.top, 10)
-
-            Text("Recent")
-                .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 18)
-                .padding(.top, 22)
-                .padding(.bottom, 8)
+            HStack(spacing: 7) {
+                Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+                TextField("Search chats", text: $searchText)
+                    .textFieldStyle(.plain)
+                    .focused($searchFocused)
+                    .accessibilityLabel("Search chats")
+                    .help("Search chats (⌘F)")
+                if !searchText.isEmpty {
+                    Button { searchText = "" } label: { Image(systemName: "xmark.circle.fill") }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.secondary)
+                        .accessibilityLabel("Clear chat search")
+                }
+            }
+            .font(.system(size: 12))
+            .padding(9)
+            .background(SageTheme.inputFill, in: RoundedRectangle(cornerRadius: 8))
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(searchFocused ? SageTheme.accent.opacity(0.5) : SageTheme.stroke))
+            .padding(.horizontal, 12)
+            .padding(.top, 12)
+            .padding(.bottom, 14)
+            .background {
+                Button("Search chats") { searchFocused = true }
+                    .keyboardShortcut("f", modifiers: [.command])
+                    .hidden().accessibilityHidden(true)
+            }
 
             ScrollView(.vertical) {
                 LazyVStack(spacing: 2) {
-                    if model.visibleTasks.isEmpty {
-                        Text("No chats yet")
+                    if filteredTasks.isEmpty {
+                        Text(searchText.isEmpty ? "No chats yet" : "No matching chats")
                             .font(.system(size: 12))
                             .foregroundStyle(.tertiary)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(.horizontal, 18)
                             .padding(.vertical, 8)
                     } else {
-                        ForEach(model.visibleTasks, id: \.taskID) { task in
-                            taskRow(task)
+                        if !pinnedTasks.isEmpty {
+                            sidebarSection("Pinned")
+                            ForEach(pinnedTasks, id: \.taskID) { task in taskRow(task) }
+                        }
+                        if !recentTasks.isEmpty {
+                            sidebarSection(searchText.isEmpty ? "Recent" : "Results")
+                            ForEach(recentTasks, id: \.taskID) { task in taskRow(task) }
                         }
                     }
                 }
@@ -124,6 +184,27 @@ struct MainView: View {
                 .padding(.horizontal, 18)
                 .padding(.bottom, 10)
             }
+
+            if model.decisionCount > 0 {
+                Button(action: model.reviewDecisions) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "checkmark.shield")
+                        Text("Needs your review")
+                        Spacer(minLength: 0)
+                        Text("\(model.decisionCount)").monospacedDigit()
+                    }
+                    .font(.system(size: 12, weight: .medium))
+                    .padding(10)
+                    .background(SageTheme.warning.opacity(0.10), in: RoundedRectangle(cornerRadius: 9))
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(SageTheme.warning)
+                .padding(.horizontal, 12)
+                .padding(.bottom, 10)
+                .accessibilityLabel("Review \(model.decisionCount) pending requests")
+            }
+
+            connectionIndicator
 
             Button {
                 model.settingsVisible = true
@@ -159,9 +240,51 @@ struct MainView: View {
         .padding(.bottom, 14)
     }
 
+    private var filteredTasks: [Sage_Ipc_V2_TaskUpdate] {
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        return model.visibleTasks.filter {
+            query.isEmpty || model.displayTitle(for: $0).localizedCaseInsensitiveContains(query)
+                || $0.request.localizedCaseInsensitiveContains(query)
+        }
+    }
+
+    private var pinnedTasks: [Sage_Ipc_V2_TaskUpdate] { filteredTasks.filter { model.isPinned($0.taskID) } }
+    private var recentTasks: [Sage_Ipc_V2_TaskUpdate] { filteredTasks.filter { !model.isPinned($0.taskID) } }
+
+    private func sidebarSection(_ title: String) -> some View {
+        Text(title)
+            .font(.system(size: 10.5, weight: .semibold))
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 10)
+            .padding(.top, 6)
+            .padding(.bottom, 6)
+    }
+
+    private var connectionIndicator: some View {
+        HStack(spacing: 7) {
+            Circle()
+                .fill(model.connectionState == .connected ? SageTheme.success : SageTheme.warning)
+                .frame(width: 6, height: 6)
+                .accessibilityHidden(true)
+            Text(model.connectionState == .connected ? "Connected" : model.connectionState == .starting ? "Connecting…" : "Disconnected")
+                .font(.system(size: 10.5, weight: .medium))
+            Spacer(minLength: 0)
+            if case .failed = model.connectionState {
+                Button("Reconnect", action: model.reconnect).buttonStyle(.plain)
+                    .font(.system(size: 10.5, weight: .semibold))
+            }
+        }
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 18)
+        .padding(.bottom, 12)
+        .help(model.connectionState.label)
+    }
+
     private func taskRow(_ task: Sage_Ipc_V2_TaskUpdate) -> some View {
         let selected = model.selectedTaskID == task.taskID && !model.settingsVisible
-        let showingOptions = hoveredTaskID == task.taskID
+        let optionsFocused = focusedTaskOptionsID == task.taskID
+        let showingOptions = hoveredTaskID == task.taskID || optionsFocused
 
         return Group {
             if model.editingTaskID == task.taskID {
@@ -196,12 +319,19 @@ struct MainView: View {
                                 Image(systemName: "pin.fill")
                                     .font(.system(size: 9.5, weight: .semibold))
                                     .foregroundStyle(.secondary)
+                                    .accessibilityHidden(true)
                             }
                             Text(model.displayTitle(for: task))
                                 .font(.system(size: 12.5, weight: .medium))
                                 .lineLimit(1)
                                 .truncationMode(.tail)
                             Spacer(minLength: 0)
+                            if !isFinished(task.status) || TaskPresentation.needsAttention(task) {
+                                Image(systemName: statusSymbol(task.status))
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(statusColor(task.status))
+                                    .help(statusLabel(task.status))
+                            }
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.leading, 10)
@@ -215,12 +345,17 @@ struct MainView: View {
                     ))
                     .focusEffectDisabled()
                     .help(model.displayTitle(for: task))
+                    .accessibilityLabel(
+                        model.isPinned(task.taskID)
+                            ? "\(model.displayTitle(for: task)), pinned"
+                            : model.displayTitle(for: task)
+                    )
+                    .accessibilityHint("Open chat")
+                    .accessibilityValue(statusLabel(task.status))
 
-                    taskOptionsMenu(task)
+                    taskOptionsMenu(task, isFocused: optionsFocused, isVisible: showingOptions)
                         .padding(.trailing, 5)
                         .opacity(showingOptions ? 1 : 0)
-                        .allowsHitTesting(showingOptions)
-                        .accessibilityHidden(!showingOptions)
                 }
                 .onHover { hovering in
                     if hovering {
@@ -238,22 +373,35 @@ struct MainView: View {
         }
     }
 
-    private func taskOptionsMenu(_ task: Sage_Ipc_V2_TaskUpdate) -> some View {
+    private func taskOptionsMenu(
+        _ task: Sage_Ipc_V2_TaskUpdate,
+        isFocused: Bool,
+        isVisible: Bool
+    ) -> some View {
         Menu {
             taskMenuItems(task)
         } label: {
             Image(systemName: "ellipsis")
                 .font(.system(size: 12.5, weight: .semibold))
-                .foregroundStyle(.secondary)
-                .frame(width: 28, height: 28)
+                .foregroundStyle(isVisible ? .primary : .secondary)
+                .frame(width: 32, height: 32)
                 .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                .background(
+                    isFocused ? SageTheme.selectionFill : (isVisible ? SageTheme.hoverFill : Color.clear),
+                    in: RoundedRectangle(cornerRadius: 7, style: .continuous)
+                )
+                .overlay {
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .stroke(isFocused ? SageTheme.accent.opacity(0.55) : Color.clear, lineWidth: 1)
+                }
         }
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
         .fixedSize()
-        .focusEffectDisabled()
-        .help("Chat options")
-        .accessibilityLabel("Options for \(model.displayTitle(for: task))")
+        .focused($focusedTaskOptionsID, equals: task.taskID)
+        .help("More chat actions")
+        .accessibilityLabel("More actions for \(model.displayTitle(for: task))")
+        .accessibilityHint("Rename, pin, or delete this chat")
     }
 
     @ViewBuilder
@@ -294,20 +442,24 @@ struct MainView: View {
                     .truncationMode(.tail)
             }
             Spacer(minLength: 16)
-            if task.status == .interrupted || task.status == .paused {
+            if task.undoState.isEmpty && task.continuedTaskID.isEmpty && (task.status == .interrupted || task.status == .paused) {
                 Button("Resume") { model.resume(taskID: task.taskID) }.buttonStyle(SageBorderedButtonStyle())
             }
-            if task.status == .succeeded && task.totalActions > 0 {
+            if task.undoState.isEmpty && task.status == .succeeded && task.totalActions > 0 {
                 Button("Save skill") { model.workflow("capture_skill", id: task.taskID, name: model.displayTitle(for: task)) }.buttonStyle(SageBorderedButtonStyle())
+                Button("Save controller draft") { model.compileControllerDraft(taskID: task.taskID) }
+                    .buttonStyle(SageBorderedButtonStyle())
+                    .disabled(model.worldModelBusy)
+                    .help("Compile an unreviewed draft from a fully verified UI procedure. It grants no access and still requires fresh review.")
             }
             if task.undoAvailable {
                 Button {
                     model.undo(taskID: task.taskID)
                 } label: {
-                    Label("Undo", systemImage: "arrow.uturn.backward")
+                    Label(task.undoState == "dispatched" || task.undoState == "uncertain" ? "Check Undo" : task.undoState == "prepared" ? "Retry Undo" : "Undo", systemImage: "arrow.uturn.backward")
                 }
                 .buttonStyle(SageBorderedButtonStyle())
-                .help("Undo the last reversible action")
+                .help(task.undoSummary.isEmpty ? "Undo the last reversible action" : task.undoSummary)
             }
             if !isFinished(task.status) {
                 Button {
@@ -328,9 +480,9 @@ struct MainView: View {
     private var conversation: some View {
         Group {
             if let task = selectedTask {
-                ScrollView(.vertical) {
+                ScrollViewReader { proxy in
+                  ScrollView(.vertical) {
                     LazyVStack(alignment: .leading, spacing: 0) {
-                        if model.messages.isEmpty { requestMessage(task) }
                         ForEach(model.messages) { message in
                             HStack {
                                 if message.role == "user" { Spacer(minLength: 48) }
@@ -342,26 +494,66 @@ struct MainView: View {
                                 if message.role != "user" { Spacer(minLength: 48) }
                             }.padding(.bottom, 12)
                         }
-                        if task.status == .interrupted || task.status == .paused {
-                            ForEach(task.actions, id: \.actionID) { action in
-                                HStack { Text(action.summary); Spacer(); Text(action.status).foregroundStyle(.secondary) }.padding(.vertical, 4)
-                            }
+                        if !model.messages.contains(where: { $0.taskId == task.taskID && $0.role == "user" }) {
+                            requestMessage(task)
                         }
-                        if model.timeline.isEmpty {
-                            taskResult(task)
-                        } else {
-                            ForEach(Array(model.timeline.reversed().enumerated()), id: \.offset) { _, event in
-                                timelineEvent(event)
+                        if let response = TaskPresentation.response(for: task, messages: model.messages, streamed: model.streamedResponses[task.taskID]) {
+                            HStack(alignment: .top, spacing: 12) {
+                                SageLogo(size: 22).accessibilityHidden(true)
+                                Text(response)
+                                    .font(.system(size: 14))
+                                    .textSelection(.enabled)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
                             }
+                            .padding(.vertical, 16)
                         }
+                        taskStatusCard(task)
+                        if !task.actions.isEmpty || !model.timeline.isEmpty {
+                            DisclosureGroup(isExpanded: $activityExpanded) {
+                                ForEach(task.actions, id: \.actionID) { action in
+                                    HStack(alignment: .top) {
+                                        Text(action.summary).textSelection(.enabled)
+                                        Spacer(minLength: 12)
+                                        Text(action.status).foregroundStyle(.secondary)
+                                    }.font(.system(size: 12)).padding(.vertical, 6)
+                                }
+                                ForEach(Array(model.timeline.reversed().enumerated()), id: \.offset) { _, event in
+                                    timelineEvent(event)
+                                }
+                            } label: {
+                                Text("Activity").font(.system(size: 12, weight: .medium))
+                            }
+                            .padding(.top, 16)
+                            .tint(.secondary)
+                        }
+                        Color.clear.frame(height: 1).id("conversation-bottom")
                     }
                     .frame(maxWidth: 920, alignment: .leading)
                     .padding(.horizontal, 32)
                     .padding(.top, 12)
                     .padding(.bottom, 18)
                     .frame(maxWidth: .infinity)
+                  }
+                  .scrollIndicators(.automatic)
+                  .simultaneousGesture(DragGesture(minimumDistance: 3).onChanged { _ in followingLatest = false })
+                  .onChange(of: model.streamedResponses[task.taskID]) {
+                      if followingLatest { proxy.scrollTo("conversation-bottom", anchor: .bottom) }
+                  }
+                  .onChange(of: model.messages.count) {
+                      if followingLatest { proxy.scrollTo("conversation-bottom", anchor: .bottom) }
+                  }
+                  .overlay(alignment: .bottomTrailing) {
+                      if !followingLatest {
+                          Button {
+                              followingLatest = true
+                              proxy.scrollTo("conversation-bottom", anchor: .bottom)
+                          } label: { Label("Latest", systemImage: "arrow.down") }
+                          .buttonStyle(SageBorderedButtonStyle())
+                          .padding(16)
+                      }
+                  }
                 }
-                .scrollIndicators(.automatic)
             } else {
                 emptyState
             }
@@ -383,39 +575,86 @@ struct MainView: View {
         .padding(.bottom, 18)
     }
 
-    private func taskResult(_ task: Sage_Ipc_V2_TaskUpdate) -> some View {
-        let detail = task.summary.isEmpty ? task.finalOutcome : task.summary
-
-        return HStack(alignment: .top, spacing: 12) {
-            SageLogo(size: 22)
-                .shadow(color: Color.black.opacity(0.12), radius: 4, y: 2)
-            VStack(alignment: .leading, spacing: 7) {
-                Label(statusLabel(task.status), systemImage: statusSymbol(task.status))
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(statusColor(task.status))
-                if !detail.isEmpty {
-                    Text(detail)
-                        .font(.system(size: 13.5))
-                        .foregroundStyle(.secondary)
-                        .textSelection(.enabled)
-                        .fixedSize(horizontal: false, vertical: true)
-                } else if !task.currentAction.isEmpty {
-                    Text(task.currentAction)
-                        .font(.system(size: 13.5))
-                        .foregroundStyle(.secondary)
+    private func taskStatusCard(_ task: Sage_Ipc_V2_TaskUpdate) -> some View {
+        let continued = !task.continuedTaskID.isEmpty && task.status != .cancelled
+        return VStack(alignment: .leading, spacing: 9) {
+            HStack {
+                Label(continued ? "Continued" : statusLabel(task.status), systemImage: continued ? "arrow.forward" : statusSymbol(task.status))
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(continued ? Color.secondary : statusColor(task.status))
+                Spacer(minLength: 12)
+            if task.totalActions > 0 {
+                    Text("\(TaskPresentation.verifiedCount(task)) of \(task.totalActions) actions verified")
+                        .font(.system(size: 11)).foregroundStyle(.secondary).monospacedDigit()
                 }
             }
-            Spacer(minLength: 0)
+            if !isFinished(task.status), !task.currentAction.isEmpty {
+                Text(task.currentAction).font(.system(size: 12)).foregroundStyle(.secondary)
+                    .lineLimit(3)
+            }
+            if !task.intentChangeSummary.isEmpty {
+                Label(task.intentChangeSummary, systemImage: "arrow.triangle.branch")
+                    .font(.system(size: 12)).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if !task.routineSummary.isEmpty {
+                Label(task.routineSummary, systemImage: "sparkles")
+                    .font(.system(size: 12)).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if model.controllerDraftTaskID == task.taskID, !model.controllerDraftStatus.isEmpty {
+                Text(model.controllerDraftStatus)
+                    .font(.system(size: 12)).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if !isFinished(task.status), !task.actions.isEmpty {
+                HStack(spacing: 12) {
+                    executionStage("Preparing", symbol: "gearshape", count: task.actions.filter { $0.status == "compiling" }.count)
+                    executionStage("Running", symbol: "play.fill", count: task.actions.filter { $0.status == "running" }.count)
+                    executionStage("Verifying", symbol: "checkmark.shield", count: task.actions.filter { $0.status == "verifying" }.count)
+                }
+            }
+            if TaskPresentation.needsAttention(task), !task.summary.isEmpty {
+                Text(task.summary).font(.system(size: 12)).foregroundStyle(.secondary).textSelection(.enabled)
+            }
+            if task.hasExecutionFacts && task.executionFacts.uncertain > 0 {
+                Label("Some effects still need verification", systemImage: "exclamationmark.triangle")
+                    .font(.system(size: 12)).foregroundStyle(SageTheme.warning)
+            }
+            if model.stoppingTaskIDs.contains(task.taskID) {
+                Text("Stopping…").font(.system(size: 12)).foregroundStyle(.secondary)
+            }
         }
-        .padding(.vertical, 12)
+        .padding(14)
+        .background(SageTheme.hoverFill, in: RoundedRectangle(cornerRadius: 12))
+        .accessibilityElement(children: .combine)
+    }
+
+    private func executionStage(_ label: String, symbol: String, count: Int) -> some View {
+        Label("\(label) \(count)", systemImage: symbol)
+            .font(.system(size: 11, weight: count > 0 ? .semibold : .regular))
+            .foregroundStyle(count > 0 ? SageTheme.accent : Color.secondary)
+            .monospacedDigit()
+            .accessibilityLabel("\(count) actions \(label.lowercased())")
     }
 
     private var emptyState: some View {
         VStack(spacing: 14) {
             SageLogo(size: 46)
                 .shadow(color: Color.black.opacity(0.16), radius: 12, y: 6)
-            Text("What should we build?")
+            Text("What would you like to do?")
                 .font(.system(size: 24, weight: .semibold))
+            HStack(spacing: 10) {
+                Button("Explore a folder") {
+                    model.composerText = "List files"
+                    model.chooseTaskFolder()
+                    composerFocused = true
+                }.buttonStyle(SageBorderedButtonStyle())
+                Button("Ask a question") {
+                    model.composerText = "Help me understand "
+                    composerFocused = true
+                }.buttonStyle(SageBorderedButtonStyle())
+            }.padding(.top, 6)
         }
         .padding(.horizontal, 32)
         .padding(.bottom, 64)
@@ -453,9 +692,96 @@ struct MainView: View {
 
     private var composerArea: some View {
         VStack(spacing: 8) {
+            if let notice = model.refreshNotice {
+                HStack {
+                    Text(notice).font(.system(size: 12)).foregroundStyle(SageTheme.warning)
+                    Spacer(minLength: 8)
+                    Button("Reconnect", action: model.reconnect).buttonStyle(.plain)
+                }.frame(maxWidth: 920)
+            }
+            if model.connectionState == .connected && !model.storageLocked {
+                HStack {
+                    Text("Basic commands run locally. Sage's first-party model engine is in development.").font(.system(size: 12)).foregroundStyle(.secondary)
+                    Spacer(minLength: 8)
+                    Button("Details") { model.settingsVisible = true }.buttonStyle(.plain)
+                }.frame(maxWidth: 920)
+            }
             if model.storageLocked {
                 Button("Open protected history") { model.unlockHistory() }
                     .buttonStyle(.plain).foregroundStyle(.secondary)
+            }
+            if let preview = model.intentPreview, !preview.steps.isEmpty || !preview.routineSuggestions.isEmpty || preview.status == "paused" || preview.status == "stopping" {
+                let streamingRead = !preview.streamedPrefix.isEmpty
+                    && preview.steps.first?.lowercased().hasPrefix("read ") == true
+                VStack(alignment: .leading, spacing: 8) {
+                    Label(preview.status == "unavailable" ? "Action unavailable" : preview.status == "paused" ? "Paused for your correction" : preview.status == "stopping" ? "Stopping" : preview.status == "suggested" ? "Possible learned path" : streamingRead ? "Reading while you speak" : !preview.streamedPrefix.isEmpty ? "Ready for approval while you speak" : preview.status == "prepared" ? "Ready to open" : preview.status == "preparing" ? "Preparing your request" : "Ready on this device",
+                          systemImage: preview.status == "paused" ? "pause.circle" : preview.status == "suggested" ? "arrow.triangle.branch" : streamingRead ? "doc.text" : !preview.streamedPrefix.isEmpty ? "waveform" : "bolt.circle")
+                        .font(.system(size: 12, weight: .semibold)).foregroundStyle(SageTheme.accent)
+                    ForEach(Array(preview.steps.enumerated()), id: \.offset) { index, step in
+                        HStack(spacing: 8) {
+                            Text("\(index + 1)").monospacedDigit().foregroundStyle(.secondary)
+                            Text(step).lineLimit(2)
+                        }.font(.system(size: 12))
+                    }
+                    if !preview.detail.isEmpty { Text(preview.detail).font(.system(size: 11)).foregroundStyle(.secondary) }
+                    if !preview.routineSuggestions.isEmpty {
+                        VStack(alignment: .leading, spacing: 7) {
+                            Label("Possible learned paths", systemImage: "arrow.triangle.branch")
+                                .font(.system(size: 11.5, weight: .semibold))
+                                .foregroundStyle(SageTheme.accent)
+                            Text(preview.routineSuggestionDetail)
+                                .font(.system(size: 11)).foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                            ScrollView(.horizontal) {
+                                HStack(spacing: 8) {
+                                    ForEach(Array(preview.routineSuggestions.enumerated()), id: \.offset) { _, request in
+                                        Button {
+                                            model.composerText = request
+                                            model.composerFocusToken = UUID()
+                                        } label: {
+                                            Text("Use: \(request)")
+                                                .lineLimit(2)
+                                                .fixedSize(horizontal: false, vertical: true)
+                                                .frame(maxWidth: 260, alignment: .leading)
+                                        }
+                                        .buttonStyle(SageBorderedButtonStyle())
+                                        .accessibilityLabel("Use learned request: \(request)")
+                                    }
+                                }
+                            }
+                            .scrollIndicators(.hidden)
+                            Text("Choosing a path fills the message box. Send starts it.")
+                                .font(.system(size: 10.5)).foregroundStyle(.secondary)
+                        }
+                        .padding(10)
+                        .background(SageTheme.stroke.opacity(0.28), in: RoundedRectangle(cornerRadius: 9))
+                    }
+                }
+                .frame(maxWidth: 888, alignment: .leading).padding(14)
+                .background(SageTheme.hoverFill, in: RoundedRectangle(cornerRadius: 12))
+                .accessibilityElement(children: preview.routineSuggestions.isEmpty ? .combine : .contain)
+            }
+            if model.isSpeaking {
+                HStack(spacing: 8) {
+                    Label("Speaking", systemImage: "speaker.wave.2.fill")
+                        .symbolEffect(.variableColor.iterative)
+                        .accessibilityAddTraits(.updatesFrequently)
+                    Spacer(minLength: 0)
+                    Button {
+                        model.stopSpokenReply()
+                    } label: {
+                        Label("Stop", systemImage: "stop.fill")
+                            .font(.system(size: 11.5, weight: .medium))
+                    }
+                    .buttonStyle(.plain)
+                    .help("Stop spoken reply")
+                    .accessibilityLabel("Stop spoken reply")
+                }
+                .font(.system(size: 11.5, weight: .medium))
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: 920)
+                .padding(.bottom, 2)
+                .accessibilityElement(children: .contain)
             }
             if let notice = model.voiceNotice {
                 HStack(spacing: 8) {
@@ -500,9 +826,16 @@ struct MainView: View {
                     }.padding(.bottom, 8)
                 }
                 HStack(alignment: .bottom, spacing: 10) {
-                    Button(action: model.chooseTaskFolder) { Image(systemName: "folder.badge.plus") }
-                        .buttonStyle(.plain).help("Choose folders this task can read")
-                    TextField("Ask to build something…", text: $model.composerText, axis: .vertical)
+                    Button(action: model.chooseTaskFolder) {
+                        Image(systemName: "folder.badge.plus")
+                            .frame(width: 32, height: 32)
+                            .contentShape(Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("Choose folders this task can read")
+                    .accessibilityLabel("Choose folders")
+                    .accessibilityHint("Allow this task to read files in selected folders")
+                    TextField("Ask Sage anything…", text: $model.composerText, axis: .vertical)
                         .textFieldStyle(.plain)
                         .font(.system(size: 14))
                         .focused($composerFocused)
@@ -521,6 +854,7 @@ struct MainView: View {
                         foreground: isVoiceActive ? .white : .secondary
                     ))
                     .help(isVoiceActive ? "Finish voice input" : "Start voice input")
+                    .accessibilityLabel(isVoiceActive ? "Finish voice input" : "Start voice input")
 
                     if let task = selectedTask, !isFinished(task.status) {
                         Button {
@@ -533,7 +867,9 @@ struct MainView: View {
                         }
                         .buttonStyle(SageCircleButtonStyle(fill: SageTheme.warning, foreground: .white))
                         .help("Stop task")
-                    } else {
+                        .accessibilityLabel("Stop task")
+                    }
+                    if (selectedTask.map({ isFinished($0.status) }) ?? true) || !model.composerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                         Button {
                             model.submit()
                         } label: {
@@ -544,7 +880,9 @@ struct MainView: View {
                         }
                         .buttonStyle(SageCircleButtonStyle(fill: SageTheme.accent, foreground: .white))
                         .disabled(!canSubmit)
-                        .help("Send task")
+                        .help(selectedTask.map { !isFinished($0.status) } == true ? "Update request and stop the previous plan" : "Send")
+                        .accessibilityLabel(selectedTask.map { !isFinished($0.status) } == true ? "Update request" : "Send")
+                        .accessibilityHint("Submit your current request")
                     }
                 }
 
@@ -586,7 +924,6 @@ struct MainView: View {
     private var canSubmit: Bool {
         model.connectionState == .connected
             && !model.isSubmitting
-            && !(selectedTask.map { !isFinished($0.status) } ?? false)
             && !model.composerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
@@ -600,7 +937,7 @@ struct MainView: View {
     }
 
     private func statusLabel(_ status: Sage_Ipc_V2_TaskStatus) -> String {
-        String(describing: status).replacingOccurrences(of: "_", with: " ").capitalized
+        TaskPresentation.label(status)
     }
 
     private func statusColor(_ status: Sage_Ipc_V2_TaskStatus) -> Color {
@@ -608,7 +945,7 @@ struct MainView: View {
         case .succeeded: return SageTheme.success
         case .failed, .interrupted: return SageTheme.danger
         case .cancelled: return .secondary
-        case .waitingForApproval, .waitingForUser, .paused: return SageTheme.warning
+        case .waitingForApproval, .waitingForUser, .paused, .partial: return SageTheme.warning
         case .planning, .running, .pending: return SageTheme.accent
         default: return .secondary
         }
@@ -617,6 +954,8 @@ struct MainView: View {
     private func statusSymbol(_ status: Sage_Ipc_V2_TaskStatus) -> String {
         switch status {
         case .succeeded: return "checkmark.circle.fill"
+        case .answered: return "text.bubble"
+        case .partial: return "exclamationmark.circle"
         case .failed, .interrupted: return "exclamationmark.triangle.fill"
         case .cancelled: return "minus.circle"
         case .waitingForApproval: return "checkmark.shield"
@@ -628,10 +967,11 @@ struct MainView: View {
     }
 
     private func isFinished(_ status: Sage_Ipc_V2_TaskStatus) -> Bool {
-        [.succeeded, .failed, .cancelled, .interrupted].contains(status)
+        [.succeeded, .answered, .partial, .failed, .cancelled, .interrupted].contains(status)
     }
 
     private func eventIcon(_ kind: String) -> String {
+        if kind.contains("reference") { return "text.viewfinder" }
         if kind.contains("failed") || kind.contains("denied") { return "exclamationmark.triangle" }
         if kind.contains("succeeded") || kind.contains("completed") { return "checkmark" }
         if kind.contains("approval") { return "checkmark.shield" }
@@ -647,14 +987,15 @@ struct MainView: View {
             TextField("Answer", text: $questionAnswer, axis: .vertical)
                 .textFieldStyle(.roundedBorder)
             HStack {
+                Button("Stop task", role: .destructive) { model.cancel(taskID: question.taskID) }
+                Button("Later", action: model.deferDecision)
+                    .disabled(model.resolvingDecision)
                 Spacer()
                 Button("Send") {
-                    let answer = questionAnswer
-                    questionAnswer = ""
-                    model.answer(answer, question: question)
+                    model.answer(questionAnswer, question: question)
                 }
                 .keyboardShortcut(.defaultAction)
-                .disabled(questionAnswer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .disabled(model.resolvingDecision || questionAnswer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
         }
         .padding(26)
@@ -663,10 +1004,53 @@ struct MainView: View {
     }
 }
 
+private struct LearningApprovalView: View {
+    let candidate: LearningCandidate
+    let busy: Bool
+    let sessionActive: Bool
+    let approve: () -> Void
+    let later: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Label("Sage found a control to learn", systemImage: "slider.horizontal.3")
+                .font(.system(size: 17, weight: .semibold))
+            VStack(alignment: .leading, spacing: 6) {
+                Text(candidate.systemLabel)
+                    .font(.system(size: 14, weight: .medium))
+                Text("\(candidate.label) (\(candidate.role))")
+                    .font(.system(size: 13))
+            }
+            Text("This temporary approval covers this control only, for up to 20 experiments or 10 minutes. Sage will ask you to start each test, change the value by at most one unit, restore its exact previous value and verify the result. No other app action is authorized.")
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if sessionActive {
+                Text("Stop the current learning session from Sage’s menu bar before approving another control.")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(SageTheme.warning)
+            }
+            HStack {
+                Button("Review later", action: later)
+                    .disabled(busy)
+                Spacer()
+                Button("Approve temporary session", action: approve)
+                    .buttonStyle(.borderedProminent)
+                    .disabled(busy || sessionActive)
+            }
+        }
+        .padding(24)
+        .frame(width: 500)
+    }
+}
+
 private struct ApprovalView: View {
     let approval: Sage_Ipc_V2_ApprovalRequest
+    let resolving: Bool
     let approve: () -> Void
     let deny: () -> Void
+    let stop: () -> Void
+    let later: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -688,9 +1072,13 @@ private struct ApprovalView: View {
                     .foregroundStyle(.secondary)
             }
             HStack {
+                Button("Stop task", role: .destructive, action: stop)
+                Button("Later", action: later).disabled(resolving)
                 Button("Deny", role: .cancel, action: deny)
+                    .disabled(resolving)
                 Spacer()
                 Button("Approve once", action: approve)
+                    .disabled(resolving)
                     .buttonStyle(.borderedProminent)
                     .keyboardShortcut(.defaultAction)
             }

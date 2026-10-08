@@ -18,7 +18,7 @@
       "id": "process_isolation",
       "proof_type": "security_review",
       "status": "pending",
-      "reason": "Extract the native/credential services and agent/model networking from shared broker authority; verify signed peers."
+      "reason": "The inference-helper package and sandbox probe are foundations only; extract native/credential services and model networking from shared broker authority, integrate signed-peer attestation and model-package transfer, then qualify installed confinement and cross-platform denial tests."
     },
     {
       "id": "native_macos",

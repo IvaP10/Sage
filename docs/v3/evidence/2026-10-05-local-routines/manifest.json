@@ -1,0 +1,54 @@
+{
+  "date": "2026-10-05",
+  "workstream": "opt-in local routine learning and native review UI",
+  "status": "implemented and tested as a partial contribution to the active 36-feature goal",
+  "behavior": [
+    "Local Rust code records bounded action graphs only from independently requested, fully verified runs in a fixed low-risk allowlist.",
+    "Three verified examples surface an exact normalized request and ordered step list for explicit review.",
+    "A reviewed exact request uses a new action graph without a planner call, receives new action and run identities, and still requires fresh resource scope or approval.",
+    "Routine reuse cannot reinforce its own sample count; failure, undo, corrections, retired task data and explicit forgetting prevent or remove learning evidence.",
+    "No new external API, model, open-source model weights or package dependency was added for routine matching, review or execution."
+  ],
+  "validation": {
+    "workspace_tests": "170 sage-core tests passed, 1 ignored release-only benchmark; 1 browser-worker test passed; all other workspace targets and doc tests passed.",
+    "focused_end_to_end": "Three real temporary-file examples, explicit review, provider-free routine reuse, fresh scope approval, no self-reinforcement, malformed-setting no-op, disable cancellation and forget deletion.",
+    "clippy": "cargo clippy --workspace --all-targets --locked -- -D warnings passed.",
+    "format_and_diff": "cargo fmt --all --check and git diff --check passed.",
+    "macos": "Swift build passed using Command Line Tools MacOSX26.5.sdk after regenerating the checked-in protobuf binding with the package-pinned SwiftProtobuf 1.38.1 generator.",
+    "windows": "MainWindow.xaml parsed with xmllint. dotnet is not installed on this Mac; no Windows compile or live interaction is claimed.",
+    "release_lookup_measurement": {
+      "host_cpu": "Apple M3",
+      "samples": 10000,
+      "p50_ns": 58917,
+      "p95_ns": 61708,
+      "p99_ns": 67084,
+      "scope": "Warmed SQLCipher-backed test-store lookup; excludes UI, IPC, resource resolution, approval, broker dispatch, filesystem effects and end-to-end task latency."
+    }
+  },
+  "evidence_files": [
+    "workspace-tests.txt",
+    "clippy.txt",
+    "macos-build.txt",
+    "protocol-generation.txt",
+    "routine-latency.txt",
+    "windows-validation.txt"
+  ],
+  "source_sha256": {
+    "crates/sage-core/src/learning.rs": "0bb0ade847e18ce358826f5a07c938d0129ca9bdf66b287dd572a0d8a13f2ffa",
+    "crates/sage-core/src/engine.rs": "ab00df1489a30d20f7695417d0c440fb04692d496e495795296198e8bebb5308",
+    "crates/sage-core/src/intent.rs": "0e70b16df4b6914e42a279eab6968c546587d180970ca9e19d90f7142f706593",
+    "crates/sage-core/src/domain/task.rs": "aa80eed7bc37712bcf62e8e2c7ceb4eeafe36deeb94bf26b19ae09ea18077e34",
+    "crates/sage-core/src/knowledge.rs": "35c1a64ff922d2982a9d9effb0a3e183573cb0bea67a5dbd3969f1e951e072a8",
+    "proto/sage/ipc/v2/sage.proto": "9a4043cf043597588f3b5e610fdb235d5558cc6817682fab067cc8ea458f0c11",
+    "apps/macos/Sources/SageMac/MemorySettingsView.swift": "af4fa6ea13c294096182e0ebcb9b709b348acf7723ac4c95a27afb107c2feb6b",
+    "apps/macos/Sources/SageMac/MainView.swift": "e14e4b97ca97411fe1f5f1d5eb2af5732c1e81ce98d1b4918c65939c9788a62a",
+    "apps/macos/Sources/SageMac/Generated/sage/ipc/v2/sage.pb.swift": "98ff1f2c47f3ab698ba1374399ca60e79a3893c4ebce7b0029fb947a3fe68600",
+    "apps/macos/Sources/SageMac/AppModel.swift": "03f84685e5ea2a8d10a664567f263f9a299ec78ff5959b898e704343fe5ea1ec",
+    "apps/macos/Sources/SageMac/KnowledgeModels.swift": "2e04849878d3a3d5b76a5bde8b4126aca90554680d766fb5eb53e6d2683cf0ef",
+    "apps/windows/Sage.Windows/KnowledgeUi.cs": "d45d7f5a4b8e8f2ddc5ca46b9e0b568446ffc4921b375bec48f193aec567a057",
+    "apps/windows/Sage.Windows/MainWindow.xaml.cs": "5957b284e42e374d3b821abfc16a24e055c98b082e86117f1a0606c3df7696ba",
+    "apps/windows/Sage.Windows/MainWindow.xaml": "42960233b9b6d448de2e195c6bb8aca7cb8fc088922fe24a0242144609cd41a2",
+    "docs/architecture.md": "6d1036af17338f9d20b83dea0121f4e83b6663a8f52a15beebcc9422bec147eb",
+    "docs/v3/continuous-agency.md": "72eabd0e9c1f4f74d14f5182b17246241551738892fefbc3c3c2b1ebac425409"
+  }
+}

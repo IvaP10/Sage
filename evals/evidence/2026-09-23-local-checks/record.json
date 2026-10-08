@@ -1,0 +1,215 @@
+{
+  "schema_version": 2,
+  "proof_type": "development_checks",
+  "outcome": "partial",
+  "recorded_at": "2026-09-23T00:24:45.032067+00:00",
+  "source_digest": "fcd411d7df19dcc14802b51232044806a7d6516873c16464bbfcdc6c081db830",
+  "source_unchanged_during_checks": true,
+  "git_head": "ee36a78f2b26ec371f6d4e9dcb9335106130e995",
+  "platform": "macOS-27.0-arm64-arm-64bit",
+  "machine": "arm64",
+  "ram_bytes": 8589934592,
+  "toolchains": {
+    "rust": "rustc 1.89.0 (29483883e 2025-08-04)",
+    "swift": "Apple Swift version 6.3.3 (swiftlang-6.3.3.1.3 clang-2100.1.1.101)\nTarget: arm64-apple-macosx28.0",
+    "python": "3.12.2",
+    "node": "v22.17.1"
+  },
+  "checks": [
+    {
+      "name": "rust-format",
+      "command": [
+        "/Users/ivanpadeliya/.codex/tmp/sage-rust/cargo/bin/rustup",
+        "run",
+        "1.89.0",
+        "cargo",
+        "fmt",
+        "--all",
+        "--",
+        "--check"
+      ],
+      "exit_code": 0,
+      "outcome": "passed",
+      "duration_seconds": 0.165,
+      "artifact": {
+        "path": "evals/evidence/2026-09-23-local-checks/rust-format.txt",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "name": "rust-clippy",
+      "command": [
+        "/Users/ivanpadeliya/.codex/tmp/sage-rust/cargo/bin/rustup",
+        "run",
+        "1.89.0",
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--locked",
+        "--jobs",
+        "2",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit_code": 0,
+      "outcome": "passed",
+      "duration_seconds": 0.288,
+      "artifact": {
+        "path": "evals/evidence/2026-09-23-local-checks/rust-clippy.txt",
+        "sha256": "f2066ca264b9a8598ecd436c70919e1efe1acea4098ad2a13b5d82d67bc049ec"
+      }
+    },
+    {
+      "name": "rust-tests",
+      "command": [
+        "/Users/ivanpadeliya/.codex/tmp/sage-rust/cargo/bin/rustup",
+        "run",
+        "1.89.0",
+        "cargo",
+        "test",
+        "--workspace",
+        "--locked",
+        "--jobs",
+        "2"
+      ],
+      "exit_code": 0,
+      "outcome": "passed",
+      "duration_seconds": 1.99,
+      "artifact": {
+        "path": "evals/evidence/2026-09-23-local-checks/rust-tests.txt",
+        "sha256": "2fc2013468f66024a3c556e85c95bc206d438c982e46f65934a91e666d55584b"
+      }
+    },
+    {
+      "name": "browser-contracts",
+      "command": [
+        "node",
+        "--test",
+        "integrations/browser/background.test.mjs"
+      ],
+      "exit_code": 0,
+      "outcome": "passed",
+      "duration_seconds": 0.162,
+      "artifact": {
+        "path": "evals/evidence/2026-09-23-local-checks/browser-contracts.txt",
+        "sha256": "e2df23f2b3a59435a9b763ca439925fac2e84296f2b9b6f62d93ee3c65f551ae"
+      }
+    },
+    {
+      "name": "release-tests",
+      "command": [
+        "/Library/Frameworks/Python.framework/Versions/3.12/bin/python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "scripts",
+        "-p",
+        "test_*.py"
+      ],
+      "exit_code": 0,
+      "outcome": "passed",
+      "duration_seconds": 0.082,
+      "artifact": {
+        "path": "evals/evidence/2026-09-23-local-checks/release-tests.txt",
+        "sha256": "d03ce458f2a6cd2b4f27522f3aacad03ce1872c028853507c3ad02ca621bdcad"
+      }
+    },
+    {
+      "name": "mac-signature-smoke",
+      "command": [
+        "/Library/Frameworks/Python.framework/Versions/3.12/bin/python3",
+        "scripts/check-macos-signatures.py"
+      ],
+      "exit_code": 0,
+      "outcome": "passed",
+      "duration_seconds": 5.487,
+      "artifact": {
+        "path": "evals/evidence/2026-09-23-local-checks/mac-signature-smoke.txt",
+        "sha256": "05f6ee7bbdd51cc921df4e5e410af30109e7ec47102e09cc6aacd5ceade7add5"
+      }
+    },
+    {
+      "name": "mac-xctest",
+      "command": [
+        "swift",
+        "test",
+        "--package-path",
+        "apps/macos"
+      ],
+      "exit_code": 1,
+      "outcome": "blocked",
+      "duration_seconds": 2.031,
+      "artifact": {
+        "path": "evals/evidence/2026-09-23-local-checks/mac-xctest.txt",
+        "sha256": "fb7307878b038ab037c47f08c75d4e394ca0419b6a039d09f05fcd2389ba35ec"
+      }
+    },
+    {
+      "name": "repository",
+      "command": [
+        "./scripts/check-repository.sh"
+      ],
+      "exit_code": 0,
+      "outcome": "passed",
+      "duration_seconds": 0.036,
+      "artifact": {
+        "path": "evals/evidence/2026-09-23-local-checks/repository.txt",
+        "sha256": "4742114f05a617b640aa7841285fdfa873c48b7c71aff5fd6ac5355403e8b634"
+      }
+    },
+    {
+      "name": "release-definition",
+      "command": [
+        "/Library/Frameworks/Python.framework/Versions/3.12/bin/python3",
+        "scripts/check-v2-release.py"
+      ],
+      "exit_code": 0,
+      "outcome": "passed",
+      "duration_seconds": 0.05,
+      "artifact": {
+        "path": "evals/evidence/2026-09-23-local-checks/release-definition.txt",
+        "sha256": "feba151c66d5e37e2034db67bb6a15f1befa439652741f0cd2f673bed2d96f56"
+      }
+    },
+    {
+      "name": "production-block",
+      "command": [
+        "/Library/Frameworks/Python.framework/Versions/3.12/bin/python3",
+        "scripts/check-v2-release.py",
+        "--require-ready"
+      ],
+      "exit_code": 1,
+      "outcome": "blocked_as_required",
+      "duration_seconds": 0.049,
+      "artifact": {
+        "path": "evals/evidence/2026-09-23-local-checks/production-block.txt",
+        "sha256": "93d4e36342ffd390885e495453dbcf9603fc90d19df6b6cc3cfc2ce9db1906ff"
+      }
+    },
+    {
+      "name": "diff-whitespace",
+      "command": [
+        "git",
+        "diff",
+        "--check"
+      ],
+      "exit_code": 0,
+      "outcome": "passed",
+      "duration_seconds": 0.02,
+      "artifact": {
+        "path": "evals/evidence/2026-09-23-local-checks/diff-whitespace.txt",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    }
+  ],
+  "limits": [
+    "No real-model, live Chrome, Windows, VM, microphone, installer or signing/notarization acceptance.",
+    "Signature smoke checks perform no app launch or activation and do not qualify the full native flow.",
+    "Full XCTest is blocked by missing Xcode XCTest SDK on this Command Line Tools installation.",
+    "This 8 GiB Mac is not a required 16 GiB performance reference device.",
+    "All 23 production qualification gates remain pending."
+  ]
+}

@@ -24,4 +24,4 @@ Review the last verified evidence. A timeout after dispatch can leave an uncerta
 
 Folder events are coalesced and persisted through cooldown/overlap. Lost watch access disables the schedule with a reason. A changed symlink/canonical folder target needs fresh authorization. Editing or deleting a schedule cancels its active firing.
 
-Use [implementation status](v2/implementation-status.md) and [release gates](../evals/release-gates.json) to distinguish a configuration error from a feature that is not implemented or qualified yet.
+Use the [implementation ledger](v3/implementation-ledger.md) and [release gates](../evals/release-gates.json) to distinguish a configuration error from a feature that is not implemented or qualified yet.

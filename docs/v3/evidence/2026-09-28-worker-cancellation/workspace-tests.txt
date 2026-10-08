@@ -1,0 +1,130 @@
+   Compiling sage-core v1.0.1 (/Users/ivanpadeliya/Desktop/Sage/crates/sage-core)
+   Compiling sage-worker-common v1.0.1 (/Users/ivanpadeliya/Desktop/Sage/crates/sage-worker-common)
+   Compiling sage-sandbox-worker v1.0.1 (/Users/ivanpadeliya/Desktop/Sage/crates/sage-sandbox-worker)
+   Compiling sage-browser-worker v1.0.1 (/Users/ivanpadeliya/Desktop/Sage/crates/sage-browser-worker)
+   Compiling sage-privileged-helper v1.0.1 (/Users/ivanpadeliya/Desktop/Sage/crates/sage-privileged-helper)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 9.83s
+     Running unittests src/main.rs (target/debug/deps/sage_browser_worker-558e764705e12401)
+
+running 1 test
+test relay::tests::cancellation_bypasses_pending_browser_work_and_keeps_late_replies_correlated ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/sage_core-d1804b7bad3b4cda)
+
+running 63 tests
+test contracts::tests::derived_data_retains_restrictions ... ok
+test contracts::tests::scope_never_grants_overwrite_or_external_effects ... ok
+test capability::v2_tests::approval_digest_changes_with_payload_target_and_browser_identity ... ok
+test domain::completion::tests::no_combination_of_failed_or_unresolved_work_is_success ... ok
+test capability::v2_tests::capabilities_are_single_use_worker_bound_and_revoked_with_the_run ... ok
+test application_target::tests::signed_targets_reject_ambiguous_paths_and_unqualified_platforms ... ok
+test capability::v2_tests::every_cancel_issue_interleaving_leaves_no_live_authority ... ok
+test authorization::tests::no_policy_input_combination_bypasses_denial ... ok
+test decisions::tests::decision_commits_are_atomic_and_restart_cannot_reuse_pending_authority ... ok
+test engine::tests::background_trigger_cannot_follow_a_replaced_folder_outside_its_scope ... ok
+test engine::tests::action_status_without_verification_evidence_requires_review ... ok
+test commands::tests::acceptance_is_atomic_and_receipts_survive_reopening ... ok
+test engine::tests::cancellation_drops_an_inflight_model_call_and_persists_cancelled_state ... ok
+test audit::tests::protected_checkpoint_rejects_truncation_tampering_and_missing_anchor ... ok
+test engine::tests::cancellation_prevents_a_queued_mutation_from_starting ... ok
+test engine::tests::denied_data_release_never_calls_the_provider_and_cannot_replay_approval ... ok
+test engine::tests::denying_a_native_authentication_decision_never_requires_authentication ... ok
+test engine::tests::concurrent_submission_retries_and_restart_run_the_model_only_once ... ok
+test execution::bridge::tests::a_cancelled_queued_request_is_suppressed_before_ipc_dispatch ... ok
+test engine::tests::ordinary_question_finishes_without_any_computer_action ... ok
+test execution::bridge::tests::application_identity_cannot_be_supplied_in_unchecked_json ... ok
+test engine::tests::provider_credential_is_saved_only_after_native_authentication ... ok
+test engine::tests::questions_survive_reconnect_snapshots_and_cancel_closes_the_waiter ... ok
+test execution::bridge::tests::cancellation_ack_and_late_reply_preserve_the_session_and_reject_other_peers ... ok
+test execution::files::tests::read_limit_is_applied_to_the_open_handle ... ok
+test execution::bridge::tests::cancelled_requests_accept_correlated_late_replies_without_reviving_waiters ... ok
+test execution::bridge::tests::full_dispatch_queue_does_not_create_unsettleable_cancellation_records ... ok
+test inference::tests::model_and_vm_reservations_share_one_budget ... ok
+test inference::tests::overflowing_memory_envelopes_are_rejected ... ok
+test ipc::auth::tests::browser_key_cannot_authenticate_as_native_ui ... ok
+test ipc::auth::tests::proof_is_bound_to_client_and_protocol ... ok
+test execution::files::tests::exclusive_write_and_changed_target_are_enforced ... ok
+test execution::files::tests::symlink_replacement_cannot_redirect_a_prepared_write ... ok
+test engine::tests::approval_capability_execution_verification_and_undo_are_end_to_end ... ok
+test engine::tests::fabricated_model_success_cannot_hide_failed_or_partial_work ... ok
+test engine::tests::actual_file_results_drive_later_actions_without_repeated_scope_approval ... ok
+test ipc::server::protocol_v2_tests::authenticated_browser_cannot_send_ui_commands ... ok
+test ipc::server::protocol_v2_tests::replayed_frame_is_rejected_after_a_valid_native_handshake ... ok
+test model::tests::endpoint_validation_allows_tls_and_exact_loopback_only ... ok
+test model::tests::malformed_structured_content_is_rejected_without_secret_echo ... ok
+test model::tests::mock_openai_response_is_structured_and_sage_assigns_identity ... ok
+test model::tests::provider_redirects_are_rejected_without_following_location ... ok
+test network::tests::blocks_private_and_ambiguous_destinations ... ok
+test network::tests::public_fetch_cannot_use_provider_loopback_exceptions_or_forged_evidence ... ok
+test policy::tests::shell_commands_are_prohibited_below_the_model ... ok
+test redaction::tests::nonsecret_code_unicode_spacing_and_line_endings_are_preserved ... ok
+test redaction::tests::redacts_labeled_and_prefixed_secrets ... ok
+test redaction::tests::removes_secret_spans_without_flattening_surrounding_content ... ok
+test resources::v2_tests::model_assets_and_internal_state_cannot_be_prepared_even_under_a_parent_grant ... ok
+test resources::v2_tests::windows_device_stream_and_ambiguous_names_are_never_ordinary_files ... ok
+test streaming::tests::fragmented_unicode_stream_requires_normal_completion ... ok
+test streaming::tests::partial_answer_does_not_extract_tool_or_escaped_content ... ok
+test ipc::server::protocol_v2_tests::lost_acceptance_receipt_can_be_retried_in_a_new_session ... ok
+test verification::tests::app_success_requires_the_prepared_signature_and_a_running_process ... ok
+test ipc::server::protocol_v2_tests::stop_and_ping_bypass_a_stalled_and_saturated_ordinary_lane ... ok
+test vault::tests::migration_encrypts_history_and_rollback_before_replacement ... ok
+test ipc::server::protocol_v2_tests::worker_cancel_ack_and_late_reply_leave_the_authenticated_connection_usable ... ok
+test journal::tests::journal_rejects_replayed_dispatch_and_repreparation_after_uncertain_effects ... ok
+test workflows::v2_tests::schedules_need_unexpired_authority_and_stop_at_their_budget ... ok
+test workflows::v2_tests::claim_is_single_use_and_cannot_reuse_changed_authorization ... ok
+test knowledge::v2_tests::permission_filter_runs_before_rank_and_limit ... ok
+test knowledge::v2_tests::forgetting_removes_derived_memory_and_excludes_its_context_lineage ... ok
+test engine::tests::exhausted_budget_continues_with_fresh_run_identity_and_no_old_actions ... ok
+
+test result: ok. 63 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.31s
+
+     Running unittests src/main.rs (target/debug/deps/sage_core-0ebb7b482518d5e4)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/main.rs (target/debug/deps/sage_privileged_helper-e27c03d3aaa49869)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/sage_protocol-d8028c0e241ce20d)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/main.rs (target/debug/deps/sage_sandbox_worker-8dbeed00393e8b9f)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/sage_worker_common-bd6d3b121966607a)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests sage_core
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests sage_protocol
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests sage_worker_common
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

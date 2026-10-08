@@ -20,10 +20,10 @@ let package = Package(
                 .product(name: "SwiftProtobuf", package: "swift-protobuf"),
             ],
             path: "Sources/SageMac",
-            exclude: ["Generated/sage/ipc/v1"],
             swiftSettings: [
                 .enableUpcomingFeature("StrictConcurrency"),
             ]
         ),
+        .testTarget(name: "SageMacTests", dependencies: ["SageMac"], path: "Tests/SageMacTests"),
     ]
 )

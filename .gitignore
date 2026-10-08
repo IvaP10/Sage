@@ -41,3 +41,7 @@ xcuserdata/
 *.p12
 *.key
 *.log
+
+# Python verification tooling
+__pycache__/
+*.pyc

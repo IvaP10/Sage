@@ -50,10 +50,14 @@ def source_digest(root=ROOT):
     files = {name for name in names if name and (name.startswith(prefixes) or name in {"Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "product.toml", "Makefile", "evals/workflows.json"})}
     for name in sorted(files):
         path = root / name
-        digest.update(name.encode() + b"\0")
+        if "__pycache__" in path.parts or path.suffix in {".pyc", ".pyo"}:
+            continue
         if path.is_symlink():
             raise ValueError(f"Source symlink requires review: {name}")
-        digest.update(hashlib.sha256(path.read_bytes()).digest() if path.is_file() else b"DELETED")
+        if not path.is_file():
+            continue  # A staged deletion and its committed tree have the same identity.
+        digest.update(name.encode() + b"\0")
+        digest.update(hashlib.sha256(path.read_bytes()).digest())
     return digest.hexdigest()
 
 def evidence_path(value, root=ROOT):

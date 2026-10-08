@@ -34,13 +34,71 @@ struct KnowledgeData: Decodable {
 
 struct SkillRecord: Decodable, Identifiable {
     let id: String; let name: String; let description: String; let enabled: Bool
+    let sourcePaused: Bool
     let preview: String; let reviewDigestCandidate: String
 }
-struct WorkflowRecord: Decodable, Identifiable { let id: String; let name: String; let enabled: Bool }
-struct ScheduleRecord: Decodable, Identifiable {
-    let id: String; let name: String; let request: String; let enabled: Bool; let nextRunAt: String; let lastError: String?
+struct WorkflowRecord: Decodable, Identifiable {
+    let id: String; let name: String; let enabled: Bool; let sourcePaused: Bool
 }
-struct WorkflowData: Decodable { let skills: [SkillRecord]; let workflows: [WorkflowRecord]; let schedules: [ScheduleRecord] }
+struct ScheduleRecord: Decodable, Identifiable {
+    let id: String; let name: String; let request: String; let enabled: Bool
+    let sourcePaused: Bool; let nextRunAt: String; let lastError: String?
+}
+struct RoutineRecord: Decodable, Identifiable {
+    let id: String
+    let requests: [String]
+    let steps: [String]
+    let verifiedRuns: Int
+    let ready: Bool
+    let enabled: Bool
+    let reviewDigest: String
+    let evolution: RoutineEvolutionRecord?
+}
+struct RoutineEvolutionRecord: Decodable {
+    let sourceRequest: String
+    let sourceVerifiedRuns: Int
+    let unchangedEffectClasses: [String]
+    let addedEffectClasses: [String]
+    let removedEffectClasses: [String]
+}
+struct RoutineBranchRecord: Decodable, Identifiable {
+    let routineId: String
+    let requests: [String]
+    let nextSteps: [String]
+    let verifiedRuns: Int
+    var id: String { routineId }
+}
+struct RoutineFamilyRecord: Decodable, Identifiable {
+    let id: String
+    let reviewDigest: String
+    let sharedSteps: [String]
+    let branches: [RoutineBranchRecord]
+    let verifiedRuns: Int
+}
+struct ControllerDraftStep: Decodable, Identifiable {
+    let id: String
+    let controlName: String
+    let role: String
+    let expectedEffect: String
+    let verification: String
+    let restoration: String?
+}
+struct ControllerDraftRecord: Decodable, Identifiable {
+    let id: String
+    let systemId: String
+    let systemLabel: String
+    let revision: UInt64
+    let status: String
+    let stepCount: Int
+    let taskId: String?
+    let steps: [ControllerDraftStep]?
+}
+struct WorkflowData: Decodable {
+    let skills: [SkillRecord]; let workflows: [WorkflowRecord]; let schedules: [ScheduleRecord]
+    let routineLearningEnabled: Bool?
+    let routines: [RoutineRecord]?
+    let routineFamilies: [RoutineFamilyRecord]?
+}
 
 func decodeKnowledge<T: Decodable>(_ type: T.Type, _ json: String) throws -> T {
     let decoder = JSONDecoder(); decoder.keyDecodingStrategy = .convertFromSnakeCase

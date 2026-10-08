@@ -1,0 +1,63 @@
+{
+  "checkpoint": "native application identity preparation",
+  "date_local": "2026-10-06",
+  "evidence": {
+    "checks": "checks.txt",
+    "live_partial_preview": [
+      "partial-preview.png",
+      "multiple-apps.png",
+      "partial-preview-ax.txt",
+      "multiple-apps-ax.txt"
+    ],
+    "cleared_preview": [
+      "cleared-preview.png",
+      "cleared-preview-ax.txt"
+    ]
+  },
+  "claims": {
+    "new_model_or_service_added": false,
+    "preview_executes_actions": false,
+    "identity_cache_ttl_seconds": 5,
+    "identity_cache_capacity": 16,
+    "cache_keys": [
+      "native adapter session",
+      "exact app query"
+    ],
+    "macos_live_ui": "passed",
+    "windows_live_ui": "not run",
+    "workspace_tests": "178 sage-core and 1 browser-worker passed; 3 ignored",
+    "clippy": "passed with warnings denied",
+    "macos_build": "passed with SDK 26.5",
+    "native_signature_smoke": "passed; Calculator lookup 28133125 ns; no app launched",
+    "warm_release_preview_ns": {
+      "samples": 1000,
+      "p50": 37292,
+      "p95": 43958,
+      "p99": 46583
+    }
+  },
+  "source_sha256": {
+    "crates/sage-core/src/intent.rs": "762e7f4f712ecb4b2dd09c2db46f1e07a17a7ad8e47fbec0cf8d6e222179dd0e",
+    "crates/sage-core/src/preparation.rs": "56013ffb21f60ccbcb330202150b83befcaa6c10ed7a256776598351e62217b1",
+    "crates/sage-core/src/engine.rs": "02152cad19f5997315c4c55775bc669c996f8d9975858fbfdf4a4a7dcd0de295",
+    "crates/sage-core/src/execution/bridge.rs": "49d2783ce709a8179cb3b5e31ae431aac49037711df74fc6c7704279cf9351d7",
+    "crates/sage-core/src/ipc/dispatch.rs": "80c0cbfb2ea92e532cf9de7d597511bb5869c4fed18ab226ee3939471e8abccf",
+    "crates/sage-core/src/ipc/server.rs": "d4b9c13f3889c5f3ce5d75afc73892d4800369e1c48167e84934b38d36ea896b",
+    "apps/macos/Sources/SageMac/AppModel.swift": "4962b778814183c3d3d752d804b10b70a5718a0c7c8f6ca926783682fca81f96",
+    "apps/macos/Sources/SageMac/MainView.swift": "1ed121892883712fb1d76a78646ac1d157b25a5f0c42dd3ae309f90af0ac7ea2",
+    "apps/macos/Sources/SageMac/PlatformAdapter.swift": "230aeddb67e74d88c12816b067fb7013080fe92c16aa4603dce0388e5562fa7a",
+    "apps/windows/Sage.Windows/MainWindow.xaml.cs": "5ca84585f11f4c41c1d5dd8d6b1ee5e6a800d5863a2f5a327327de73260a1f61",
+    "scripts/check-macos-signatures.py": "c17981ec1e5c7c555ffa8941e9380033c3dfd95faa131520b7e144c39e38c415",
+    "scripts/macos-signature-smoke.swift": "494e050d7ac33bb1bb22a82568d96ac80b87bf4dd60375ddf997391232cc3bc6",
+    "docs/v3/continuous-agency.md": "502d01743082a97d9d7cab1d83e6d118772a42c0e3aead0f216099656e3b28c9"
+  },
+  "artifact_sha256": {
+    "checks.txt": "d23e0494a87d2eae37c0e6ee326fa08e52df6e88ecf6b0aedabccff93aea15f5",
+    "partial-preview.png": "9938cf74103b6839c18e10073323d6d059daaab627cfa00a1732760fe3ef9409",
+    "multiple-apps.png": "3b5c2b602fa6463b5a668773b75a90dd72c8614513c9d4ae2d27c5eb280e34b0",
+    "partial-preview-ax.txt": "b402be317cbfbca0bb14769282404f16433b063646be77b53421c0af24566181",
+    "multiple-apps-ax.txt": "ff8ddc45b7bcafce8c62aa7b0467534495d115221a737d896529927271da7a48",
+    "cleared-preview.png": "694d283dd990b7818c1f381f0755590eed23bfae1fff915b698c9aea0b905434",
+    "cleared-preview-ax.txt": "692825b67a8d934a4d4c8fe0eb4dbb6bd1af5161df6664c9a0407b53584eae8e"
+  }
+}

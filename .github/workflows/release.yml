@@ -7,14 +7,26 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   SAGE_VERSION: 1.0.1
 
 jobs:
+  qualification:
+    name: Check v2 qualification before publication
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Validate qualification definitions
+        run: python3 scripts/check-v2-release.py
+      - name: Require current production evidence for a public release
+        if: startsWith(github.ref, 'refs/tags/')
+        run: python3 scripts/check-v2-release.py --require-ready
+
   macos:
     name: macOS ${{ matrix.architecture }}
+    needs: qualification
     strategy:
       fail-fast: false
       matrix:
@@ -77,7 +89,7 @@ jobs:
             dist/macos/arm64/Sage.app/Contents/MacOS/Sage \
             dist/macos/x86_64/Sage.app/Contents/MacOS/Sage \
             -output dist/macos/universal/Sage.app/Contents/MacOS/Sage
-          for helper in sage-core sage-browser-worker sage-sandbox-worker sage-privileged-helper; do
+          for helper in sage-core sage-browser-worker; do
             lipo -create \
               "dist/macos/arm64/Sage.app/Contents/Helpers/$helper" \
               "dist/macos/x86_64/Sage.app/Contents/Helpers/$helper" \
@@ -85,12 +97,12 @@ jobs:
           done
           identity="${SAGE_MACOS_SIGN_IDENTITY:--}"
           if [ "$identity" = "-" ]; then
-            for helper in sage-core sage-browser-worker sage-sandbox-worker sage-privileged-helper; do
+            for helper in sage-core sage-browser-worker; do
               codesign --force --sign - "dist/macos/universal/Sage.app/Contents/Helpers/$helper"
             done
             codesign --force --sign - --entitlements apps/macos/Sage.entitlements dist/macos/universal/Sage.app
           else
-            for helper in sage-core sage-browser-worker sage-sandbox-worker sage-privileged-helper; do
+            for helper in sage-core sage-browser-worker; do
               codesign --force --timestamp --options runtime --sign "$identity" "dist/macos/universal/Sage.app/Contents/Helpers/$helper"
             done
             codesign --force --timestamp --options runtime --entitlements apps/macos/Sage.entitlements --sign "$identity" dist/macos/universal/Sage.app
@@ -125,6 +137,7 @@ jobs:
 
   windows:
     name: Windows x64 installer
+    needs: qualification
     runs-on: windows-2025
     timeout-minutes: 60
     steps:
@@ -136,6 +149,12 @@ jobs:
       - name: Install build tools
         shell: powershell
         run: choco install protoc innosetup --no-progress -y
+      - name: Configure libclang for SQLCipher hooks
+        shell: pwsh
+        run: |
+          $sageLibclang = Join-Path ${env:ProgramFiles} 'LLVM\bin'
+          if (-not (Test-Path (Join-Path $sageLibclang 'libclang.dll'))) { throw 'LLVM libclang is required for SQLCipher pre-update bindings.' }
+          "LIBCLANG_PATH=$sageLibclang" >> $env:GITHUB_ENV
       - name: Package unsigned preview installer
         shell: pwsh
         run: ./scripts/package-windows.ps1
@@ -151,8 +170,10 @@ jobs:
 
   publish:
     name: Publish GitHub prerelease
-    if: startsWith(github.ref_name, 'v1.0.1-preview.')
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v1.0.1-preview.')
     needs: [macos-universal, windows]
+    permissions:
+      contents: write
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4

@@ -5,10 +5,12 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use sage_core::config::{CoreConfig, IpcEndpoint};
 use sage_core::ipc::{IpcAuthenticator, serve};
-use sage_core::model::{ModelProvider, OpenAICompatibleProvider};
+use sage_core::model::{ModelProvider, UnconfiguredModelProvider};
 use sage_core::secrets::{OsSecretStore, SecretBytes, SecretStore, load_or_create_ipc_secret};
 use sage_core::{CoreError, CoreResult, SageCore};
 use tracing_subscriber::EnvFilter;
+
+mod inference_worker_process;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -33,31 +35,25 @@ async fn main() -> anyhow::Result<()> {
         secret_store.as_ref(),
     )?;
     let authenticator = Arc::new(IpcAuthenticator::new(secret));
-    let model: Arc<dyn ModelProvider> = match (launch.model_profile, launch.model_trust_key) {
-        (Some(profile), Some(key)) => {
-            config
-                .protected_paths
-                .extend([profile.canonicalize()?, key.canonicalize()?]);
-            let bytes =
-                sage_core::execution::files::PinnedPath::open(&key.canonicalize()?)?.read(32)?;
-            let key: [u8; 32] = bytes.try_into().map_err(|_| {
-                CoreError::Model("Catalog public key must contain exactly 32 bytes".into())
-            })?;
-            let profile = sage_core::inference::ModelProfile::load_signed(&profile, &key)?;
-            config.protected_paths.extend(profile.protected_paths());
-            Arc::new(sage_core::inference::ManagedLocalProvider::new(
-                profile,
-                sage_core::inference::ResourceGovernor::default(),
-            )?)
+    // Keep the first-party helper process owned by Core for its full lifetime.
+    // It currently reports that no model is admitted, so this does not enable
+    // generation or replace the fail-closed provider below.
+    let _inference_worker = match inference_worker_process::start_bundled().await {
+        Ok(Some(worker)) => {
+            tracing::info!(
+                "first-party inference worker completed its bounded startup handshake and is awaiting an admitted model"
+            );
+            Some(worker)
         }
-        (None, None) => Arc::new(OpenAICompatibleProvider::default()),
-        _ => {
-            return Err(CoreError::InvalidAction(
-                "Use --model-profile with --model-trust-key".into(),
-            )
-            .into());
+        Ok(None) => None,
+        Err(error) => {
+            tracing::warn!(%error, "first-party inference worker could not be started; model generation remains unavailable");
+            None
         }
     };
+    // Model generation stays unavailable until Sage's isolated first-party
+    // worker and signed package are qualified. Never select an external route.
+    let model: Arc<dyn ModelProvider> = Arc::new(UnconfiguredModelProvider);
     let core = SageCore::new_with_secret_store(config.clone(), model, secret_store)?;
     core.start_scheduler();
     serve(core, config.ipc_endpoint, authenticator).await?;
@@ -67,8 +63,6 @@ async fn main() -> anyhow::Result<()> {
 #[derive(Debug, Default)]
 struct LaunchOptions {
     bootstrap_stdin: bool,
-    model_profile: Option<PathBuf>,
-    model_trust_key: Option<PathBuf>,
 }
 
 fn apply_arguments(config: &mut CoreConfig) -> CoreResult<LaunchOptions> {
@@ -76,22 +70,6 @@ fn apply_arguments(config: &mut CoreConfig) -> CoreResult<LaunchOptions> {
     let mut arguments = std::env::args_os().skip(1);
     while let Some(argument) = arguments.next() {
         match argument.to_str() {
-            Some("--model-profile") => {
-                launch.model_profile = Some(
-                    arguments
-                        .next()
-                        .ok_or_else(|| CoreError::InvalidAction("Missing model profile".into()))?
-                        .into(),
-                );
-            }
-            Some("--model-trust-key") => {
-                launch.model_trust_key = Some(
-                    arguments
-                        .next()
-                        .ok_or_else(|| CoreError::InvalidAction("Missing catalog key".into()))?
-                        .into(),
-                );
-            }
             Some("--data-dir") => {
                 let value = arguments
                     .next()

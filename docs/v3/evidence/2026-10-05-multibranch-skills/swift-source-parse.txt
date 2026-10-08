@@ -1,0 +1,1 @@
+PASS: Swift frontend parser accepted MemorySettingsView.swift and KnowledgeModels.swift

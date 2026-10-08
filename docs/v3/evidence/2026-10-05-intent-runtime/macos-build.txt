@@ -1,0 +1,86 @@
+[1/1] Compiling plugin GenerateManual
+[2/2] Compiling plugin GenerateDoccReference
+[3/3] Compiling plugin SwiftProtobufPlugin
+Building for debugging...
+[3/7] Write sources
+[4/7] Write swift-version--1AB21518FC5DEDBE.txt
+[6/10] Emitting module SageMac
+[7/10] Compiling SageMac sage.pb.swift
+[8/10] Compiling SageMac MainView.swift
+[9/31] Compiling SageMac OverlayWindowController.swift
+[10/31] Compiling SageMac PendingSubmissions.swift
+[11/31] Compiling SageMac PlatformAdapter.swift
+[12/31] Compiling SageMac PresentationRefreshCoordinator.swift
+[13/31] Compiling SageMac SageApp.swift
+[14/31] Compiling SageMac SageCoreClient.swift
+[15/31] Compiling SageMac MachOSlices.swift
+[16/31] Compiling SageMac MemorySettingsView.swift
+[17/31] Compiling SageMac OrderedFrameWriter.swift
+[18/31] Compiling SageMac VoiceInputController.swift
+[19/31] Compiling SageMac VoiceReflex.swift
+[20/31] Compiling SageMac IPCSecretStore.swift
+/Users/ivanpadeliya/Desktop/Sage/apps/macos/Sources/SageMac/LocalWakeWordDetector.swift:259:20: warning: reference to captured var 'suppliedInput' in concurrently-executing code [#SendableClosureCaptures]
+257 |         var conversionError: NSError?
+258 |         let status = converter.convert(to: output, error: &conversionError) { _, inputStatus in
+259 |             guard !suppliedInput else {
+    |                    `- warning: reference to captured var 'suppliedInput' in concurrently-executing code [#SendableClosureCaptures]
+260 |                 inputStatus.pointee = .noDataNow
+261 |                 return nil
+
+/Users/ivanpadeliya/Desktop/Sage/apps/macos/Sources/SageMac/LocalWakeWordDetector.swift:263:13: warning: mutation of captured var 'suppliedInput' in concurrently-executing code [#SendableClosureCaptures]
+261 |                 return nil
+262 |             }
+263 |             suppliedInput = true
+    |             `- warning: mutation of captured var 'suppliedInput' in concurrently-executing code [#SendableClosureCaptures]
+264 |             inputStatus.pointee = .haveData
+265 |             return input
+
+[#SendableClosureCaptures]: <https://docs.swift.org/compiler/documentation/diagnostics/sendable-closure-captures>
+[21/31] Compiling SageMac KnowledgeModels.swift
+/Users/ivanpadeliya/Desktop/Sage/apps/macos/Sources/SageMac/LocalWakeWordDetector.swift:259:20: warning: reference to captured var 'suppliedInput' in concurrently-executing code [#SendableClosureCaptures]
+257 |         var conversionError: NSError?
+258 |         let status = converter.convert(to: output, error: &conversionError) { _, inputStatus in
+259 |             guard !suppliedInput else {
+    |                    `- warning: reference to captured var 'suppliedInput' in concurrently-executing code [#SendableClosureCaptures]
+260 |                 inputStatus.pointee = .noDataNow
+261 |                 return nil
+
+/Users/ivanpadeliya/Desktop/Sage/apps/macos/Sources/SageMac/LocalWakeWordDetector.swift:263:13: warning: mutation of captured var 'suppliedInput' in concurrently-executing code [#SendableClosureCaptures]
+261 |                 return nil
+262 |             }
+263 |             suppliedInput = true
+    |             `- warning: mutation of captured var 'suppliedInput' in concurrently-executing code [#SendableClosureCaptures]
+264 |             inputStatus.pointee = .haveData
+265 |             return input
+
+[#SendableClosureCaptures]: <https://docs.swift.org/compiler/documentation/diagnostics/sendable-closure-captures>
+[22/31] Compiling SageMac LocalWakeWordDetector.swift
+/Users/ivanpadeliya/Desktop/Sage/apps/macos/Sources/SageMac/LocalWakeWordDetector.swift:259:20: warning: reference to captured var 'suppliedInput' in concurrently-executing code [#SendableClosureCaptures]
+257 |         var conversionError: NSError?
+258 |         let status = converter.convert(to: output, error: &conversionError) { _, inputStatus in
+259 |             guard !suppliedInput else {
+    |                    `- warning: reference to captured var 'suppliedInput' in concurrently-executing code [#SendableClosureCaptures]
+260 |                 inputStatus.pointee = .noDataNow
+261 |                 return nil
+
+/Users/ivanpadeliya/Desktop/Sage/apps/macos/Sources/SageMac/LocalWakeWordDetector.swift:263:13: warning: mutation of captured var 'suppliedInput' in concurrently-executing code [#SendableClosureCaptures]
+261 |                 return nil
+262 |             }
+263 |             suppliedInput = true
+    |             `- warning: mutation of captured var 'suppliedInput' in concurrently-executing code [#SendableClosureCaptures]
+264 |             inputStatus.pointee = .haveData
+265 |             return input
+
+[#SendableClosureCaptures]: <https://docs.swift.org/compiler/documentation/diagnostics/sendable-closure-captures>
+[23/31] Compiling SageMac SettingsView.swift
+[24/31] Compiling SageMac SignedApplicationIdentity.swift
+[25/31] Compiling SageMac AdapterOperations.swift
+[26/31] Compiling SageMac AppModel.swift
+[27/31] Compiling SageMac GlobalShortcutController.swift
+[28/31] Compiling SageMac SpeechOutputController.swift
+[29/31] Compiling SageMac TaskPresentation.swift
+[29/32] Write Objects.LinkFileList
+[30/32] Linking SageMac
+[31/32] Applying SageMac
+Build complete! (6.92s)
+warning: '--build-system native' has been deprecated and will be removed in a future release; please report an issue at https://github.com/swiftlang/swift-package-manager/issues if you are unable to adopt the default build system.

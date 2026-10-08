@@ -9,11 +9,6 @@ pub enum InteractionTier {
     StructuredIntegration,
     Accessibility,
     BrowserDom,
-    KeyboardShortcut,
-    Vision,
-    Coordinate,
-    SandboxedProcess,
-    PrivilegedOperation,
     UserInteraction,
 }
 
@@ -33,27 +28,17 @@ pub struct CompiledAction {
 
 #[derive(Debug, Clone)]
 pub struct ExecutorAvailability {
-    pub structured_integrations: bool,
     pub accessibility: bool,
+    pub learned_application_control: bool,
     pub browser_dom: bool,
-    pub keyboard: bool,
-    pub vision: bool,
-    pub coordinates: bool,
-    pub sandbox: bool,
-    pub privileged_helper: bool,
 }
 
 impl Default for ExecutorAvailability {
     fn default() -> Self {
         Self {
-            structured_integrations: true,
             accessibility: true,
+            learned_application_control: false,
             browser_dom: true,
-            keyboard: true,
-            vision: false,
-            coordinates: false,
-            sandbox: true,
-            privileged_helper: false,
         }
     }
 }
@@ -76,42 +61,17 @@ impl ActionCompiler {
                 "This operation has no enabled feature contract".into(),
             ));
         }
+        if matches!(
+            &proposal.action,
+            crate::domain::Action::SetApplicationControl { .. }
+        ) && !availability.learned_application_control
+        {
+            return Err(CoreError::ExecutorUnavailable(
+                "The connected native client has not negotiated learned application-control support".into(),
+            ));
+        }
         let mut candidates = Vec::new();
         match &proposal.action {
-            Action::ClickElement { .. } | Action::TypeText { .. }
-                if proposal.action.domain() == ExecutionDomain::Browser =>
-            {
-                if availability.browser_dom {
-                    candidates.push(candidate(
-                        InteractionTier::BrowserDom,
-                        ExecutionDomain::Browser,
-                        "paired semantic DOM element",
-                    ));
-                }
-            }
-            Action::ClickElement { .. } | Action::TypeText { .. } => {
-                if availability.accessibility {
-                    candidates.push(candidate(
-                        InteractionTier::Accessibility,
-                        ExecutionDomain::Native,
-                        "semantic accessibility element",
-                    ));
-                }
-                if availability.vision {
-                    candidates.push(candidate(
-                        InteractionTier::Vision,
-                        ExecutionDomain::Native,
-                        "fresh visual localization",
-                    ));
-                }
-                if availability.coordinates {
-                    candidates.push(candidate(
-                        InteractionTier::Coordinate,
-                        ExecutionDomain::Native,
-                        "fresh coordinates with stale-state guard",
-                    ));
-                }
-            }
             Action::NavigateUrl { .. } => {
                 if availability.browser_dom {
                     candidates.push(candidate(
@@ -127,13 +87,6 @@ impl ActionCompiler {
                         "DOM operation",
                     ));
                 }
-                if availability.vision {
-                    candidates.push(candidate(
-                        InteractionTier::Vision,
-                        ExecutionDomain::Browser,
-                        "fresh browser visual fallback",
-                    ));
-                }
             }
             Action::AskUser { .. } => candidates.push(candidate(
                 InteractionTier::UserInteraction,
@@ -141,6 +94,7 @@ impl ActionCompiler {
                 "native question",
             )),
             Action::ReadFile { .. }
+            | Action::ListDirectory { .. }
             | Action::FetchPublic { .. }
             | Action::WriteFile { .. }
             | Action::MoveFile { .. }
@@ -158,6 +112,15 @@ impl ActionCompiler {
                     InteractionTier::Accessibility,
                     ExecutionDomain::Native,
                     "identified application",
+                ));
+            }
+            Action::SetApplicationControl { .. }
+                if availability.accessibility && availability.learned_application_control =>
+            {
+                candidates.push(candidate(
+                    InteractionTier::Accessibility,
+                    ExecutionDomain::Native,
+                    "exact experimentally verified accessibility control",
                 ));
             }
             // No generic fallback: installed worker binaries are not proof of

@@ -2,11 +2,13 @@
 resolver = "2"
 members = [
   "crates/sage-protocol",
-  "crates/sage-worker-common",
   "crates/sage-core",
+  "crates/sage-qwen-tokenizer",
+  "crates/sage-kernels",
+  "crates/sage-model-package",
+  "crates/sage-metal",
   "crates/sage-browser-worker",
-  "crates/sage-sandbox-worker",
-  "crates/sage-privileged-helper",
+  "crates/sage-inference-worker",
 ]
 
 [workspace.package]
@@ -29,7 +31,7 @@ keyring = { version = "3.6", default-features = false, features = ["apple-native
 prost = "0.14"
 prost-build = "0.14"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-rusqlite = { version = "0.37", features = ["bundled-sqlcipher-vendored-openssl", "chrono", "uuid"] }
+rusqlite = { version = "0.37", features = ["bundled-sqlcipher-vendored-openssl", "chrono", "uuid", "preupdate_hook"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"
@@ -45,7 +47,6 @@ url = "=2.5.0"
 zeroize = { version = "1.8", features = ["derive"] }
 notify = "8.2"
 
-cedar-policy = { version = "=4.13.0", default-features = false }
 cap-std = "=3.4.5"
 cap-fs-ext = "=3.4.5"
 

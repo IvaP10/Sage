@@ -1,0 +1,5 @@
+Sage local intent benchmark; macos; aarch64; optimized=true
+interrupt_reflex: n=10000 p50=41 ns p95=42 ns p99=42 ns
+compile_three_actions: n=10000 p50=584 ns p95=875 ns p99=917 ns
+reject_incomplete_intent: n=10000 p50=250 ns p95=334 ns p99=375 ns
+Microbenchmark only: excludes speech recognition, storage, IPC, approval and native execution.

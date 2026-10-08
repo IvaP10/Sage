@@ -1,0 +1,32 @@
+Window: "Sage", App: Sage Preparation Preview.
+0 standard window Sage, Secondary Actions: Raise, ID: SwiftUI.WindowGroup<SwiftUI.ModifiedContent<SwiftUI.ModifiedContent<SwiftUI.ModifiedContent<SageMac.MainView, SwiftUI._FlexFrameLayout>, SwiftUI._PreferenceWritingModifier<SwiftUI.PreferredColorSchemeKey>>, SwiftUI._TaskModifier2>>-1-AppWindow-1
+	1 container
+		2 text Sage
+		3 button New chat
+		4 image Description: Search, ID: magnifyingglass
+		5 text field (settable) Description: Search chats, Help: Search chats (⌘F)
+		6 scroll area
+			7 list Secondary Actions: AXScrollToTop, AXScrollToBottom
+				8 text No chats yet
+		9 text What would you like to do?
+		10 button Explore a folder
+		11 button Ask a question
+		12 button Open protected history
+		13 text Ready to open, 1, Open Safari, 2, Open Calculator, 2 apps are located. Finish your request and send when ready. Nothing has opened. Connected
+		14 button Settings
+		15 button Description: Choose folders, Help: Allow this task to read files in selected folders, ID: folder.badge.plus
+		16 text field (settable) Value: Open Safari and open Calculator and then read, Placeholder: Ask Sage anything…
+		17 button Description: Start voice input, ID: mic.fill
+		18 button Description: Send, Help: Submit your current request, ID: arrow.up
+	19 close button
+	20 full screen button Help: this button also has an action to zoom the window, Secondary Actions: zoom the window
+	21 minimize button
+22 menu bar
+	23 Sage Preparation Preview
+	24 File
+	25 Edit
+	26 View
+	27 Window
+	28 Help
+
+The focused UI element is 16 text field (settable) Value: Open Safari and open Calculator and then read, Placeholder: Ask Sage anything…

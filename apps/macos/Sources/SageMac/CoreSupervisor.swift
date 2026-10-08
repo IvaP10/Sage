@@ -5,7 +5,7 @@ final class CoreSupervisor {
     private var process: Process?
 
     func startIfNeeded(secret: Data) throws {
-        guard process == nil else { return }
+        guard process?.isRunning != true else { return }
         let executable = try locateCore()
         let process = Process()
         process.executableURL = executable
@@ -28,6 +28,7 @@ final class CoreSupervisor {
     }
 
     private func locateCore() throws -> URL {
+        #if DEBUG
         if let override = ProcessInfo.processInfo.environment["SAGE_CORE_EXECUTABLE"] {
             let url = URL(fileURLWithPath: override)
             guard FileManager.default.isExecutableFile(atPath: url.path) else {
@@ -35,6 +36,7 @@ final class CoreSupervisor {
             }
             return url
         }
+        #endif
         let bundled = Bundle.main.bundleURL
             .appendingPathComponent("Contents/Helpers/sage-core", isDirectory: false)
         guard FileManager.default.isExecutableFile(atPath: bundled.path) else {

@@ -43,6 +43,7 @@ final class VoiceInputController {
     var onTranscript: ((String) -> Void)?
     var onCommand: ((String, Activation) -> Void)?
     var onError: ((String) -> Void)?
+    var onWakeWordUnavailable: (() -> Void)?
 
     private(set) var state: State = .idle
     private(set) var wakeListeningEnabled = false
@@ -56,7 +57,14 @@ final class VoiceInputController {
     private var wakeTimeoutTask: Task<Void, Never>?
     private var silenceTask: Task<Void, Never>?
     private var restartTask: Task<Void, Never>?
+    private var wakeStartupTask: Task<Void, Never>?
+    private var wakeStartupGeneration = UUID()
+    private var wakeListeningPaused = false
     private var sessionGeneration = UUID()
+    private var wakeDetector: LocalWakeWordDetector?
+    private var preRollBuffers: [VoiceAudioBuffer] = []
+    private var preRollFrameCount = 0
+    private let preRollDurationSeconds: Double = 2.2
 
     var microphoneAuthorization: AVAuthorizationStatus {
         AVCaptureDevice.authorizationStatus(for: .audio)
@@ -66,38 +74,108 @@ final class VoiceInputController {
         SFSpeechRecognizer.authorizationStatus()
     }
 
+    /// Called at launch with the saved preference. This never asks macOS for
+    /// permission; only the settings toggle and push-to-talk button do that.
     func configureWakeWord(enabled: Bool, phrase: String = "Hey Sage") {
+        let nextPhrase = Self.normalizedPhrase(phrase)
+        let phraseChanged = nextPhrase != wakePhrase
+        wakePhrase = nextPhrase
         wakeListeningEnabled = enabled
-        let normalized = phrase.trimmingCharacters(in: .whitespacesAndNewlines)
-        wakePhrase = normalized.isEmpty ? "Hey Sage" : normalized
+        if enabled { wakeListeningPaused = false }
 
-        if enabled {
-            resumeWakeListeningIfAuthorized()
-        } else if state == .wakeListening {
-            stopRecognition(nextState: .idle)
+        guard enabled else {
+            wakeStartupGeneration = UUID()
+            wakeStartupTask?.cancel()
+            wakeStartupTask = nil
+            wakeDetector?.pause()
+            if state == .wakeListening { stopCapture(nextState: .idle) }
+            return
+        }
+
+        if phraseChanged {
+            wakeDetector?.pause()
+            wakeDetector = nil
+            if state == .wakeListening { stopCapture(nextState: .idle) }
+        }
+        resumeWakeListeningIfAuthorized()
+    }
+
+    /// Called only by the explicit wake-word settings action.
+    func enableWakeWordFromUserAction(phrase: String) async {
+        wakePhrase = Self.normalizedPhrase(phrase)
+        wakeListeningEnabled = true
+        wakeStartupGeneration = UUID()
+        let generation = wakeStartupGeneration
+        wakeStartupTask?.cancel()
+        wakeStartupTask = nil
+        do {
+            try await requestPermissionsForImmediateUse()
+            guard generation == wakeStartupGeneration, wakeListeningEnabled else { return }
+            _ = try makeOnDeviceRecognizer()
+            guard generation == wakeStartupGeneration, wakeListeningEnabled else { return }
+            try await startWakeListening(generation: generation)
+        } catch {
+            guard generation == wakeStartupGeneration else { return }
+            failWakeWord(error)
         }
     }
 
     func resumeWakeListeningIfAuthorized() {
-        guard wakeListeningEnabled,
-              microphoneAuthorization == .authorized,
-              speechAuthorization == .authorized,
-              state == .idle else { return }
-        do {
-            try startRecognition(mode: .wakeListening)
-        } catch {
-            stopRecognition(nextState: .idle)
-            onError?(error.localizedDescription)
+        guard wakeListeningEnabled, !wakeListeningPaused, state == .idle else { return }
+        guard microphoneAuthorization == .authorized,
+              speechAuthorization == .authorized else {
+            failWakeWord(
+                microphoneAuthorization != .authorized
+                    ? VoiceError.microphoneDenied
+                    : VoiceError.speechRecognitionDenied
+            )
+            return
         }
+
+        wakeStartupGeneration = UUID()
+        let generation = wakeStartupGeneration
+        wakeStartupTask?.cancel()
+        wakeStartupTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                _ = try self.makeOnDeviceRecognizer()
+                try await self.startWakeListening(generation: generation)
+            } catch {
+                guard self.wakeStartupGeneration == generation else { return }
+                self.failWakeWord(error)
+            }
+        }
+    }
+
+    func updateWakePhrase(_ phrase: String) {
+        let nextPhrase = Self.normalizedPhrase(phrase)
+        guard nextPhrase != wakePhrase else { return }
+        wakePhrase = nextPhrase
+        wakeDetector?.pause()
+        wakeDetector = nil
+        if state == .wakeListening { stopCapture(nextState: .idle) }
+        if wakeListeningEnabled { resumeWakeListeningIfAuthorized() }
     }
 
     func startFromMicrophoneButton() async {
         do {
             try await requestPermissionsForImmediateUse()
-            try startRecognition(mode: .listening(.microphoneButton))
+            let recognizer = try makeOnDeviceRecognizer()
+            wakeListeningPaused = false
+            wakeStartupGeneration = UUID()
+            wakeStartupTask?.cancel()
+            wakeDetector?.pause()
+            clearPreRoll()
+            if audioEngine == nil { try startCapture() }
+            startCommandRecognition(
+                recognizer: recognizer,
+                activation: .microphoneButton,
+                preRoll: []
+            )
         } catch {
-            stopRecognition(nextState: .idle)
+            stopCapture(nextState: .idle)
             onError?(error.localizedDescription)
+            if wakeListeningEnabled { scheduleWakeRestart() }
         }
     }
 
@@ -107,14 +185,34 @@ final class VoiceInputController {
     }
 
     func cancelCurrentCommand() {
-        stopRecognition(nextState: .idle)
+        stopCapture(nextState: .idle)
         onTranscript?("")
         scheduleWakeRestart()
     }
 
+    func pauseWakeListening() {
+        wakeListeningPaused = true
+        wakeStartupGeneration = UUID()
+        wakeStartupTask?.cancel()
+        wakeStartupTask = nil
+        wakeDetector?.pause()
+        guard state == .wakeListening else { return }
+        stopCapture(nextState: .idle)
+    }
+
+    func resumeWakeListeningAfterSpeech() {
+        wakeListeningPaused = false
+        resumeWakeListeningIfAuthorized()
+    }
+
     func stop() {
         wakeListeningEnabled = false
-        stopRecognition(nextState: .idle)
+        wakeListeningPaused = false
+        wakeStartupGeneration = UUID()
+        wakeStartupTask?.cancel()
+        wakeStartupTask = nil
+        wakeDetector?.pause()
+        stopCapture(nextState: .idle)
     }
 
     private func requestPermissionsForImmediateUse() async throws {
@@ -145,25 +243,96 @@ final class VoiceInputController {
         guard speechStatus == .authorized else { throw VoiceError.speechRecognitionDenied }
     }
 
-    private func startRecognition(mode: State) throws {
-        restartTask?.cancel()
-        restartTask = nil
-        stopRecognition(nextState: .idle)
+    private func startWakeListening(generation: UUID? = nil) async throws {
+        guard wakeListeningEnabled, !wakeListeningPaused, state == .idle else { return }
+        if let generation, wakeStartupGeneration != generation { return }
+        let detector: LocalWakeWordDetector
+        if let existing = wakeDetector, existing.phrase == wakePhrase {
+            detector = existing
+        } else {
+            detector = try await LocalWakeWordDetector.load(phrase: wakePhrase)
+            if let generation, wakeStartupGeneration != generation { return }
+            guard wakeListeningEnabled, !wakeListeningPaused, state == .idle else { return }
+            wakeDetector = detector
+        }
+        guard wakeListeningEnabled, !wakeListeningPaused, state == .idle else { return }
+        detector.onDetected = { [weak self] in self?.handleWakeWordDetected() }
+        detector.onFailure = { [weak self] error in self?.failWakeWord(error) }
+        detector.resume()
+        clearPreRoll()
+        try startCapture()
+        guard wakeListeningEnabled, state == .idle else {
+            stopCapture(nextState: .idle)
+            return
+        }
+        setState(.wakeListening)
+    }
 
+    private func makeOnDeviceRecognizer() throws -> SFSpeechRecognizer {
         guard let recognizer = SFSpeechRecognizer(locale: .current), recognizer.isAvailable else {
             throw VoiceError.recognizerUnavailable
         }
         guard recognizer.supportsOnDeviceRecognition else {
             throw VoiceError.onDeviceRecognitionUnavailable
         }
+        return recognizer
+    }
 
+    private func startCapture() throws {
+        guard audioEngine == nil else { return }
         let engine = AVAudioEngine()
         let input = engine.inputNode
         let format = input.inputFormat(forBus: 0)
         guard format.sampleRate > 0, format.channelCount > 0 else {
             throw VoiceError.audioInputUnavailable
         }
+        Self.installAudioTap(on: input, format: format) { [weak self] audio in
+            self?.handleCapturedAudio(audio)
+        }
+        inputTapInstalled = true
+        audioEngine = engine
+        engine.prepare()
+        do {
+            try engine.start()
+        } catch {
+            stopCapture(nextState: .idle)
+            throw error
+        }
+    }
 
+    private func handleCapturedAudio(_ audio: VoiceAudioBuffer) {
+        switch state {
+        case .wakeListening:
+            appendToPreRoll(audio)
+            wakeDetector?.process(audio)
+        case .listening:
+            recognitionRequest?.append(audio.buffer)
+        case .idle, .processing:
+            break
+        }
+    }
+
+    private func handleWakeWordDetected() {
+        guard state == .wakeListening, wakeListeningEnabled else { return }
+        let recognizer: SFSpeechRecognizer
+        do { recognizer = try makeOnDeviceRecognizer() }
+        catch { failWakeWord(error); return }
+        wakeDetector?.pause()
+        let preRoll = preRollBuffers
+        clearPreRoll()
+        startCommandRecognition(
+            recognizer: recognizer,
+            activation: .wakeWord,
+            preRoll: preRoll
+        )
+        scheduleWakeTimeout()
+    }
+
+    private func startCommandRecognition(
+        recognizer: SFSpeechRecognizer,
+        activation: Activation,
+        preRoll: [VoiceAudioBuffer]
+    ) {
         let request = SFSpeechAudioBufferRecognitionRequest()
         request.shouldReportPartialResults = true
         request.requiresOnDeviceRecognition = true
@@ -173,27 +342,21 @@ final class VoiceInputController {
         let generation = UUID()
         sessionGeneration = generation
         commandTranscript = ""
-        audioEngine = engine
         recognitionRequest = request
-
-        Self.installAudioTap(on: input, format: format, request: request)
-        inputTapInstalled = true
-
         recognitionTask = Self.startRecognitionTask(
             recognizer: recognizer,
             request: request
         ) { @MainActor [weak self] transcript, isFinal, errorMessage in
-                self?.handleRecognition(
-                    generation: generation,
-                    transcript: transcript,
-                    isFinal: isFinal,
-                    errorMessage: errorMessage
-                )
+            self?.handleRecognition(
+                generation: generation,
+                transcript: transcript,
+                isFinal: isFinal,
+                errorMessage: errorMessage
+            )
         }
-
-        engine.prepare()
-        try engine.start()
-        setState(mode)
+        for audio in preRoll { request.append(audio.buffer) }
+        setState(.listening(activation))
+        onTranscript?("")
     }
 
     private func handleRecognition(
@@ -204,27 +367,17 @@ final class VoiceInputController {
     ) {
         guard generation == sessionGeneration else { return }
 
-        if let transcript {
-            switch state {
-            case .wakeListening:
-                if let command = commandAfterWakePhrase(in: transcript) {
-                    commandTranscript = command
-                    setState(.listening(.wakeWord))
-                    onTranscript?(command)
-                    scheduleWakeTimeout()
-                    if !command.isEmpty { scheduleSilenceCompletion() }
-                }
-            case .listening(let activation):
-                let visibleTranscript = activation == .wakeWord
-                    ? commandAfterWakePhrase(in: transcript) ?? commandTranscript
-                    : transcript
-                commandTranscript = visibleTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
-                onTranscript?(commandTranscript)
-                if activation == .wakeWord, !commandTranscript.isEmpty {
-                    scheduleSilenceCompletion()
-                }
-            case .idle, .processing:
-                break
+        if let transcript, case .listening(let activation) = state {
+            let visibleTranscript: String
+            if activation == .wakeWord {
+                visibleTranscript = commandAfterWakePhrase(in: transcript) ?? commandTranscript
+            } else {
+                visibleTranscript = transcript
+            }
+            commandTranscript = visibleTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
+            onTranscript?(commandTranscript)
+            if activation == .wakeWord, !commandTranscript.isEmpty {
+                scheduleSilenceCompletion()
             }
         }
 
@@ -234,19 +387,19 @@ final class VoiceInputController {
         }
 
         if let errorMessage {
-            let wasWakeListening = state == .wakeListening
-            stopRecognition(nextState: .idle)
+            let wasWakeListening = state == .wakeListening || state == .listening(.wakeWord)
+            stopCapture(nextState: .idle)
             if wasWakeListening {
-                scheduleWakeRestart()
+                failWakeWord(VoiceError.recognizerUnavailable)
             } else {
                 onError?(errorMessage)
+                if wakeListeningEnabled { scheduleWakeRestart() }
             }
         }
     }
 
     private func commandAfterWakePhrase(in transcript: String) -> String? {
-        let phrases = [wakePhrase, "Sage"]
-        for phrase in phrases {
+        for phrase in [wakePhrase, "Sage"] {
             let escaped = NSRegularExpression.escapedPattern(for: phrase)
             guard let range = transcript.range(
                 of: "\\b\(escaped)\\b",
@@ -260,7 +413,7 @@ final class VoiceInputController {
 
     private func completeCommand(activation: Activation) {
         let command = commandTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
-        stopRecognition(nextState: .processing)
+        stopCapture(nextState: .processing)
         guard !command.isEmpty else {
             setState(.idle)
             onTranscript?("")
@@ -269,6 +422,22 @@ final class VoiceInputController {
         }
         onCommand?(command, activation)
         scheduleWakeRestart()
+    }
+
+    private func appendToPreRoll(_ audio: VoiceAudioBuffer) {
+        preRollBuffers.append(audio)
+        preRollFrameCount += Int(audio.buffer.frameLength)
+        let sampleRate = audio.buffer.format.sampleRate
+        guard sampleRate > 0 else { return }
+        let maximumFrames = Int(sampleRate * preRollDurationSeconds)
+        while preRollFrameCount > maximumFrames, !preRollBuffers.isEmpty {
+            preRollFrameCount -= Int(preRollBuffers.removeFirst().buffer.frameLength)
+        }
+    }
+
+    private func clearPreRoll() {
+        preRollBuffers.removeAll(keepingCapacity: true)
+        preRollFrameCount = 0
     }
 
     private func scheduleWakeTimeout() {
@@ -294,31 +463,43 @@ final class VoiceInputController {
         restartTask = Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(550))
             guard !Task.isCancelled else { return }
-            self?.setState(.idle)
-            self?.resumeWakeListeningIfAuthorized()
+            guard let self else { return }
+            self.setState(.idle)
+            self.resumeWakeListeningIfAuthorized()
         }
     }
 
-    private func stopRecognition(nextState: State) {
+    private func stopCapture(nextState: State) {
         wakeTimeoutTask?.cancel()
         wakeTimeoutTask = nil
         silenceTask?.cancel()
         silenceTask = nil
 
         if let engine = audioEngine {
-            if inputTapInstalled {
-                engine.inputNode.removeTap(onBus: 0)
-            }
+            if inputTapInstalled { engine.inputNode.removeTap(onBus: 0) }
             engine.stop()
         }
         inputTapInstalled = false
+        audioEngine = nil
         recognitionRequest?.endAudio()
         recognitionTask?.cancel()
         recognitionTask = nil
         recognitionRequest = nil
-        audioEngine = nil
         sessionGeneration = UUID()
+        clearPreRoll()
         setState(nextState)
+    }
+
+    private func failWakeWord(_ error: Error) {
+        wakeListeningEnabled = false
+        wakeListeningPaused = false
+        wakeStartupGeneration = UUID()
+        wakeStartupTask?.cancel()
+        wakeStartupTask = nil
+        wakeDetector?.pause()
+        stopCapture(nextState: .idle)
+        onError?(error.localizedDescription)
+        onWakeWordUnavailable?()
     }
 
     private func setState(_ nextState: State) {
@@ -327,9 +508,12 @@ final class VoiceInputController {
         onStateChange?(nextState)
     }
 
+    private static func normalizedPhrase(_ phrase: String) -> String {
+        let normalized = phrase.trimmingCharacters(in: .whitespacesAndNewlines)
+        return normalized.isEmpty ? "Hey Sage" : normalized
+    }
+
     /// TCC does not guarantee that its authorization callback runs on the main queue.
-    /// Build the continuation from a nonisolated context so Swift does not attach a
-    /// MainActor precondition to the callback that TCC invokes.
     private nonisolated static func requestSpeechAuthorization() async
         -> SFSpeechRecognizerAuthorizationStatus
     {
@@ -340,22 +524,21 @@ final class VoiceInputController {
         }
     }
 
-    /// AVAudioEngine invokes tap blocks on its realtime audio queue. The block must
-    /// therefore be created outside MainActor isolation. Appending the captured
-    /// buffer is the thread-safe handoff expected by SFSpeechAudioBufferRecognitionRequest.
+    /// Audio is copied during the tap callback, then delivered to MainActor. The
+    /// detector and Apple recognizer receive the same captured microphone stream.
     private nonisolated static func installAudioTap(
         on input: AVAudioInputNode,
         format: AVAudioFormat,
-        request: SFSpeechAudioBufferRecognitionRequest
+        deliver: @escaping @MainActor @Sendable (VoiceAudioBuffer) -> Void
     ) {
         input.installTap(onBus: 0, bufferSize: 1_024, format: format) { buffer, _ in
-            request.append(buffer)
+            guard let snapshot = VoiceAudioBuffer(copying: buffer) else { return }
+            Task { @MainActor in deliver(snapshot) }
         }
     }
 
-    /// Speech recognition results may arrive on an arbitrary queue. Extract the
-    /// immutable result there, then explicitly hop to MainActor before touching
-    /// VoiceInputController state.
+    /// Recognition results may arrive on an arbitrary queue; hop to MainActor before
+    /// touching controller state.
     private nonisolated static func startRecognitionTask(
         recognizer: SFSpeechRecognizer,
         request: SFSpeechAudioBufferRecognitionRequest,
@@ -365,9 +548,7 @@ final class VoiceInputController {
             let transcript = result?.bestTranscription.formattedString
             let isFinal = result?.isFinal ?? false
             let errorMessage = error?.localizedDescription
-            Task { @MainActor in
-                deliver(transcript, isFinal, errorMessage)
-            }
+            Task { @MainActor in deliver(transcript, isFinal, errorMessage) }
         }
     }
 }

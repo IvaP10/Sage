@@ -1,0 +1,3 @@
+Parsed 2 XAML files:
+apps/windows/Sage.Windows/App.xaml
+apps/windows/Sage.Windows/MainWindow.xaml

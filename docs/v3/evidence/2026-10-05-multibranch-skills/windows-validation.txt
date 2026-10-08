@@ -1,0 +1,2 @@
+XAML parse passed: 2 files
+dotnet: unavailable on this Mac

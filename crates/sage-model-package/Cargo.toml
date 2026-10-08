@@ -1,0 +1,28 @@
+[package]
+name = "sage-model-package"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+name = "sage_model_package"
+path = "src/lib.rs"
+
+[[bin]]
+name = "sage-qwen35-package"
+path = "src/bin/sage-qwen35-package.rs"
+
+[dependencies]
+anyhow.workspace = true
+ed25519-dalek.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+sage-kernels = { path = "../sage-kernels" }
+thiserror.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

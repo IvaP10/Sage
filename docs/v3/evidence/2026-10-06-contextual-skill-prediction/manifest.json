@@ -1,0 +1,48 @@
+{
+  "date": "2026-10-06",
+  "workstream": "contextual skill prediction",
+  "status": "partial implementation for the active 36-feature goal",
+  "behavior": [
+    "Typed requests must explicitly reference a current selection, page, file, window or application; negated actions and mismatched native/browser reference types fail closed.",
+    "Sage checks for reviewed families before requesting any foreground observation; page text is requested only for explicit page references.",
+    "A deterministic local lexical scorer compares the bounded reference against reviewed branch aliases and next steps; it returns one path or at most two close alternatives and never exposes reference text.",
+    "The preview is advisory. Selecting a button fills the composer only; submission and all normal scope, policy, approval and verification gates remain unchanged.",
+    "No model, AI API, downloaded weights, provider, service or dependency is used for prediction; reference text is transient and is not persisted or sent to a planner.",
+    "The regular grammar preview is emitted first. Context capture and scoring are best-effort on the asynchronous preview path with a two-second deadline."
+  ],
+  "validation": {
+    "workspace_tests": "cargo test --workspace --locked passed: sage-core 196 passed and 7 ignored; sage-browser-worker 1 passed; remaining binary, protocol and doc-test targets passed.",
+    "clippy": "cargo clippy --workspace --all-targets --locked -- -D warnings passed.",
+    "format_and_diff": "cargo fmt --all -- --check and git diff --check passed.",
+    "macos": "Swift package build passed with SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk.",
+    "windows": "MainWindow.xaml and App.xaml parsed as XML. dotnet is unavailable, so Windows C# compilation and live interaction were not run.",
+    "latency": "Release scorer benchmark on Apple M3, 1,000 runs over 120 synthetic family objects (the pairwise upper bound from the 16-routine cap) and a 7.5 KiB page: p50 350,959 ns, p95 424,458 ns, p99 641,958 ns. Scoring only; excludes SQLite loading, native/browser capture, IPC, rendering and user-perceived latency."
+  },
+  "limitations": [
+    "Feature 35 remains partial: branch scores are heuristic and have no calibrated confidence; broader context sources, context-conditioned synthesis and explicitly authorized automatic prefixes remain open.",
+    "No live native/browser reference capture or visual/accessibility acceptance was possible in the locked Mac desktop session.",
+    "Windows compilation and runtime behavior remain unverified on this host.",
+    "The synthetic scoring benchmark is not an end-to-end latency measurement."
+  ],
+  "evidence_files": [
+    "workspace-tests.txt",
+    "clippy.txt",
+    "format-check.txt",
+    "diff-check.txt",
+    "macos-build.txt",
+    "windows-validation.txt",
+    "prediction-latency.txt"
+  ],
+  "source_sha256": {
+    "crates/sage-core/src/context.rs": "5b7482f66d5ba6d789bac04dafe7c09a6483d2def5ef0aa847219c6fa711a960",
+    "crates/sage-core/src/learning.rs": "0dddaeed167e347368c557efc142eb45bd2ec0864734fc04fefab97e37856eda",
+    "crates/sage-core/src/engine.rs": "c61b1cddab796f9a0b8d31241a48ee2c72cd1f823b85d0a3f71b6e7660d138e4",
+    "crates/sage-core/src/ipc/server.rs": "d0023abf356a80180b65342f5f8c995c993715c05134ae373ede77d0b910f68b",
+    "proto/sage/ipc/v2/sage.proto": "800cff924853ed351780898a5f3bf31a08ab474cb5107cc96f31e635ff4adfa2",
+    "apps/macos/Sources/SageMac/MainView.swift": "9a1663d6d2ad26dc8777f58aa422d90371b121b6c8586aeed726c2d1679eaf7d",
+    "apps/macos/Sources/SageMac/Generated/sage/ipc/v2/sage.pb.swift": "2162acbf4c75a09a49a9e7c3b80f8d0d191b1d9831da34f9b1a8bf5af637573a",
+    "apps/windows/Sage.Windows/MainWindow.xaml": "856fa7a1c2b40796c47fc80cf3e79aa7b53f149f90650558a90f8bc2c6b22f2f",
+    "apps/windows/Sage.Windows/MainWindow.xaml.cs": "3a07fe3d23f12801063d9a48a10eb06fc21fb7f295291773b68524490b880829",
+    "docs/v3/continuous-agency.md": "0c443071a2f83da6c585f4c14a5eb142b26c7cffc2c91526da205d16494e94d5"
+  }
+}

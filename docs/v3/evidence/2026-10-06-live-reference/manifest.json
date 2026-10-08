@@ -1,0 +1,53 @@
+{
+  "date": "2026-10-06",
+  "workstream": "one-shot current-reference context",
+  "status": "partial implementation for the active 36-feature goal",
+  "behavior": [
+    "A deterministic local trigger reads current selection, page, file, window or application context only for explicit, action-bearing foreground requests; generic this/that references and explicit read denials do not trigger capture.",
+    "Native and browser adapters return bounded current values; browser content is restricted to the exactly paired active tab and filters private/hidden content.",
+    "Raw references remain transient untrusted planner context; task persistence stores only a consumed marker, references expire after five minutes, and recovery does not inspect a replacement foreground item.",
+    "macOS and Windows activity views distinguish current-reference status from other events without displaying selected text.",
+    "No AI inference API, model, downloaded weights, new provider or dependency was added. Existing external planner destinations still require Sage data-release approval before receiving the exact request and context."
+  ],
+  "validation": {
+    "workspace_tests": "cargo test --workspace --locked: 194 sage-core tests passed, 6 release-only tests ignored; the browser-worker test and all other workspace/doc-test targets passed.",
+    "browser_tests": "node --test integrations/browser/background.test.mjs: 10 passed.",
+    "clippy": "cargo clippy --workspace --all-targets --locked -- -D warnings passed.",
+    "format_and_diff": "cargo fmt --all -- --check and git diff --check passed.",
+    "macos": "Swift package build passed with SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk; existing linker search-path warnings remain. The default SDK 27 selection failed because its SwiftUI macro plugin is unavailable in this Command Line Tools installation.",
+    "windows": "Two XAML files parsed as XML. dotnet is unavailable on this Mac; Windows C# build and live interaction are unverified.",
+    "latency": "Release fixture command cargo test --release -p sage-core explicit_reference_bridge_latency -- --ignored --nocapture, 1,000 in-process fake-adapter requests: p50 22,417 ns, p95 26,459 ns, p99 31,458 ns. This excludes sockets, actual native/browser response time, provider/planner work and UI."
+  },
+  "limitations": [
+    "No live Accessibility selection capture, browser extension capture, native visual acceptance or Windows runtime acceptance was performed.",
+    "Current file contents, cursor history and continuous reference updates remain open; the file adapter exposes only a document identifier.",
+    "Context-conditioned selection among reviewed skill branches remains open."
+  ],
+  "evidence_files": [
+    "workspace-tests.txt",
+    "browser-tests.txt",
+    "clippy.txt",
+    "format-check.txt",
+    "diff-check.txt",
+    "macos-build.txt",
+    "macos-sdk27-default.txt",
+    "adapter-bridge-latency.txt",
+    "windows-validation.txt"
+  ],
+  "source_sha256": {
+    "crates/sage-core/src/context.rs": "e5fe5ab2fa162ca01ab6179d782dfe792440c226c408ff7c145da9fc028134ac",
+    "crates/sage-core/src/execution/bridge.rs": "413686a55f6e63fda880862951270376670d1e41bc86cdc381e38841b2d47130",
+    "crates/sage-core/src/engine.rs": "157d68b3f13f68a246c553ccae17611e9a9594497a314e9ad72e1442b235b52f",
+    "crates/sage-core/src/domain/task.rs": "7ac15b718e8fa473be0f9eb40795aa1bc85f2616e69d823a1d3fc2a4b5bd4870",
+    "crates/sage-core/src/events.rs": "69a495c6d24163c94a0f6c3ce1869c55b07a45d991edb1a6cc24fc1126d8cfb2",
+    "crates/sage-core/src/storage.rs": "adc974d87225124182439cda852ff3217d999d8ffbc091ad728eddf987d7cd21",
+    "crates/sage-core/src/ipc/server.rs": "eaab39c72d555428191ddb2bdf37116b41a17d349c33486d6f383ec151964802",
+    "apps/macos/Sources/SageMac/PlatformAdapter.swift": "2a773a7f350ac86d8a8d7cdd9ef234247956488d9b44487047791b3b7a18bb7c",
+    "apps/macos/Sources/SageMac/MainView.swift": "8ecf882505af2bb872216d37cea4919353b28e9041b0afc2b146c2efe266af9c",
+    "apps/windows/Sage.Windows/PlatformAdapter.cs": "d36103c0932a3a730bb10731d7dd9ade59d4813ebafb986c84a50207eb6e0722",
+    "apps/windows/Sage.Windows/MainWindow.xaml.cs": "01557823bc29f7e0278663a46252a1510006b1a04d46cfe7aeb812a5ef21c15e",
+    "apps/windows/Sage.Windows/NativePresentation.cs": "c32c1e49de7d9afede95d2faa0caaff4fa26856c2cc0da0f3f14504f1399075b",
+    "integrations/browser/background.js": "a2b10b08a07b5ee1573954daeb6ae800f10064eb587c8f191e45bfd6fe997f9e",
+    "integrations/browser/background.test.mjs": "72f03c301280b404d4256b58be438f6ea8700a9d1d9dec04250a43af2e1c0cd8"
+  }
+}

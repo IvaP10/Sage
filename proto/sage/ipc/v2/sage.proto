@@ -49,6 +49,8 @@ enum TaskStatus {
   TASK_STATUS_FAILED = 8;
   TASK_STATUS_CANCELLED = 9;
   TASK_STATUS_INTERRUPTED = 10;
+  TASK_STATUS_ANSWERED = 11;
+  TASK_STATUS_PARTIAL = 12;
 }
 
 message Frame {
@@ -65,6 +67,8 @@ message Frame {
     AdapterHello adapter_hello = 17;
     AdapterRequest adapter_request = 18;
     AdapterResult adapter_result = 19;
+    AdapterCancel adapter_cancel = 20;
+    AdapterCancelAcknowledged adapter_cancel_acknowledged = 21;
   }
 }
 
@@ -73,6 +77,7 @@ message ServerChallenge {
   uint32 minimum_protocol_version = 2;
   uint32 maximum_protocol_version = 3;
   string core_instance_id = 4;
+  repeated string supported_features = 5;
 }
 
 message ClientAuthenticate {
@@ -80,6 +85,7 @@ message ClientAuthenticate {
   string client_version = 2;
   bytes client_nonce = 3;
   bytes proof = 4;
+  repeated string supported_features = 5;
 }
 
 message AuthenticationResult {
@@ -88,6 +94,7 @@ message AuthenticationResult {
   string error_code = 3;
   string message = 4;
   bytes server_proof = 5;
+  repeated string negotiated_features = 6;
 }
 
 message UiCommand {
@@ -105,16 +112,56 @@ message UiCommand {
     KnowledgeCommand knowledge_command = 19;
     WorkflowCommand workflow_command = 20;
     UnlockStorage unlock_storage = 21;
+    UpdateIntent update_intent = 22;
+    WorldModelCommand world_model_command = 23;
   }
 }
 
 message UnlockStorage {}
+
+// Ephemeral native input, never a submission or an execution capability.
+// Monotonic revisions are scoped to the authenticated IPC connection.
+message UpdateIntent {
+  string stream_id = 1;
+  uint64 revision = 2;
+  string text = 3;
+  string active_task_id = 4;
+  bool allow_interrupt = 5;
+  repeated string folder_roots = 6;
+  bool voice_input = 7;
+}
+
+message IntentPreview {
+  string stream_id = 1;
+  uint64 revision = 2;
+  repeated string steps = 3;
+  bool compiled_locally = 4;
+  string status = 5;
+  string detail = 6;
+  uint64 compile_micros = 7;
+  // A single complete, locally compiled macOS app step whose explicit
+  // "and then" boundary is still followed by unfinished speech. The UI may
+  // submit only this exact prefix through the ordinary approval path.
+  string streamed_prefix = 8;
+  // Reviewed routine aliases suggested from a fresh, explicit local
+  // reference. Choosing one fills the composer; it never submits a task.
+  repeated string routine_suggestions = 9;
+  string routine_suggestion_detail = 10;
+}
 
 message SubmitTask {
   string text = 1;
   InputSource source = 2;
   string conversation_id = 3;
   repeated ResourceScope resources = 4;
+  // Explicit replacement of this conversation's current request. A new run
+  // obtains fresh authority; stopping an old run does not undo its effects.
+  string supersedes_task_id = 5;
+  // Non-empty only for a prepared voice prefix. The final voice request must
+  // carry the same stream id and finalize_stream=true to revise the same run.
+  string voice_stream_id = 6;
+  bool streamed_prefix = 7;
+  bool finalize_stream = 8;
 }
 
 message ControlTask {
@@ -148,6 +195,8 @@ message UpdatePermission {
 
 message UndoLastAction {
   string task_id = 1;
+  // Required identity from TaskUpdate; retries must not select an older action.
+  string action_id = 2;
 }
 
 message UserAnswer {
@@ -157,6 +206,8 @@ message UserAnswer {
   string answer = 4;
 }
 
+// Deprecated v2 compatibility payload. Sage rejects configuration changes and
+// does not persist provider endpoints or credentials.
 message SaveProviderSettings {
   string role = 1;
   string provider = 2;
@@ -167,6 +218,7 @@ message SaveProviderSettings {
   bool native_authentication_satisfied = 7;
 }
 
+// Deprecated v2 compatibility payload. Sage never performs provider probes.
 message TestProviderConnection {
   string role = 1;
   string provider = 2;
@@ -191,7 +243,24 @@ message CoreEvent {
     ProviderConnectionResult provider_connection_result = 19;
     KnowledgeState knowledge_state = 20;
     WorkflowState workflow_state = 21;
+    TaskAccepted task_accepted = 22;
+    DecisionResolved decision_resolved = 23;
+    IntentPreview intent_preview = 24;
+    WorldModelState world_model_state = 25;
   }
+}
+
+// Sent only after the command and task have committed durably. Retrying the
+// same request identity and content returns the same task, including after restart.
+message TaskAccepted {
+  string request_id = 1;
+  string task_id = 2;
+}
+
+message DecisionResolved {
+  string decision_id = 1;
+  string task_id = 2;
+  string state = 3;
 }
 
 message ProviderConnectionResult {
@@ -210,8 +279,10 @@ message StateSnapshot {
   repeated ProviderSettings provider_settings = 5;
   KnowledgeState knowledge = 6;
   bool storage_locked = 7;
+  repeated QuestionRequest pending_questions = 8;
 }
 
+// Deprecated v2 compatibility snapshot field. Sage always returns it empty.
 message ProviderSettings {
   string role = 1;
   string provider = 2;
@@ -233,6 +304,27 @@ message TaskUpdate {
   string conversation_id = 10;
   string message_id = 11;
   repeated ActionProgress actions = 12;
+  ExecutionFacts execution_facts = 13;
+  // Stop addresses this stable scope across fresh continuation executions.
+  string control_scope_id = 14;
+  string continued_task_id = 15;
+  // Durable compensation state: empty, prepared, dispatched, uncertain, verified.
+  string undo_state = 16;
+  string undo_summary = 17;
+  string undo_action_id = 18;
+  uint64 intent_revision = 19;
+  string intent_change_summary = 20;
+  string routine_summary = 21;
+}
+
+// Broker-derived execution evidence; model text cannot assign these counts.
+message ExecutionFacts {
+  uint32 verified = 1;
+  uint32 failed = 2;
+  uint32 pending = 3;
+  uint32 uncertain = 4;
+  string summary = 5;
+  uint32 undone = 6;
 }
 
 // Additive typed operations; JSON records are schema-validated by sage-core.
@@ -257,9 +349,30 @@ message WorkflowCommand {
   uint32 maximum_runs = 8;
 }
 message WorkflowState { string json = 1; }
+// Descriptive discovery data and explicitly approved, expiring learning
+// sessions. JSON payloads are decoded into closed Rust schemas by sage-core.
+message WorldModelCommand {
+  string operation = 1; // discover_current_application, discover_paired_browser, list, system, synthesize_goal, run_goal, compile_controller_draft, get_controller_draft, review_controller_draft, forget_system, approve_learning_session, run_learning_probe, stop_learning_session
+  string id = 2;
+  string json = 3;
+}
+message WorldModelState { string json = 1; }
 message ActionProgress { string action_id = 1; string summary = 2; string status = 3; }
-message AdapterHello { string domain = 1; }
-message AdapterRequest { string request_id = 1; string operation = 2; string json = 3; int64 expires_at_unix_ms = 4; ExecutionGrant grant = 5; BrowserTarget browser_target = 6; }
+message AdapterHello { string domain = 1; uint32 cancellation_protocol = 2; }
+
+// Receipt of this signal does not prove that an external effect was prevented.
+// A final AdapterResult must still be retained and reconciled by the broker.
+message AdapterCancel { string request_id = 1; int64 expires_at_unix_ms = 2; }
+message AdapterCancelAcknowledged { string request_id = 1; }
+message AdapterRequest { string request_id = 1; string operation = 2; string json = 3; int64 expires_at_unix_ms = 4; ExecutionGrant grant = 5; BrowserTarget browser_target = 6; ApplicationTarget application_target = 7; }
+message ApplicationTarget {
+  string platform = 1;
+  string bundle_path = 2;
+  string identifier = 3;
+  string code_digest = 4;
+  string signer = 5;
+  repeated string code_digests = 6; // Sorted validated code-directory identities, one per binary architecture.
+}
 message BrowserTarget {
   int32 tab_id = 1;
   int32 window_id = 2;
@@ -269,7 +382,7 @@ message BrowserTarget {
   string origin = 6;
   string url = 7;
 }
-message AdapterResult { string request_id = 1; bool success = 2; string json = 3; string error = 4; }
+message AdapterResult { string request_id = 1; bool success = 2; string json = 3; string error = 4; ApplicationTarget application_target = 5; uint32 observed_process_id = 6; }
 
 message AgentEvent {
   string task_id = 1;

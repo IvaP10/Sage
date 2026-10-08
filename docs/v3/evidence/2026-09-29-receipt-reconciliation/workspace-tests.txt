@@ -1,0 +1,155 @@
+   Compiling sage-core v1.0.1 (/Users/ivanpadeliya/Desktop/Sage/crates/sage-core)
+   Compiling sage-worker-common v1.0.1 (/Users/ivanpadeliya/Desktop/Sage/crates/sage-worker-common)
+   Compiling sage-browser-worker v1.0.1 (/Users/ivanpadeliya/Desktop/Sage/crates/sage-browser-worker)
+   Compiling sage-sandbox-worker v1.0.1 (/Users/ivanpadeliya/Desktop/Sage/crates/sage-sandbox-worker)
+   Compiling sage-privileged-helper v1.0.1 (/Users/ivanpadeliya/Desktop/Sage/crates/sage-privileged-helper)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.18s
+     Running unittests src/main.rs (target/debug/deps/sage_browser_worker-558e764705e12401)
+
+running 1 test
+test relay::tests::cancellation_bypasses_pending_browser_work_and_keeps_late_replies_correlated ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/sage_core-d1804b7bad3b4cda)
+
+running 88 tests
+test capability::v2_tests::approval_digest_changes_with_payload_target_and_browser_identity ... ok
+test capability::v2_tests::capabilities_are_single_use_worker_bound_and_revoked_with_the_run ... ok
+test capability::v2_tests::stopped_and_completed_generations_cannot_reuse_unused_grants ... ok
+test contracts::tests::scope_never_grants_overwrite_or_external_effects ... ok
+test domain::completion::tests::no_combination_of_failed_or_unresolved_work_is_success ... ok
+test application_target::tests::signed_targets_reject_ambiguous_paths_and_unqualified_platforms ... ok
+test contracts::tests::derived_data_retains_restrictions ... ok
+test capability::v2_tests::every_cancel_issue_interleaving_leaves_no_live_authority ... ok
+test authorization::tests::no_policy_input_combination_bypasses_denial ... ok
+test decisions::tests::decision_commits_are_atomic_and_restart_cannot_reuse_pending_authority ... ok
+test engine::tests::action_status_without_verification_evidence_requires_review ... ok
+test engine::tests::background_trigger_cannot_follow_a_replaced_folder_outside_its_scope ... ok
+test commands::tests::acceptance_is_atomic_and_receipts_survive_reopening ... ok
+test engine::tests::cancellation_drops_an_inflight_model_call_and_persists_cancelled_state ... ok
+test audit::tests::protected_checkpoint_rejects_truncation_tampering_and_missing_anchor ... ok
+test engine::tests::cancellation_prevents_a_queued_mutation_from_starting ... ok
+test engine::tests::checkpoint_failure_after_verification_keeps_the_committed_effect_truth ... ok
+test engine::tests::denying_a_native_authentication_decision_never_requires_authentication ... ok
+test engine::tests::denied_data_release_never_calls_the_provider_and_cannot_replay_approval ... ok
+test engine::tests::concurrent_submission_retries_and_restart_run_the_model_only_once ... ok
+test engine::tests::provider_credential_is_saved_only_after_native_authentication ... ok
+test engine::tests::ordinary_question_finishes_without_any_computer_action ... ok
+test engine::tests::questions_survive_reconnect_snapshots_and_cancel_closes_the_waiter ... ok
+test engine::tests::reobserved_crash_recovery_installs_durable_result_evidence ... ok
+test engine::tests::resume_cannot_replace_a_live_owner_despite_an_interrupted_projection ... ok
+test engine::tests::fabricated_model_success_cannot_hide_failed_or_partial_work ... ok
+test engine::tests::stop_cancels_despite_storage_failure_and_retains_an_unsaved_stop ... ok
+test engine::tests::stop_drops_a_stalled_observation_but_preserves_the_possible_effect ... ok
+test execution::bridge::tests::a_cancelled_queued_request_is_suppressed_before_ipc_dispatch ... ok
+test execution::bridge::tests::application_identity_cannot_be_supplied_in_unchecked_json ... ok
+test execution::bridge::tests::cancellation_ack_and_late_reply_preserve_the_session_and_reject_other_peers ... ok
+test execution::files::tests::read_limit_is_applied_to_the_open_handle ... ok
+test execution::bridge::tests::cancelled_requests_accept_correlated_late_replies_without_reviving_waiters ... ok
+test execution::bridge::tests::full_dispatch_queue_does_not_create_unsettleable_cancellation_records ... ok
+test inference::tests::overflowing_memory_envelopes_are_rejected ... ok
+test inference::tests::model_and_vm_reservations_share_one_budget ... ok
+test ipc::auth::tests::proof_is_bound_to_client_and_protocol ... ok
+test ipc::auth::tests::browser_key_cannot_authenticate_as_native_ui ... ok
+test execution::files::tests::exclusive_write_and_changed_target_are_enforced ... ok
+test execution::files::tests::symlink_replacement_cannot_redirect_a_prepared_write ... ok
+test engine::tests::stop_reaches_the_provider_before_the_task_cache_lock_is_released ... ok
+test engine::tests::approval_capability_execution_verification_and_undo_are_end_to_end ... ok
+test engine::tests::actual_file_results_drive_later_actions_without_repeated_scope_approval ... ok
+test journal::tests::journal_rejects_replayed_dispatch_and_repreparation_after_uncertain_effects ... ok
+test ipc::server::protocol_v2_tests::authenticated_browser_cannot_send_ui_commands ... ok
+test ipc::server::protocol_v2_tests::replayed_frame_is_rejected_after_a_valid_native_handshake ... ok
+test model::tests::endpoint_validation_allows_tls_and_exact_loopback_only ... ok
+test model::tests::malformed_structured_content_is_rejected_without_secret_echo ... ok
+test model::tests::mock_openai_response_is_structured_and_sage_assigns_identity ... ok
+test model::tests::provider_redirects_are_rejected_without_following_location ... ok
+test network::tests::blocks_private_and_ambiguous_destinations ... ok
+test network::tests::public_fetch_cannot_use_provider_loopback_exceptions_or_forged_evidence ... ok
+test policy::tests::shell_commands_are_prohibited_below_the_model ... ok
+test ipc::dispatch::tests::stop_signals_even_when_control_commands_and_responses_are_saturated ... ok
+test ipc::server::protocol_v2_tests::lost_acceptance_receipt_can_be_retried_in_a_new_session ... ok
+test ipc::server::protocol_v2_tests::worker_cancel_ack_and_late_reply_leave_the_authenticated_connection_usable ... ok
+test ipc::server::protocol_v2_tests::stop_and_ping_bypass_a_stalled_and_saturated_ordinary_lane ... ok
+test receipts::tests::an_earlier_receipt_cannot_change_a_replaced_action_identity ... ok
+test receipts::tests::receipt_projection_exit_child ... ok
+test receipts::tests::acknowledgement_is_not_effect_settlement_and_unsent_evidence_must_be_reconciled_before_retry ... ok
+test knowledge::v2_tests::permission_filter_runs_before_rank_and_limit ... ok
+test redaction::tests::nonsecret_code_unicode_spacing_and_line_endings_are_preserved ... ok
+test redaction::tests::redacts_labeled_and_prefixed_secrets ... ok
+test redaction::tests::removes_secret_spans_without_flattening_surrounding_content ... ok
+test resources::v2_tests::model_assets_and_internal_state_cannot_be_prepared_even_under_a_parent_grant ... ok
+test resources::v2_tests::windows_device_stream_and_ambiguous_names_are_never_ordinary_files ... ok
+test runtime::tests::stop_survives_missing_waiter_and_unsaved_cleanup_and_generations_do_not_reopen ... ok
+test streaming::tests::fragmented_unicode_stream_requires_normal_completion ... ok
+test streaming::tests::partial_answer_does_not_extract_tool_or_escaped_content ... ok
+test knowledge::v2_tests::forgetting_removes_derived_memory_and_excludes_its_context_lineage ... ok
+test transitions::tests::abrupt_transition_exit_child ... ok
+test receipts::tests::verification_covers_receipts_atomically_and_later_replies_do_not_demote_verified_effects ... ok
+test receipts::tests::startup_reconciles_saved_receipts_once_even_after_their_private_body_is_removed ... ok
+test receipts::tests::legacy_receipt_migration_preserves_metadata_when_artifacts_are_deleted ... ok
+test transitions::tests::durable_verification_survives_reopen_without_promoting_a_cancelled_task ... ok
+test receipts::tests::abrupt_exit_recovers_unprojected_receipts_without_duplicate_state_or_events ... ok
+test transitions::tests::recovery_installs_matching_result_evidence_and_execution_replay_is_rejected ... ok
+test transitions::tests::prepare_dispatch_and_interruption_commit_with_their_projection_and_events ... ok
+test verification::tests::app_success_requires_the_prepared_signature_and_a_running_process ... ok
+test transitions::tests::stale_verification_cannot_overwrite_a_newer_stop_revision ... ok
+test vault::tests::migration_encrypts_history_and_rollback_before_replacement ... ok
+test transitions::tests::verification_after_forgetting_keeps_only_effect_evidence ... ok
+test receipts::tests::failed_projection_writes_leave_the_receipt_pending_and_retry_is_idempotent ... ok
+test workflows::v2_tests::claim_is_single_use_and_cannot_reuse_changed_authorization ... ok
+test workflows::v2_tests::schedules_need_unexpired_authority_and_stop_at_their_budget ... ok
+test transitions::tests::abrupt_exit_at_each_boundary_recovers_all_or_none_of_the_verification ... ok
+test transitions::tests::each_failed_write_rolls_back_the_entire_verified_transition ... ok
+test engine::tests::exhausted_budget_continues_with_fresh_run_identity_and_no_old_actions ... ok
+
+test result: ok. 88 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.28s
+
+     Running unittests src/main.rs (target/debug/deps/sage_core-0ebb7b482518d5e4)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/main.rs (target/debug/deps/sage_privileged_helper-e27c03d3aaa49869)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/sage_protocol-d8028c0e241ce20d)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/main.rs (target/debug/deps/sage_sandbox_worker-8dbeed00393e8b9f)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/sage_worker_common-bd6d3b121966607a)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests sage_core
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests sage_protocol
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests sage_worker_common
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

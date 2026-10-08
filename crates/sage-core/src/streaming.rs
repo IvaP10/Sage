@@ -1,79 +1,29 @@
-//! Bounded SSE decoding. Partial text is presentation only; tools are parsed
-//! and validated only after a normally completed response.
-use crate::{CoreError, CoreResult};
+//! Safe previews for incomplete Sage planner output.
 
-#[derive(Default)]
-pub struct CompletionStream {
-    buffer: Vec<u8>,
-    content: String,
-    received: usize,
-    stopped: bool,
-    done: bool,
-}
-impl CompletionStream {
-    pub fn push(&mut self, bytes: &[u8]) -> CoreResult<Option<String>> {
-        self.received = self.received.saturating_add(bytes.len());
-        if self.received > 1024 * 1024 {
-            return Err(error("Provider stream exceeded one MiB"));
-        }
-        self.buffer.extend_from_slice(bytes);
-        while let Some(end) = self.buffer.iter().position(|b| *b == b'\n') {
-            let line = self.buffer.drain(..=end).collect::<Vec<_>>();
-            let line = std::str::from_utf8(&line)
-                .map_err(|_| error("Invalid stream encoding"))?
-                .trim();
-            let Some(data) = line.strip_prefix("data:") else {
-                continue;
-            };
-            let data = data.trim();
-            if self.done {
-                return Err(error("Content followed a completed stream"));
-            }
-            if data == "[DONE]" {
-                self.done = true;
-                continue;
-            }
-            let value: serde_json::Value =
-                serde_json::from_str(data).map_err(|_| error("Malformed provider stream"))?;
-            if value.get("error").is_some() {
-                return Err(error("Provider reported a streaming error"));
-            }
-            if let Some(choices) = value["choices"].as_array() {
-                for choice in choices {
-                    if choice["index"].as_u64().unwrap_or(0) != 0 {
-                        return Err(error("Multiple response choices are unsupported"));
-                    }
-                    if let Some(text) = choice["delta"]["content"].as_str() {
-                        self.content.push_str(text);
-                    }
-                    if choice["delta"].get("tool_calls").is_some() {
-                        return Err(error("Unstructured tool calls are unsupported"));
-                    }
-                    if let Some(reason) = choice["finish_reason"].as_str() {
-                        if reason != "stop" {
-                            return Err(error("Provider response did not finish normally"));
-                        }
-                        self.stopped = true;
-                    }
-                }
-            }
-        }
-        Ok(answer_prefix(&self.content))
-    }
-    pub fn finish(self) -> CoreResult<String> {
-        if !self.done || !self.stopped || !self.buffer.iter().all(u8::is_ascii_whitespace) {
-            return Err(error("Provider stream ended before completion"));
-        }
-        Ok(self.content)
-    }
-}
+const PREVIEW_SCAN_INTERVAL_BYTES: usize = 16;
 
-fn error(message: &str) -> CoreError {
-    CoreError::Model(message.into())
+/// Return a larger cumulative answer preview only after a bounded scan interval
+/// or a complete JSON value. Generated planner output is append-only, but the
+/// previous value is still checked so a malformed prefix cannot retract text.
+pub(crate) fn next_answer_preview(
+    input: &[u8],
+    previous: &str,
+    complete: bool,
+    last_scan_bytes: &mut usize,
+) -> Option<String> {
+    if input.len() > crate::model::MAX_TURN_BYTES
+        || (!complete && input.len().saturating_sub(*last_scan_bytes) < PREVIEW_SCAN_INTERVAL_BYTES)
+    {
+        return None;
+    }
+    *last_scan_bytes = input.len();
+    let input = std::str::from_utf8(input).ok()?;
+    let answer = answer_prefix(input)?;
+    (answer.len() > previous.len() && answer.starts_with(previous)).then_some(answer)
 }
 
 /// Find only a root-level answer string, never text inside a tool payload.
-pub(crate) fn answer_prefix(input: &str) -> Option<String> {
+pub fn answer_prefix(input: &str) -> Option<String> {
     let bytes = input.as_bytes();
     let mut depth = 0i32;
     let mut i = 0;
@@ -165,24 +115,7 @@ pub(crate) fn answer_prefix(input: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn fragmented_unicode_stream_requires_normal_completion() {
-        let content = r#"{"goal":"hello","answer":"Hi 🌿","actions":[]}"#;
-        let events = format!(
-            "data: {}\n\ndata: {{\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":\"stop\"}}]}}\n\ndata: [DONE]\n\n",
-            serde_json::json!({"choices":[{"index":0,"delta":{"content":content}}]})
-        );
-        let mut stream = CompletionStream::default();
-        let mut preview = None;
-        for byte in events.bytes() {
-            if let Some(text) = stream.push(&[byte]).unwrap() {
-                preview = Some(text);
-            }
-        }
-        assert_eq!(preview.as_deref(), Some("Hi 🌿"));
-        assert_eq!(stream.finish().unwrap(), content);
-        assert!(CompletionStream::default().finish().is_err());
-    }
+
     #[test]
     fn partial_answer_does_not_extract_tool_or_escaped_content() {
         assert_eq!(answer_prefix(r#"{"answer":"hel"#).as_deref(), Some("hel"));
@@ -191,5 +124,48 @@ mod tests {
             None
         );
         assert_eq!(answer_prefix(r#"{"goal":"\"answer\":\"bad\""#), None);
+    }
+
+    #[test]
+    fn cumulative_previews_advance_only_on_monotonic_root_answer_text() {
+        let mut last_scan_bytes = 0;
+        let first = br#"{"goal":"Read the report","answer":"The report says"#;
+        let preview = next_answer_preview(first, "", false, &mut last_scan_bytes).unwrap();
+        assert_eq!(preview, "The report says");
+
+        let extended = br#"{"goal":"Read the report","answer":"The report says the first section covers local inference and memory"#;
+        let next =
+            next_answer_preview(&extended[..], &preview, false, &mut last_scan_bytes).unwrap();
+        assert!(next.starts_with(&preview));
+        assert!(next.len() > preview.len());
+
+        let retracted = br#"{"goal":"Read the report","answer":"Changed"#;
+        assert!(next_answer_preview(&retracted[..], &next, true, &mut last_scan_bytes).is_none());
+    }
+
+    #[test]
+    fn preview_waits_for_split_utf8_and_never_reads_nested_tool_text() {
+        let mut last_scan_bytes = 0;
+        let mut split = br#"{"goal":"Summarize","answer":"Cafe "#.to_vec();
+        split.extend_from_slice(&[0xe2, 0x82]);
+        assert!(next_answer_preview(&split, "", false, &mut last_scan_bytes).is_none());
+        split.push(0xac);
+        let preview = next_answer_preview(&split, "", true, &mut last_scan_bytes).unwrap();
+        assert_eq!(preview, "Cafe €");
+
+        let nested = br#"{"goal":"Inspect","answer":"","actions":[{"kind":"read_file","payload":{"answer":"private tool payload"}}]}"#;
+        assert!(next_answer_preview(nested, "", true, &mut last_scan_bytes).is_none());
+    }
+
+    #[test]
+    fn preview_rescans_are_bounded_by_input_and_scan_interval() {
+        let mut last_scan_bytes = 0;
+        let short = br#"{"answer":"x"#;
+        assert!(next_answer_preview(short, "", false, &mut last_scan_bytes).is_none());
+        assert_eq!(last_scan_bytes, 0);
+
+        let oversized = vec![b' '; crate::model::MAX_TURN_BYTES + 1];
+        assert!(next_answer_preview(&oversized, "", true, &mut last_scan_bytes).is_none());
+        assert_eq!(last_scan_bytes, 0);
     }
 }

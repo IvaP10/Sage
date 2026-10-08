@@ -5,9 +5,10 @@ import SwiftUI
 struct SageApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @State private var model = AppModel()
+    @Environment(\.openWindow) private var openWindow
 
     var body: some Scene {
-        WindowGroup("Sage") {
+        WindowGroup("Sage", id: "main") {
             MainView(model: model)
                 .frame(minWidth: 920, minHeight: 640)
                 .preferredColorScheme(.dark)
@@ -39,13 +40,70 @@ struct SageApp: App {
                 NSApplication.shared.activate(ignoringOtherApps: true)
                 model.newTask()
             }
+            Button(model.worldModelBusy ? "Discovering current app…" : "Discover current app") {
+                model.discoverCurrentApplication()
+            }
+            .disabled(model.worldModelBusy || model.learningSessionID != nil)
+            Button("Browser discovery (awaiting live acceptance)") {
+                model.discoverPairedBrowser()
+            }
+            .disabled(true)
+            .help("Browser discovery stays unavailable until the exact paired-tab flow passes live Chrome acceptance.")
+            if !model.controllerDrafts.isEmpty {
+                Section("Controller drafts") {
+                    Text("Inspect the saved steps, then compare them with the current app. Review never runs a control or grants access.")
+                    ForEach(model.controllerDrafts) { draft in
+                        Button("\(draft.systemLabel) · \(draft.stepCount) steps · \(draft.status)") {
+                            openWindow(id: "main")
+                            NSApplication.shared.activate(ignoringOtherApps: true)
+                            model.inspectControllerDraft(draft)
+                        }
+                        .disabled(model.worldModelBusy || model.pendingDecision != nil)
+                    }
+                }
+            }
+            if !model.learningCandidates.isEmpty, model.learningSessionID == nil {
+                Section("Learning inbox") {
+                    Text("Sage found controls that may support a reversible test in \(model.learningCandidates[0].systemLabel). Nothing has been activated.")
+                    Text("Approval covers only the named control, for up to 20 probes or 10 minutes. Each probe must restore and verify its original value.")
+                    ForEach(model.learningCandidates) { candidate in
+                        Button("Approve reversible test: \(candidate.label)") {
+                            model.approveLearningCandidate(candidate)
+                        }
+                        .disabled(model.worldModelBusy)
+                    }
+                }
+            }
+            if let candidate = model.learningApprovedCandidate,
+               model.learningSessionID != nil {
+                Section("Approved learning session") {
+                    Text("\(candidate.systemLabel) • \(candidate.label) (\(candidate.role))")
+                    if let expiresAt = model.learningExpiresAt {
+                        Text("Expires \(expiresAt, style: .relative). Stop, lock, or adapter disconnect ends this session.")
+                    } else {
+                        Text("This approval is limited to the named control and will expire within 10 minutes. Stop, lock, or adapter disconnect ends it.")
+                    }
+                    Button(model.worldModelBusy ? "Probe settling…" : "Run one reversible test") {
+                        model.runApprovedLearningProbe()
+                    }
+                    .disabled(model.worldModelBusy)
+                    Button("Stop and revoke learning approval") {
+                        model.stopLearningSession()
+                    }
+                    .disabled(model.worldModelBusy)
+                }
+            }
+            if !model.worldModelStatus.isEmpty {
+                Text(model.worldModelStatus)
+                    .lineLimit(3)
+            }
             Divider()
             Button("Quit Sage") {
                 NSApplication.shared.terminate(nil)
             }
         } label: {
-            SageMenuBarIcon()
-                .accessibilityLabel("Sage")
+            SageMenuBarIcon(hasLearningRequests: !model.learningCandidates.isEmpty && model.learningSessionID == nil)
+                .accessibilityLabel(model.learningCandidates.isEmpty ? "Sage" : "Sage, \(model.learningCandidates.count) learning requests")
         }
     }
 }

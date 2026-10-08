@@ -21,17 +21,20 @@ application=${SAGE_MACOS_APP_DIR:-$output_root/Sage.app}
 contents="$application/Contents"
 disk_image=${SAGE_MACOS_DMG_PATH:-$output_root/Sage-1.0.1-macos-$architecture-preview.dmg}
 
-cargo build --release --workspace
+cargo build --release --locked --workspace
 swift build --package-path apps/macos -c release --product SageMac
 
 rm -rf "$application"
 mkdir -p "$contents/MacOS" "$contents/Helpers" "$contents/Resources"
+inference_worker_app="$contents/Helpers/SageInferenceWorker.app"
+inference_worker_contents="$inference_worker_app/Contents"
+mkdir -p "$inference_worker_contents/MacOS"
 
 cp apps/macos/.build/release/SageMac "$contents/MacOS/Sage"
 cp target/release/sage-core "$contents/Helpers/sage-core"
 cp target/release/sage-browser-worker "$contents/Helpers/sage-browser-worker"
-cp target/release/sage-sandbox-worker "$contents/Helpers/sage-sandbox-worker"
-cp target/release/sage-privileged-helper "$contents/Helpers/sage-privileged-helper"
+cp target/release/sage-inference-worker "$inference_worker_contents/MacOS/sage-inference-worker"
+cp apps/macos/SageInferenceWorker-Info.plist "$inference_worker_contents/Info.plist"
 cp apps/macos/Info.plist "$contents/Info.plist"
 cp assets/icon.icns "$contents/Resources/sage.icns"
 cp assets/icon-source-bg.png "$contents/Resources/sage-logo.png"
@@ -46,7 +49,23 @@ sign_binary() {
   fi
 }
 
-for helper in sage-core sage-browser-worker sage-sandbox-worker sage-privileged-helper; do
+sign_inference_worker() {
+  if [ "$signing_identity" = "-" ]; then
+    codesign --force --sign - --entitlements apps/macos/SageInferenceWorker.entitlements "$inference_worker_app"
+  else
+    codesign \
+      --force \
+      --timestamp \
+      --options runtime \
+      --entitlements apps/macos/SageInferenceWorker.entitlements \
+      --sign "$signing_identity" \
+      "$inference_worker_app"
+  fi
+}
+
+sign_inference_worker
+
+for helper in sage-core sage-browser-worker; do
   sign_binary "$contents/Helpers/$helper"
 done
 if [ "$signing_identity" = "-" ]; then

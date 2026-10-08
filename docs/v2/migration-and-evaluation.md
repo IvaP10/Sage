@@ -18,7 +18,7 @@ The source baseline had nine passing Rust tests and formatting failures. Live pr
 | 5 Reusable features | Reviewed parameterized skills, durable bounded schedules, qualified MCP/voice integration |
 | 6 Release and optimization | Fixed evaluation suite, quantization/reference comparisons, signing/TUF, reproducible improvements without security regression |
 
-See [implementation status](implementation-status.md) for achieved versus open exits. Do not skip a gate by marking a stub available.
+See the current [implementation ledger](../v3/implementation-ledger.md) for achieved versus open work. Do not skip a gate by marking a stub available.
 
 ## Encrypted data transition
 
@@ -76,3 +76,7 @@ Report cold and warm distributions separately. Include failures, timeouts, cance
 ## Release evidence handling
 
 `evals/release-gates.json` records required evidence categories with explicit pending states. `scripts/check-v2-release.py` validates completeness before publication. It does not produce passing measurements or authorize external publishing. A trusted release reviewer must bind reports to the current revision, signed model/VM artifacts and exact platform configuration. Pin dependencies/CI, generate an SBOM, scan dependencies, sign app/helpers/plugins/model/VM manifests and implement TUF expiry/rollback/root rotation before production.
+
+The release checker requires the complete gate set and binds passing proof to a current source digest, bounded-age timestamp, gate/proof category and hashed underlying artifacts. Source identity excludes generated Python bytecode and remains stable when a deletion is committed. These checks validate the evidence envelope; they cannot establish that a human-authored device report is truthful. Public tag runs require passing qualification; manual dispatch cannot run the publication job.
+
+Local checks are recorded in `evals/evidence/`. Reports of build/fixture/signature checks remain development evidence and cannot substitute for the required device, model or security-evaluation proof categories. Full XCTest requires Xcode; a Command Line Tools installation can run `python3 scripts/check-macos-signatures.py` for read-only checks against the actual compiled signing adapter. The latter does not launch an application or measure native permission/approval UX.

@@ -73,11 +73,24 @@ pub struct CapabilityGrant {
 
 #[derive(Debug, Default, Clone)]
 pub struct CapabilityBroker {
-    grants: Arc<RwLock<HashMap<Uuid, CapabilityGrant>>>,
+    grants: Arc<RwLock<HashMap<Uuid, StoredGrant>>>,
     cancelled: Arc<tokio::sync::Mutex<BTreeSet<Uuid>>>,
+    runtime: Option<crate::runtime::RunRegistry>,
+}
+
+#[derive(Debug)]
+struct StoredGrant {
+    grant: CapabilityGrant,
+    run: Option<crate::runtime::RunSignal>,
 }
 
 impl CapabilityBroker {
+    pub(crate) fn with_runtime(runtime: crate::runtime::RunRegistry) -> Self {
+        Self {
+            runtime: Some(runtime),
+            ..Default::default()
+        }
+    }
     pub async fn issue(
         &self,
         proposal: &ActionProposal,
@@ -85,6 +98,17 @@ impl CapabilityBroker {
     ) -> CoreResult<CapabilityGrant> {
         let cancelled = self.cancelled.lock().await;
         if cancelled.contains(&proposal.task_id) {
+            return Err(CoreError::Cancelled);
+        }
+        let run = self
+            .runtime
+            .as_ref()
+            .map(|runtime| runtime.current(proposal.task_id))
+            .transpose()?;
+        if run
+            .as_ref()
+            .is_some_and(|run| run.action_retired(proposal.id))
+        {
             return Err(CoreError::Cancelled);
         }
         let (resource, operations) = requirements(&proposal.action)?;
@@ -103,15 +127,29 @@ impl CapabilityBroker {
             remaining_uses: 1,
             revoked: false,
         };
-        self.grants.write().await.insert(grant.id, grant.clone());
+        self.grants.write().await.insert(
+            grant.id,
+            StoredGrant {
+                grant: grant.clone(),
+                run,
+            },
+        );
         Ok(grant)
     }
 
     pub async fn bind_worker(&self, id: Uuid, session: String) -> CoreResult<CapabilityGrant> {
         let mut grants = self.grants.write().await;
-        let grant = grants
+        let stored = grants
             .get_mut(&id)
             .ok_or_else(|| CoreError::CapabilityRejected("Unknown grant".into()))?;
+        if stored
+            .run
+            .as_ref()
+            .is_some_and(|run| run.is_stopped() || run.action_retired(stored.grant.action_id))
+        {
+            return Err(CoreError::Cancelled);
+        }
+        let grant = &mut stored.grant;
         if grant.remaining_uses != 1 || grant.worker_session.is_some() {
             return Err(CoreError::CapabilityRejected(
                 "Grant cannot be rebound".into(),
@@ -128,48 +166,87 @@ impl CapabilityBroker {
         action_id: Uuid,
         expected_domain: ExecutionDomain,
     ) -> CoreResult<CapabilityGrant> {
-        let mut grants = self.grants.write().await;
-        let grant = grants
-            .get_mut(&grant_id)
-            .ok_or_else(|| CoreError::CapabilityRejected("unknown capability".into()))?;
-        if grant.revoked {
-            return Err(CoreError::CapabilityRejected(
-                "capability was revoked".into(),
-            ));
+        loop {
+            let mut grants = self.grants.write().await;
+            let stored = grants
+                .get_mut(&grant_id)
+                .ok_or_else(|| CoreError::CapabilityRejected("unknown capability".into()))?;
+            if stored
+                .run
+                .as_ref()
+                .is_some_and(|run| run.is_stopped() || run.action_retired(stored.grant.action_id))
+            {
+                return Err(CoreError::Cancelled);
+            }
+            if let Some(signal) = stored
+                .run
+                .as_ref()
+                .filter(|signal| signal.is_held())
+                .cloned()
+            {
+                drop(grants);
+                signal.resumed().await?;
+                continue;
+            }
+            let grant = &mut stored.grant;
+            if grant.revoked {
+                return Err(CoreError::CapabilityRejected(
+                    "capability was revoked".into(),
+                ));
+            }
+            if grant.expires_at <= Utc::now() {
+                return Err(CoreError::CapabilityRejected("capability expired".into()));
+            }
+            if grant.task_id != task_id || grant.action_id != action_id {
+                return Err(CoreError::CapabilityRejected(
+                    "capability is bound to another task or action".into(),
+                ));
+            }
+            if grant.domain != expected_domain {
+                return Err(CoreError::CapabilityRejected(
+                    "capability is bound to another executor domain".into(),
+                ));
+            }
+            if grant.remaining_uses == 0 {
+                return Err(CoreError::CapabilityRejected(
+                    "capability was already used".into(),
+                ));
+            }
+            grant.remaining_uses -= 1;
+            return Ok(grant.clone());
         }
-        if grant.expires_at <= Utc::now() {
-            return Err(CoreError::CapabilityRejected("capability expired".into()));
-        }
-        if grant.task_id != task_id || grant.action_id != action_id {
-            return Err(CoreError::CapabilityRejected(
-                "capability is bound to another task or action".into(),
-            ));
-        }
-        if grant.domain != expected_domain {
-            return Err(CoreError::CapabilityRejected(
-                "capability is bound to another executor domain".into(),
-            ));
-        }
-        if grant.remaining_uses == 0 {
-            return Err(CoreError::CapabilityRejected(
-                "capability was already used".into(),
-            ));
-        }
-        grant.remaining_uses -= 1;
-        Ok(grant.clone())
     }
 
-    pub async fn reopen_run(&self, task_id: Uuid) {
-        self.cancelled.lock().await.remove(&task_id);
+    pub async fn reopen_run(&self, task_id: Uuid) -> CoreResult<()> {
+        let mut cancelled = self.cancelled.lock().await;
+        if let Some(runtime) = &self.runtime {
+            runtime.current(task_id)?;
+        }
+        cancelled.remove(&task_id);
+        Ok(())
     }
 
     pub async fn revoke_task(&self, task_id: Uuid) {
         let mut cancelled = self.cancelled.lock().await;
         cancelled.insert(task_id);
-        for grant in self.grants.write().await.values_mut() {
-            if grant.task_id == task_id {
-                grant.revoked = true;
+        for stored in self.grants.write().await.values_mut() {
+            if stored.grant.task_id == task_id {
+                stored.grant.revoked = true;
             }
+        }
+    }
+
+    pub async fn revoke_action(&self, task_id: Uuid, action_id: Uuid) {
+        for stored in self.grants.write().await.values_mut() {
+            if stored.grant.task_id == task_id && stored.grant.action_id == action_id {
+                stored.grant.revoked = true;
+            }
+        }
+    }
+
+    pub async fn revoke_grant(&self, grant_id: Uuid) {
+        if let Some(stored) = self.grants.write().await.get_mut(&grant_id) {
+            stored.grant.revoked = true;
         }
     }
 }
@@ -184,7 +261,7 @@ fn requirements(
             CapabilityResource::NetworkRoute { url: url.clone() },
             BTreeSet::from([Op::Read, Op::Network]),
         ),
-        Action::ReadFile { path, .. } => (
+        Action::ReadFile { path, .. } | Action::ListDirectory { path, .. } => (
             CapabilityResource::File {
                 canonical_path: path.to_string_lossy().into_owned(),
             },
@@ -229,6 +306,7 @@ fn requirements(
             )
         }
         Action::OpenApplication { application }
+        | Action::SetApplicationControl { application, .. }
         | Action::CloseApplication { application }
         | Action::ClickElement { application, .. }
         | Action::TypeText { application, .. }
@@ -426,6 +504,37 @@ mod v2_tests {
         }
     }
     #[tokio::test]
+    async fn interrupt_hold_prevents_grant_consumption_until_resume_and_stop_wins() {
+        let registry = crate::runtime::RunRegistry::default();
+        let broker = CapabilityBroker::with_runtime(registry.clone());
+        let p = proposal();
+        let _lease = registry.begin(p.task_id).unwrap();
+        let grant = broker.issue(&p, ExecutionDomain::Native).await.unwrap();
+        registry.hold(p.task_id, true);
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(5),
+                broker.consume(grant.id, p.task_id, p.id, ExecutionDomain::Native)
+            )
+            .await
+            .is_err()
+        );
+        registry.hold(p.task_id, false);
+        broker
+            .consume(grant.id, p.task_id, p.id, ExecutionDomain::Native)
+            .await
+            .unwrap();
+        let second = broker.issue(&p, ExecutionDomain::Native).await.unwrap();
+        registry.hold(p.task_id, true);
+        registry.stop(p.task_id);
+        assert!(matches!(
+            broker
+                .consume(second.id, p.task_id, p.id, ExecutionDomain::Native)
+                .await,
+            Err(CoreError::Cancelled)
+        ));
+    }
+    #[tokio::test]
     async fn capabilities_are_single_use_worker_bound_and_revoked_with_the_run() {
         let broker = CapabilityBroker::default();
         let p = proposal();
@@ -458,6 +567,174 @@ mod v2_tests {
         );
         broker.revoke_task(p.task_id).await;
         assert!(broker.issue(&p, ExecutionDomain::Native).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn revoking_one_action_grant_preserves_other_actions_in_the_same_task() {
+        let broker = CapabilityBroker::default();
+        let first = proposal();
+        let mut second = first.clone();
+        second.id = Uuid::new_v4();
+        let first_grant = broker.issue(&first, ExecutionDomain::Native).await.unwrap();
+        let second_grant = broker
+            .issue(&second, ExecutionDomain::Native)
+            .await
+            .unwrap();
+
+        broker.revoke_action(first.task_id, first.id).await;
+
+        assert!(matches!(
+            broker
+                .consume(
+                    first_grant.id,
+                    first.task_id,
+                    first.id,
+                    ExecutionDomain::Native
+                )
+                .await,
+            Err(CoreError::CapabilityRejected(_))
+        ));
+        assert!(
+            broker
+                .consume(
+                    second_grant.id,
+                    second.task_id,
+                    second.id,
+                    ExecutionDomain::Native
+                )
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn revoking_one_duplicate_grant_preserves_the_original_action_grant() {
+        let broker = CapabilityBroker::default();
+        let p = proposal();
+        let original = broker.issue(&p, ExecutionDomain::Native).await.unwrap();
+        let duplicate = broker.issue(&p, ExecutionDomain::Native).await.unwrap();
+
+        broker.revoke_grant(duplicate.id).await;
+
+        assert!(matches!(
+            broker
+                .consume(duplicate.id, p.task_id, p.id, ExecutionDomain::Native)
+                .await,
+            Err(CoreError::CapabilityRejected(_))
+        ));
+        assert!(
+            broker
+                .consume(original.id, p.task_id, p.id, ExecutionDomain::Native)
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn retiring_one_step_invalidates_its_grants_without_revoking_unchanged_steps() {
+        let registry = crate::runtime::RunRegistry::default();
+        let broker = CapabilityBroker::with_runtime(registry.clone());
+        let retired = proposal();
+        let mut kept = retired.clone();
+        kept.id = Uuid::new_v4();
+        let _lease = registry.begin(retired.task_id).unwrap();
+        let first = broker
+            .issue(&retired, ExecutionDomain::Native)
+            .await
+            .unwrap();
+        let second = broker.issue(&kept, ExecutionDomain::Native).await.unwrap();
+        registry.hold(retired.task_id, true);
+        registry.retire_actions(retired.task_id, &BTreeSet::from([retired.id]));
+        registry.hold(retired.task_id, false);
+        assert!(matches!(
+            broker
+                .consume(
+                    first.id,
+                    retired.task_id,
+                    retired.id,
+                    ExecutionDomain::Native
+                )
+                .await,
+            Err(CoreError::Cancelled)
+        ));
+        assert!(matches!(
+            broker.bind_worker(first.id, "late-worker".into()).await,
+            Err(CoreError::Cancelled)
+        ));
+        assert!(matches!(
+            broker.issue(&retired, ExecutionDomain::Native).await,
+            Err(CoreError::Cancelled)
+        ));
+        broker
+            .consume(second.id, kept.task_id, kept.id, ExecutionDomain::Native)
+            .await
+            .unwrap();
+    }
+    #[tokio::test]
+    async fn stopped_and_completed_generations_cannot_reuse_unused_grants() {
+        let registry = crate::runtime::RunRegistry::default();
+        let broker = CapabilityBroker::with_runtime(registry.clone());
+        let p = proposal();
+        let lease = registry.begin(p.task_id).unwrap();
+        let old = broker.issue(&p, ExecutionDomain::Native).await.unwrap();
+
+        // No asynchronous capability revocation has run. The root signal alone
+        // must prevent a grant from being bound, consumed or reissued.
+        registry.stop(p.task_id);
+        assert!(matches!(
+            broker
+                .consume(old.id, p.task_id, p.id, ExecutionDomain::Native)
+                .await,
+            Err(CoreError::Cancelled)
+        ));
+        assert!(matches!(
+            broker.bind_worker(old.id, "stopped-worker".into()).await,
+            Err(CoreError::Cancelled)
+        ));
+        assert!(matches!(
+            broker.issue(&p, ExecutionDomain::Native).await,
+            Err(CoreError::Cancelled)
+        ));
+        assert!(matches!(
+            broker.reopen_run(p.task_id).await,
+            Err(CoreError::Cancelled)
+        ));
+        registry.persisted_stop(p.task_id);
+        drop(lease);
+
+        // Reusing a task identity for recovery cannot revive an earlier grant.
+        let next = registry.begin(p.task_id).unwrap();
+        broker.reopen_run(p.task_id).await.unwrap();
+        assert!(matches!(
+            broker
+                .consume(old.id, p.task_id, p.id, ExecutionDomain::Native)
+                .await,
+            Err(CoreError::Cancelled)
+        ));
+        let fresh = broker.issue(&p, ExecutionDomain::Native).await.unwrap();
+        broker
+            .consume(fresh.id, p.task_id, p.id, ExecutionDomain::Native)
+            .await
+            .unwrap();
+        assert!(
+            broker
+                .consume(fresh.id, p.task_id, p.id, ExecutionDomain::Native)
+                .await
+                .is_err()
+        );
+        let unused = broker.issue(&p, ExecutionDomain::Native).await.unwrap();
+        drop(next);
+        assert!(!registry.is_active(p.task_id));
+        assert!(
+            !registry.is_stopped(p.task_id),
+            "Normal completion needs no Stop tombstone"
+        );
+        assert!(matches!(
+            broker
+                .consume(unused.id, p.task_id, p.id, ExecutionDomain::Native)
+                .await,
+            Err(CoreError::Cancelled)
+        ));
     }
     #[tokio::test]
     async fn every_cancel_issue_interleaving_leaves_no_live_authority() {
