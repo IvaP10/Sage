@@ -54,6 +54,17 @@ impl From<rusqlite::Error> for CoreError {
 }
 
 #[cfg(feature = "qwen35-evaluation")]
+impl From<sage_qwen35_runtime::Qwen35Error> for CoreError {
+    fn from(error: sage_qwen35_runtime::Qwen35Error) -> Self {
+        match error {
+            sage_qwen35_runtime::Qwen35Error::Model(message) => Self::Model(message),
+            sage_qwen35_runtime::Qwen35Error::ResourceUnavailable(message) => Self::Busy(message),
+            sage_qwen35_runtime::Qwen35Error::Cancelled => Self::Cancelled,
+        }
+    }
+}
+
+#[cfg(feature = "qwen35-evaluation")]
 impl From<sage_model_package::PackageError> for CoreError {
     fn from(error: sage_model_package::PackageError) -> Self {
         Self::Model(error.to_string())

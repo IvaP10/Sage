@@ -1,0 +1,16 @@
+[package]
+name = "sage-inference-math"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+sage-kernels = { path = "../sage-kernels" }
+sage-metal = { path = "../sage-metal" }
+zeroize.workspace = true
+
+[lib]
+name = "sage_inference_math"
+path = "src/lib.rs"

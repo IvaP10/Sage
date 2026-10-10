@@ -6,6 +6,7 @@
 //! separate from user text so literal token-looking text cannot alter a chat
 //! header or end a message.
 
+use std::borrow::Cow;
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::fmt;
@@ -48,6 +49,7 @@ const EXPECTED_MERGE_COUNT: usize = 247_587;
 const MAX_TEXT_PIECE_BYTE_LENGTH: usize = 4 * 1024;
 const MAX_TEXT_PIECE_TABLE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_MULTIMODAL_IMAGES: usize = 8;
+const NO_TOKEN_NODE: u32 = u32::MAX;
 const PRETOKEN_PATTERN: &str = r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?[\p{L}\p{M}]+|\p{N}| ?[^\s\p{L}\p{M}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -180,21 +182,35 @@ struct MergeRule {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[repr(C)]
 struct MergeCandidate {
     rank: u32,
-    left: usize,
-    right: usize,
+    left: u32,
+    right: u32,
     left_generation: u32,
     right_generation: u32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
+#[repr(C)]
 struct TokenNode {
     token: u32,
-    previous: Option<usize>,
-    next: Option<usize>,
+    previous: u32,
+    next: u32,
     generation: u32,
     alive: bool,
+}
+
+/// Scratch is shared across all message fragments in one prompt encoding.
+/// Node links and heap indices are u32 because every accepted input is bounded
+/// to 256 KiB; this cuts the link/queue working set and retains allocations
+/// across short BPE pieces in the same prompt.
+#[derive(Default)]
+struct TokenizerWorkspace {
+    characters: Vec<(usize, char)>,
+    ranges: Vec<std::ops::Range<usize>>,
+    nodes: Vec<TokenNode>,
+    merge_candidates: BinaryHeap<Reverse<MergeCandidate>>,
 }
 
 #[derive(Deserialize)]
@@ -454,7 +470,8 @@ impl Qwen35Tokenizer {
     /// literal text; only the trusted chat formatter below can emit framing IDs.
     pub fn encode_text(&self, text: &str) -> CoreResult<Vec<u32>> {
         let mut encoded = Vec::new();
-        self.encode_text_into(text, &mut encoded, 8_192)?;
+        let mut workspace = TokenizerWorkspace::default();
+        self.encode_text_into(text, &mut encoded, 8_192, &mut workspace)?;
         Ok(encoded)
     }
 
@@ -477,22 +494,23 @@ impl Qwen35Tokenizer {
         }
 
         let mut output = Vec::new();
+        let mut workspace = TokenizerWorkspace::default();
         for message in messages {
             output.push(self.special.message_start);
-            self.encode_text_into(message.role.as_str(), &mut output, 8_192)?;
-            self.encode_text_into("\n", &mut output, 8_192)?;
-            self.encode_text_into(message.content, &mut output, 8_192)?;
+            self.encode_text_into(message.role.as_str(), &mut output, 8_192, &mut workspace)?;
+            self.encode_text_into("\n", &mut output, 8_192, &mut workspace)?;
+            self.encode_text_into(message.content, &mut output, 8_192, &mut workspace)?;
             output.push(self.special.message_end);
-            self.encode_text_into("\n", &mut output, 8_192)?;
+            self.encode_text_into("\n", &mut output, 8_192, &mut workspace)?;
             if output.len() > 8_192 {
                 return Err(model_error("chat exceeds Sage's 8,192-token context bound"));
             }
         }
         if add_generation_prompt {
             output.push(self.special.message_start);
-            self.encode_text_into("assistant\n", &mut output, 8_192)?;
+            self.encode_text_into("assistant\n", &mut output, 8_192, &mut workspace)?;
             output.push(self.special.think);
-            self.encode_text_into("\n", &mut output, 8_192)?;
+            self.encode_text_into("\n", &mut output, 8_192, &mut workspace)?;
         }
         if output.len() > 8_192 {
             return Err(model_error("chat exceeds Sage's 8,192-token context bound"));
@@ -557,11 +575,12 @@ impl Qwen35Tokenizer {
         let mut output = Vec::new();
         let mut image_spans = Vec::with_capacity(merged_token_counts.len());
         let mut image_index = 0usize;
+        let mut workspace = TokenizerWorkspace::default();
         for message in messages {
             output.push(self.special.message_start);
-            self.encode_text_into(message.role.as_str(), &mut output, 8_192)?;
-            self.encode_text_into("\n", &mut output, 8_192)?;
-            self.encode_text_into(message.content, &mut output, 8_192)?;
+            self.encode_text_into(message.role.as_str(), &mut output, 8_192, &mut workspace)?;
+            self.encode_text_into("\n", &mut output, 8_192, &mut workspace)?;
+            self.encode_text_into(message.content, &mut output, 8_192, &mut workspace)?;
             if message.role == ChatRole::User {
                 for token_count in merged_token_counts {
                     self.encode_text_into(
@@ -571,6 +590,7 @@ impl Qwen35Tokenizer {
                         ),
                         &mut output,
                         8_192,
+                        &mut workspace,
                     )?;
                     let (vision_start, image_pad, vision_end) = image_tokens.ok_or_else(|| {
                         model_error("Qwen image framing tokens were not initialized")
@@ -598,7 +618,7 @@ impl Qwen35Tokenizer {
                 }
             }
             output.push(self.special.message_end);
-            self.encode_text_into("\n", &mut output, 8_192)?;
+            self.encode_text_into("\n", &mut output, 8_192, &mut workspace)?;
             if output.len() > 8_192 {
                 return Err(model_error(
                     "multimodal chat exceeds Sage's 8,192-token context bound",
@@ -612,9 +632,9 @@ impl Qwen35Tokenizer {
         }
         if add_generation_prompt {
             output.push(self.special.message_start);
-            self.encode_text_into("assistant\n", &mut output, 8_192)?;
+            self.encode_text_into("assistant\n", &mut output, 8_192, &mut workspace)?;
             output.push(self.special.think);
-            self.encode_text_into("\n", &mut output, 8_192)?;
+            self.encode_text_into("\n", &mut output, 8_192, &mut workspace)?;
         }
         if output.len() > 8_192 {
             return Err(model_error(
@@ -700,6 +720,36 @@ impl Qwen35Tokenizer {
         }
     }
 
+    #[cfg(feature = "core-test-support")]
+    #[doc(hidden)]
+    pub fn for_test_text_pieces(pieces: &[&[u8]]) -> Self {
+        let total_bytes = pieces.iter().map(|piece| piece.len()).sum();
+        let mut bytes = Vec::with_capacity(total_bytes);
+        let mut ranges = Vec::with_capacity(pieces.len());
+        for piece in pieces {
+            let start = bytes.len();
+            bytes.extend_from_slice(piece);
+            ranges.push(Some((start, piece.len())));
+        }
+        let text_pieces = TextPieceTable { ranges, bytes };
+        let text_token_ids_by_first_byte =
+            build_text_token_first_byte_index(&text_pieces).expect("valid test text pieces");
+        Self {
+            tokens: vec![String::new(); pieces.len()],
+            token_ids: HashMap::new(),
+            merge_rules: HashMap::new(),
+            byte_token_ids: [0; 256],
+            character_to_byte: HashMap::new(),
+            text_pieces,
+            text_token_ids_by_first_byte,
+            special: SpecialTokens {
+                message_start: 0,
+                message_end: 0,
+                think: 0,
+            },
+        }
+    }
+
     pub fn unicode_data_version(&self) -> &'static str {
         unicode15::data_version()
     }
@@ -709,13 +759,41 @@ impl Qwen35Tokenizer {
         text: &str,
         output: &mut Vec<u32>,
         max_tokens: usize,
+        workspace: &mut TokenizerWorkspace,
     ) -> CoreResult<()> {
         if text.len() > MAX_TEXT_BYTES {
             return Err(model_error("text exceeds Sage's 256 KiB tokenizer bound"));
         }
-        let normalized = unicode15::normalize_nfc(text)?;
-        for range in pretoken_ranges(&normalized) {
-            self.encode_piece(&normalized[range], output, max_tokens)?;
+        // ASCII is already NFC. Borrow it directly so ordinary English prompts
+        // do not allocate the normalizer's decomposition and output buffers.
+        // Every non-ASCII input still goes through Sage's pinned Unicode path.
+        let normalized = if text.is_ascii() {
+            Cow::Borrowed(text)
+        } else {
+            Cow::Owned(unicode15::normalize_nfc(text)?)
+        };
+        self.encode_normalized_into(normalized.as_ref(), output, max_tokens, workspace)
+    }
+
+    fn encode_normalized_into(
+        &self,
+        normalized: &str,
+        output: &mut Vec<u32>,
+        max_tokens: usize,
+        workspace: &mut TokenizerWorkspace,
+    ) -> CoreResult<()> {
+        let range_budget = max_tokens.saturating_sub(output.len());
+        pretoken_ranges_into(
+            normalized,
+            &mut workspace.characters,
+            &mut workspace.ranges,
+            range_budget,
+        )?;
+        workspace.characters.clear();
+        for index in 0..workspace.ranges.len() {
+            let start = workspace.ranges[index].start;
+            let end = workspace.ranges[index].end;
+            self.encode_piece(&normalized[start..end], output, max_tokens, workspace)?;
         }
         if output.len() > max_tokens {
             return Err(model_error("tokenized input exceeds Sage's token bound"));
@@ -728,35 +806,51 @@ impl Qwen35Tokenizer {
         piece: &str,
         output: &mut Vec<u32>,
         max_tokens: usize,
+        workspace: &mut TokenizerWorkspace,
     ) -> CoreResult<()> {
-        let mut nodes = Vec::with_capacity(piece.len());
+        if piece.len() >= u32::MAX as usize {
+            return Err(model_error("tokenizer piece exceeds its node-index bound"));
+        }
+        let TokenizerWorkspace {
+            nodes,
+            merge_candidates,
+            ..
+        } = workspace;
+        nodes.clear();
+        if nodes.capacity() < piece.len() {
+            nodes.reserve(piece.len());
+        }
+        merge_candidates.clear();
         for (index, byte) in piece.bytes().enumerate() {
             let token = self.byte_token_ids[byte as usize];
             nodes.push(TokenNode {
                 token,
-                previous: index.checked_sub(1),
-                next: None,
+                previous: if index == 0 {
+                    NO_TOKEN_NODE
+                } else {
+                    (index - 1) as u32
+                },
+                next: NO_TOKEN_NODE,
                 generation: 0,
                 alive: true,
             });
             if index > 0 {
-                nodes[index - 1].next = Some(index);
+                nodes[index - 1].next = index as u32;
             }
         }
         if nodes.is_empty() {
             return Ok(());
         }
 
-        let mut queue = BinaryHeap::new();
         for left in 0..nodes.len().saturating_sub(1) {
-            push_merge_candidate(&nodes, &self.merge_rules, left, &mut queue);
+            push_merge_candidate(nodes, &self.merge_rules, left as u32, merge_candidates);
         }
-        while let Some(Reverse(candidate)) = queue.pop() {
-            let left = candidate.left;
-            let right = candidate.right;
+        while let Some(Reverse(candidate)) = merge_candidates.pop() {
+            let left = candidate.left as usize;
+            let right = candidate.right as usize;
             if !nodes[left].alive
                 || !nodes[right].alive
-                || nodes[left].next != Some(right)
+                || nodes[left].next != candidate.right
                 || nodes[left].generation != candidate.left_generation
                 || nodes[right].generation != candidate.right_generation
             {
@@ -778,17 +872,19 @@ impl Qwen35Tokenizer {
             nodes[left].next = after;
             nodes[right].alive = false;
             nodes[right].generation = nodes[right].generation.wrapping_add(1);
-            if let Some(after) = after {
-                nodes[after].previous = Some(left);
+            if after != NO_TOKEN_NODE {
+                nodes[after as usize].previous = candidate.left;
             }
-            if let Some(before) = nodes[left].previous {
-                push_merge_candidate(&nodes, &self.merge_rules, before, &mut queue);
+            let before = nodes[left].previous;
+            if before != NO_TOKEN_NODE {
+                push_merge_candidate(nodes, &self.merge_rules, before, merge_candidates);
             }
-            push_merge_candidate(&nodes, &self.merge_rules, left, &mut queue);
+            push_merge_candidate(nodes, &self.merge_rules, candidate.left, merge_candidates);
         }
 
-        let mut cursor = Some(0usize);
-        while let Some(index) = cursor {
+        let mut cursor = 0u32;
+        while cursor != NO_TOKEN_NODE {
+            let index = cursor as usize;
             if nodes[index].alive {
                 output.push(nodes[index].token);
                 if output.len() > max_tokens {
@@ -939,35 +1035,60 @@ fn byte_level_alphabet() -> ([char; 256], HashMap<u32, u8>) {
 fn push_merge_candidate(
     nodes: &[TokenNode],
     rules: &HashMap<(u32, u32), MergeRule>,
-    left: usize,
+    left: u32,
     queue: &mut BinaryHeap<Reverse<MergeCandidate>>,
 ) {
-    let Some(right) = nodes[left].next else {
-        return;
-    };
-    if !nodes[left].alive || !nodes[right].alive {
+    let left_index = left as usize;
+    let right = nodes[left_index].next;
+    if right == NO_TOKEN_NODE {
         return;
     }
-    if let Some(rule) = rules.get(&(nodes[left].token, nodes[right].token)) {
+    let right_index = right as usize;
+    if !nodes[left_index].alive || !nodes[right_index].alive {
+        return;
+    }
+    if let Some(rule) = rules.get(&(nodes[left_index].token, nodes[right_index].token)) {
         queue.push(Reverse(MergeCandidate {
             rank: rule.rank,
             left,
             right,
-            left_generation: nodes[left].generation,
-            right_generation: nodes[right].generation,
+            left_generation: nodes[left_index].generation,
+            right_generation: nodes[right_index].generation,
         }));
     }
 }
 
+#[cfg(test)]
 fn pretoken_ranges(text: &str) -> Vec<std::ops::Range<usize>> {
-    let characters = text.char_indices().collect::<Vec<_>>();
-    let mut ranges = Vec::with_capacity(characters.len());
+    let mut characters = Vec::new();
+    let mut ranges = Vec::new();
+    pretoken_ranges_into(text, &mut characters, &mut ranges, usize::MAX)
+        .expect("unbounded test reference has no range limit");
+    ranges
+}
+
+fn pretoken_ranges_into(
+    text: &str,
+    characters: &mut Vec<(usize, char)>,
+    ranges: &mut Vec<std::ops::Range<usize>>,
+    maximum_ranges: usize,
+) -> CoreResult<()> {
+    characters.clear();
+    characters.extend(text.char_indices());
+    ranges.clear();
+    // Most text pieces are words or punctuation runs. Start with a small
+    // bounded reserve and grow only when the observed split count needs it;
+    // a 256 KiB single-word prompt should not reserve 256 KiB ranges.
+    let initial_ranges = characters.len().min(maximum_ranges).min(256);
+    if ranges.capacity() < initial_ranges {
+        ranges.reserve(initial_ranges);
+    }
     let mut index = 0;
     while index < characters.len() {
         let start = index;
         let current = characters[index].1;
 
-        if let Some(end) = contraction_end(&characters, index) {
+        if let Some(end) = contraction_end(characters, index) {
             index = end;
         } else if unicode15::is_letter(current) || unicode15::is_mark(current) {
             index += 1;
@@ -1034,9 +1155,15 @@ fn pretoken_ranges(text: &str) -> Vec<std::ops::Range<usize>> {
             .get(index)
             .map(|(byte, _)| *byte)
             .unwrap_or(text.len());
+        // Every nonempty pre-token produces at least one BPE token, because
+        // merges combine nonempty pieces. Reject a lower bound that already
+        // exceeds the caller's remaining token budget before growing range scratch.
+        if ranges.len() >= maximum_ranges {
+            return Err(model_error("tokenized input exceeds Sage's token bound"));
+        }
         ranges.push(start_byte..end_byte);
     }
-    ranges
+    Ok(())
 }
 
 fn contraction_end(characters: &[(usize, char)], start: usize) -> Option<usize> {
@@ -1131,8 +1258,8 @@ fn build_text_token_first_byte_index(text_pieces: &TextPieceTable) -> CoreResult
 #[cfg(test)]
 mod tests {
     use super::{
-        ChatMessage, ChatRole, Qwen35Tokenizer, SpecialTokens, TOKEN_COUNT,
-        TextPieceCandidateWorkspace, TextPieceTable, build_text_piece_table,
+        ChatMessage, ChatRole, MergeRule, Qwen35Tokenizer, SpecialTokens, TOKEN_COUNT,
+        TextPieceCandidateWorkspace, TextPieceTable, TokenizerWorkspace, build_text_piece_table,
         build_text_token_first_byte_index, byte_level_alphabet,
     };
     use crate::unicode15;
@@ -1165,6 +1292,34 @@ mod tests {
                 think: 248_068,
             },
         }
+    }
+
+    fn synthetic_bpe_tokenizer() -> Qwen35Tokenizer {
+        let mut tokenizer = tokenizer();
+        tokenizer.merge_rules = HashMap::from([
+            (
+                (b'a' as u32, b'b' as u32),
+                MergeRule {
+                    rank: 0,
+                    result: 256,
+                },
+            ),
+            (
+                (b'c' as u32, b'd' as u32),
+                MergeRule {
+                    rank: 1,
+                    result: 257,
+                },
+            ),
+            (
+                (256, 257),
+                MergeRule {
+                    rank: 2,
+                    result: 258,
+                },
+            ),
+        ]);
+        tokenizer
     }
 
     #[test]
@@ -1212,6 +1367,177 @@ mod tests {
 
         permitted.fill(false);
         assert_eq!(workspace.iter(&tokenizer, &permitted).count(), 0);
+    }
+
+    #[test]
+    fn synthetic_bpe_matches_the_slow_rank_order_reference() {
+        let tokenizer = synthetic_bpe_tokenizer();
+        for text in ["abcd", "abcd abcd", "cabcd", "aabcd", "abcd!abcd"] {
+            let actual = tokenizer.encode_text(text).unwrap();
+            assert_eq!(actual, slow_reference_encode(&tokenizer, text), "{text:?}");
+        }
+
+        let messages = [
+            ChatMessage {
+                role: ChatRole::User,
+                content: "abcd abcd",
+            },
+            ChatMessage {
+                role: ChatRole::Assistant,
+                content: "cabcd!abcd",
+            },
+        ];
+        assert_eq!(
+            tokenizer.encode_chat(&messages, true).unwrap(),
+            slow_reference_chat(&tokenizer, &messages, true)
+        );
+    }
+
+    #[test]
+    fn tokenizer_scratch_bounds_ranges_by_the_remaining_token_budget() {
+        let tokenizer = synthetic_bpe_tokenizer();
+        let mut workspace = super::TokenizerWorkspace::default();
+        let mut output = Vec::new();
+        assert!(
+            tokenizer
+                .encode_text_into("12345", &mut output, 4, &mut workspace)
+                .is_err()
+        );
+        assert!(output.is_empty());
+
+        let long_word = "a".repeat(1024);
+        super::pretoken_ranges_into(
+            &long_word,
+            &mut workspace.characters,
+            &mut workspace.ranges,
+            8_192,
+        )
+        .unwrap();
+        assert_eq!(workspace.ranges.len(), 1);
+        assert!(workspace.ranges.capacity() <= 256);
+    }
+
+    #[test]
+    fn bounded_bpe_hot_records_use_compact_32_bit_links() {
+        #[cfg(target_pointer_width = "64")]
+        #[repr(C)]
+        struct PreviousTokenNodeLayout {
+            _token: u32,
+            _previous: Option<usize>,
+            _next: Option<usize>,
+            _generation: u32,
+            _alive: bool,
+        }
+        #[cfg(target_pointer_width = "64")]
+        #[repr(C)]
+        struct PreviousMergeCandidateLayout {
+            _rank: u32,
+            _left: usize,
+            _right: usize,
+            _left_generation: u32,
+            _right_generation: u32,
+        }
+
+        assert_eq!(std::mem::size_of::<super::TokenNode>(), 20);
+        assert_eq!(std::mem::size_of::<super::MergeCandidate>(), 20);
+        #[cfg(target_pointer_width = "64")]
+        {
+            assert_eq!(std::mem::size_of::<PreviousTokenNodeLayout>(), 48);
+            assert_eq!(std::mem::size_of::<PreviousMergeCandidateLayout>(), 32);
+        }
+    }
+
+    #[test]
+    #[ignore = "release-mode synthetic tokenizer baseline and scratch-reuse measurement"]
+    fn tokenizer_scratch_reuse_measurement() {
+        use std::{hint::black_box, time::Instant};
+
+        let tokenizer = synthetic_bpe_tokenizer();
+        let input = "abcd ".repeat(700);
+        let messages = [ChatMessage {
+            role: ChatRole::User,
+            content: &input,
+        }];
+        let expected = tokenizer.encode_chat(&messages, true).unwrap();
+        let mut timings = Vec::with_capacity(301);
+        for _ in 0..301 {
+            let started = Instant::now();
+            let encoded = tokenizer.encode_chat(black_box(&messages), true).unwrap();
+            timings.push(started.elapsed().as_nanos());
+            assert_eq!(encoded, expected);
+            black_box(encoded);
+        }
+        timings.sort_unstable();
+        println!(
+            "input_bytes={} output_tokens={} samples={} p50_ns={} p95_ns={}",
+            input.len(),
+            expected.len(),
+            timings.len(),
+            timings[timings.len() / 2],
+            timings[timings.len() * 95 / 100]
+        );
+    }
+
+    #[test]
+    #[ignore = "release-mode ASCII normalization fast-path measurement"]
+    fn ascii_normalization_fast_path_measurement() {
+        use std::{hint::black_box, time::Instant};
+
+        let tokenizer = synthetic_bpe_tokenizer();
+        let input = "abcd ".repeat(700);
+        let expected = tokenizer.encode_text(&input).unwrap();
+        let mut full_nfc = Vec::with_capacity(301);
+        let mut ascii_borrow = Vec::with_capacity(301);
+
+        for sample in 0..333 {
+            // Alternate order to reduce bias from short-lived host load or
+            // thermal drift. Both paths reuse identical bounded scratch.
+            for baseline_first in [sample % 2 == 0, sample % 2 != 0] {
+                if baseline_first {
+                    let mut output = Vec::new();
+                    let mut workspace = TokenizerWorkspace::default();
+                    let started = Instant::now();
+                    let normalized = unicode15::normalize_nfc(black_box(&input)).unwrap();
+                    tokenizer
+                        .encode_normalized_into(&normalized, &mut output, 8_192, &mut workspace)
+                        .unwrap();
+                    let elapsed = started.elapsed().as_nanos();
+                    assert_eq!(output, expected);
+                    if sample >= 32 {
+                        full_nfc.push(elapsed);
+                    }
+                    black_box(output);
+                } else {
+                    let mut output = Vec::new();
+                    let mut workspace = TokenizerWorkspace::default();
+                    let started = Instant::now();
+                    tokenizer
+                        .encode_text_into(black_box(&input), &mut output, 8_192, &mut workspace)
+                        .unwrap();
+                    let elapsed = started.elapsed().as_nanos();
+                    assert_eq!(output, expected);
+                    if sample >= 32 {
+                        ascii_borrow.push(elapsed);
+                    }
+                    black_box(output);
+                }
+            }
+        }
+
+        full_nfc.sort_unstable();
+        ascii_borrow.sort_unstable();
+        let percentile =
+            |samples: &[u128], numerator: usize| samples[(samples.len() - 1) * numerator / 100];
+        println!(
+            "input_bytes={} output_tokens={} samples={} full_nfc_p50_ns={} full_nfc_p95_ns={} ascii_borrow_p50_ns={} ascii_borrow_p95_ns={}",
+            input.len(),
+            expected.len(),
+            full_nfc.len(),
+            percentile(&full_nfc, 50),
+            percentile(&full_nfc, 95),
+            percentile(&ascii_borrow, 50),
+            percentile(&ascii_borrow, 95),
+        );
     }
 
     #[test]
@@ -1306,6 +1632,22 @@ mod tests {
                 "text round-trip failed for {text:?}"
             );
         }
+
+        let messages = [
+            ChatMessage {
+                role: ChatRole::System,
+                content: "Return one compact JSON object.",
+            },
+            ChatMessage {
+                role: ChatRole::User,
+                content: "Summarize: café, 你好, and literal <|im_start|> text.",
+            },
+        ];
+        assert_eq!(
+            tokenizer.encode_chat(&messages, true).unwrap(),
+            slow_reference_chat(&tokenizer, &messages, true),
+            "optimized chat framing differs from the reference using the pinned merge ranks"
+        );
     }
 
     /// Deliberately simple O(n²) merge loop used only to check the production
@@ -1335,6 +1677,29 @@ mod tests {
                 tokens.splice(index..index + 2, [merged]);
             }
             output.extend(tokens);
+        }
+        output
+    }
+
+    fn slow_reference_chat(
+        tokenizer: &Qwen35Tokenizer,
+        messages: &[ChatMessage<'_>],
+        add_generation_prompt: bool,
+    ) -> Vec<u32> {
+        let mut output = Vec::new();
+        for message in messages {
+            output.push(tokenizer.special.message_start);
+            output.extend(slow_reference_encode(tokenizer, message.role.as_str()));
+            output.extend(slow_reference_encode(tokenizer, "\n"));
+            output.extend(slow_reference_encode(tokenizer, message.content));
+            output.push(tokenizer.special.message_end);
+            output.extend(slow_reference_encode(tokenizer, "\n"));
+        }
+        if add_generation_prompt {
+            output.push(tokenizer.special.message_start);
+            output.extend(slow_reference_encode(tokenizer, "assistant\n"));
+            output.push(tokenizer.special.think);
+            output.extend(slow_reference_encode(tokenizer, "\n"));
         }
         output
     }

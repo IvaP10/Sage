@@ -392,6 +392,132 @@ impl NativeExecutor {
             rollback: Some(rollback),
         })
     }
+
+    async fn execute_streamed_read(
+        &self,
+        compiled: &CompiledAction,
+        capability: &CapabilityGrant,
+        streams: &mut crate::procedure_stream::ProcedureNodeStreams,
+    ) -> CoreResult<ExecutionReceipt> {
+        let proposal = &compiled.proposal;
+        let Action::ReadFile { path, max_bytes } = &proposal.action else {
+            return Err(CoreError::ExecutorUnavailable(
+                "The native stream producer currently accepts only file reads".into(),
+            ));
+        };
+        if proposal
+            .metadata
+            .get("procedure_stream_node")
+            .map(String::as_str)
+            != Some("true")
+        {
+            return Err(CoreError::InvalidAction(
+                "Streamed file reads require a procedure-bound stream endpoint".into(),
+            ));
+        }
+        let crate::domain::ExpectedOutcome::FileReadMatchesStream {
+            path: expected_path,
+            channel_id,
+            producer_node,
+            output_port,
+            consumer_node,
+            maximum_bytes,
+        } = &proposal.expected_outcome
+        else {
+            return Err(CoreError::VerificationFailed(
+                "Streamed file read has no exact, independently verified output contract".into(),
+            ));
+        };
+        if expected_path != path
+            || producer_node
+                != proposal
+                    .metadata
+                    .get("procedure_node_id")
+                    .map(String::as_str)
+                    .unwrap_or_default()
+            || *maximum_bytes > *max_bytes
+            || *maximum_bytes > super::files::MAX_BYTES
+        {
+            return Err(CoreError::VerificationFailed(
+                "Streamed file read differs from its approved path or byte bound".into(),
+            ));
+        }
+        require_exact_file(capability, path)?;
+        if !streams.inputs_mut().is_empty() || streams.outputs_mut().len() != 1 {
+            return Err(CoreError::InvalidAction(
+                "A streamed file read requires exactly one output and no input streams".into(),
+            ));
+        }
+        let output = streams
+            .outputs_mut()
+            .get_mut(output_port)
+            .ok_or_else(|| CoreError::InvalidAction("File output stream is missing".into()))?;
+        if output.channel_id() != channel_id
+            || output.producer_node() != producer_node
+            || output.consumer_node() != consumer_node
+            || output.output_port().name != *output_port
+            || output.output_port().value_type != crate::world_model::PortType::Bytes
+            || output.maximum_total_bytes() != *maximum_bytes
+        {
+            return Err(CoreError::VerificationFailed(
+                "File output stream differs from its exact declared channel and port".into(),
+            ));
+        }
+
+        let prepared = self.files.take(proposal, capability)?;
+        let stream_limit = *maximum_bytes;
+        let item_limit = output.maximum_item_bytes();
+        let (read_sender, mut read_receiver) = tokio::sync::mpsc::channel(1);
+        let read = super::io::bounded_stream_read(move |cancelled| {
+            prepared.read_stream(stream_limit, item_limit, read_sender, cancelled)
+        });
+        tokio::pin!(read);
+        let mut read_result = None;
+        loop {
+            tokio::select! {
+                result = &mut read, if read_result.is_none() => match result {
+                    Ok(result) => read_result = Some(result),
+                    Err(error) => return Err(error),
+                },
+                item = read_receiver.recv() => match item {
+                    Some(super::files::StreamReadOutput::Chunk(mut bytes)) => {
+                        output.send(std::mem::take(&mut *bytes)).await?;
+                    }
+                    Some(super::files::StreamReadOutput::Finish) => {
+                        if read_result.is_none() {
+                            read_result = Some(read.await?);
+                        }
+                        output.finish().await?;
+                        break;
+                    }
+                    None => {
+                        if read_result.is_none() {
+                            let _ = read.await?;
+                        }
+                        return Err(CoreError::VerificationFailed(
+                            "File reader closed without its explicit stream terminator".into(),
+                        ));
+                    }
+                }
+            }
+        }
+        let (stream_sha256, bytes_read) = read_result.ok_or_else(|| {
+            CoreError::VerificationFailed("Streamed file read has no settled receipt".into())
+        })?;
+        Ok(ExecutionReceipt {
+            executor: self.name().into(),
+            summary: format!("streamed {bytes_read} bytes from {}", path.display()),
+            transient_data: json!({
+                "stream_channel_id": channel_id,
+                "stream_producer_node": producer_node,
+                "stream_output_port": output_port,
+                "stream_consumer_node": consumer_node,
+                "stream_sha256": stream_sha256,
+                "bytes_read": bytes_read,
+            }),
+            rollback: None,
+        })
+    }
 }
 
 #[async_trait]
@@ -427,8 +553,20 @@ impl Executor for NativeExecutor {
         let Some(streams) = streams.filter(|streams| !streams.is_empty()) else {
             return self.execute_file(action, capability).await;
         };
-        self.execute_streamed_file(action, capability, streams)
-            .await
+        match &action.proposal.action {
+            Action::ReadFile { .. } => {
+                self.execute_streamed_read(action, capability, streams)
+                    .await
+            }
+            Action::WriteFile { .. } => {
+                self.execute_streamed_file(action, capability, streams)
+                    .await
+            }
+            _ => Err(CoreError::ExecutorUnavailable(
+                "The native stream executor currently accepts only bounded file reads and writes"
+                    .into(),
+            )),
+        }
     }
 }
 
@@ -541,6 +679,7 @@ mod tests {
             id: "native-stream-file-write".into(),
             nodes: vec![
                 ProcedureNode {
+                    controller_binding: None,
                     id: "source".into(),
                     depends_on: BTreeSet::new(),
                     outputs: BTreeMap::from([("bytes".into(), output)]),
@@ -552,6 +691,7 @@ mod tests {
                     },
                 },
                 ProcedureNode {
+                    controller_binding: None,
                     id: "sink".into(),
                     depends_on: BTreeSet::new(),
                     outputs: BTreeMap::new(),
@@ -616,14 +756,13 @@ mod tests {
         let store = crate::storage::LocalStore::deferred(&root.join("deferred.db")).unwrap();
         let capabilities = CapabilityBroker::default();
         let grant = capabilities
-            .issue(&proposal, ExecutionDomain::Native)
+            .issue_unprepared_for_test(&proposal, ExecutionDomain::Native)
             .await
             .unwrap();
         let implementation = ImplementationCandidate {
             tier: crate::compiler::InteractionTier::StructuredIntegration,
             executor: ExecutionDomain::Native,
             operation: "write verified byte stream to exact file".into(),
-            requires_fresh_observation: true,
         };
         let compiled = CompiledAction {
             proposal: proposal.clone(),
@@ -679,5 +818,258 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn native_stream_read_forwards_bounded_bytes_and_freshly_verifies_source() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let path = root.join("stream-source.bin");
+        std::fs::write(&path, b"bounded source bytes").unwrap();
+        let task_id = Uuid::new_v4();
+        let channel_id = "file-content";
+        let mut proposal = ActionProposal {
+            id: Uuid::new_v4(),
+            task_id,
+            action: Action::ReadFile {
+                path: path.clone(),
+                max_bytes: 64,
+            },
+            expected_outcome: ExpectedOutcome::UserAnswered,
+            target_resource: path.to_string_lossy().into_owned(),
+            provenance: Provenance::user(),
+            metadata: BTreeMap::from([
+                ("procedure_id".into(), "native-stream-file-write".into()),
+                ("procedure_node_id".into(), "source".into()),
+                ("procedure_stream_node".into(), "true".into()),
+                ("procedure_stream_output".into(), "bytes".into()),
+                ("procedure_stream_channel_id".into(), channel_id.into()),
+                ("procedure_stream_consumer_node".into(), "sink".into()),
+                ("procedure_stream_max_bytes".into(), "64".into()),
+            ]),
+        };
+        crate::verification::bind_required_outcome(&mut proposal).unwrap();
+        let preview = crate::policy::prepared_preview(&proposal).unwrap();
+        assert!(preview.contains("stream its bytes to procedure node sink"));
+        assert!(preview.contains("Output port: bytes"));
+        assert!(matches!(
+            proposal.expected_outcome,
+            ExpectedOutcome::FileReadMatchesStream {
+                ref channel_id,
+                ref producer_node,
+                ref output_port,
+                ref consumer_node,
+                maximum_bytes,
+                ..
+            } if channel_id == "file-content"
+                && producer_node == "source"
+                && output_port == "bytes"
+                && consumer_node == "sink"
+                && maximum_bytes == 64
+        ));
+
+        let files = Arc::new(crate::execution::files::FileBroker::default());
+        files.prepare(&mut proposal).await.unwrap();
+        let store = crate::storage::LocalStore::deferred(&root.join("deferred.db")).unwrap();
+        let capabilities = CapabilityBroker::default();
+        let grant = capabilities
+            .issue_unprepared_for_test(&proposal, ExecutionDomain::Native)
+            .await
+            .unwrap();
+        let implementation = ImplementationCandidate {
+            tier: crate::compiler::InteractionTier::StructuredIntegration,
+            executor: ExecutionDomain::Native,
+            operation: "stream bounded bytes from the exact approved file".into(),
+        };
+        let compiled = CompiledAction {
+            proposal: proposal.clone(),
+            candidates: vec![implementation.clone()],
+        };
+        let native = NativeExecutor::new(
+            root.clone(),
+            Arc::new(UnsupportedPlatformController),
+            files,
+            store,
+        );
+        let mut broker = ExecutionBroker::new(capabilities);
+        broker.register(Arc::new(native));
+
+        let (procedure, descriptors) = procedure();
+        let mut pool =
+            crate::procedure_stream::ProcedureStreamPool::new(&procedure, &descriptors, task_id)
+                .unwrap();
+        let (_cancel, cancellation) = crate::procedure_stream::ProcedureStreamCancellation::new();
+        let mut endpoints = pool.open_all(cancellation).unwrap();
+        let source = endpoints.take_node("source").unwrap();
+        let mut consumer = endpoints.take_node("sink").unwrap();
+        let mut receiver = consumer.inputs_mut().remove("content").unwrap();
+        let receive = tokio::spawn(async move {
+            let mut bytes = Vec::new();
+            while let Some(item) = receiver.recv().await? {
+                bytes.extend_from_slice(item.as_bytes());
+            }
+            CoreResult::Ok(bytes)
+        });
+
+        let receipt = broker
+            .execute_with_streams(&compiled, &implementation, &grant, Some(source))
+            .await
+            .unwrap();
+        let streamed_bytes = receive.await.unwrap().unwrap();
+        assert_eq!(streamed_bytes, b"bounded source bytes");
+        assert_eq!(receipt.transient_data["bytes_read"], streamed_bytes.len());
+        assert_eq!(receipt.transient_data["stream_channel_id"], channel_id);
+        assert!(receipt.transient_data.get("bytes_base64").is_none());
+
+        let observation = DeterministicObserver
+            .observe(&proposal, &receipt)
+            .await
+            .unwrap();
+        Verifier
+            .verify(&proposal.expected_outcome, &observation)
+            .unwrap();
+        std::fs::write(&path, b"changed after the stream").unwrap();
+        assert!(
+            DeterministicObserver
+                .observe(&proposal, &receipt)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn native_stream_read_to_write_verifies_the_complete_file_pipeline() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let source_path = root.join("pipeline-source.bin");
+        let destination_path = root.join("pipeline-destination.bin");
+        let source_bytes = b"bounded first-party pipeline bytes";
+        std::fs::write(&source_path, source_bytes).unwrap();
+        let task_id = Uuid::new_v4();
+        let channel_id = "file-content";
+        let mut read_proposal = ActionProposal {
+            id: Uuid::new_v4(),
+            task_id,
+            action: Action::ReadFile {
+                path: source_path.clone(),
+                max_bytes: 64,
+            },
+            expected_outcome: ExpectedOutcome::UserAnswered,
+            target_resource: source_path.to_string_lossy().into_owned(),
+            provenance: Provenance::user(),
+            metadata: BTreeMap::from([
+                ("procedure_id".into(), "native-stream-file-write".into()),
+                ("procedure_node_id".into(), "source".into()),
+                ("procedure_stream_node".into(), "true".into()),
+                ("procedure_stream_output".into(), "bytes".into()),
+                ("procedure_stream_channel_id".into(), channel_id.into()),
+                ("procedure_stream_consumer_node".into(), "sink".into()),
+                ("procedure_stream_max_bytes".into(), "64".into()),
+            ]),
+        };
+        let mut write_proposal = ActionProposal {
+            id: Uuid::new_v4(),
+            task_id,
+            action: Action::WriteFile {
+                path: destination_path.clone(),
+                content: String::new(),
+                overwrite: false,
+            },
+            expected_outcome: ExpectedOutcome::UserAnswered,
+            target_resource: destination_path.to_string_lossy().into_owned(),
+            provenance: Provenance::user(),
+            metadata: BTreeMap::from([
+                ("procedure_id".into(), "native-stream-file-write".into()),
+                ("procedure_node_id".into(), "sink".into()),
+                ("procedure_stream_node".into(), "true".into()),
+                ("procedure_stream_input".into(), "content".into()),
+                ("procedure_stream_channel_id".into(), channel_id.into()),
+                ("procedure_stream_producer_node".into(), "source".into()),
+                ("procedure_stream_max_bytes".into(), "64".into()),
+            ]),
+        };
+        crate::verification::bind_required_outcome(&mut read_proposal).unwrap();
+        crate::verification::bind_required_outcome(&mut write_proposal).unwrap();
+
+        let files = Arc::new(crate::execution::files::FileBroker::default());
+        files.prepare(&mut read_proposal).await.unwrap();
+        files.prepare(&mut write_proposal).await.unwrap();
+        let store = crate::storage::LocalStore::deferred(&root.join("deferred.db")).unwrap();
+        let capabilities = CapabilityBroker::default();
+        let read_grant = capabilities
+            .issue_unprepared_for_test(&read_proposal, ExecutionDomain::Native)
+            .await
+            .unwrap();
+        let write_grant = capabilities
+            .issue_unprepared_for_test(&write_proposal, ExecutionDomain::Native)
+            .await
+            .unwrap();
+        let implementation = ImplementationCandidate {
+            tier: crate::compiler::InteractionTier::StructuredIntegration,
+            executor: ExecutionDomain::Native,
+            operation: "stream approved file bytes to an approved destination".into(),
+        };
+        let read_action = CompiledAction {
+            proposal: read_proposal.clone(),
+            candidates: vec![implementation.clone()],
+        };
+        let write_action = CompiledAction {
+            proposal: write_proposal.clone(),
+            candidates: vec![implementation.clone()],
+        };
+        let native = NativeExecutor::new(
+            root.clone(),
+            Arc::new(UnsupportedPlatformController),
+            files,
+            store,
+        );
+        let mut broker = ExecutionBroker::new(capabilities);
+        broker.register(Arc::new(native));
+
+        let (procedure, descriptors) = procedure();
+        let mut pool =
+            crate::procedure_stream::ProcedureStreamPool::new(&procedure, &descriptors, task_id)
+                .unwrap();
+        let (_cancel, cancellation) = crate::procedure_stream::ProcedureStreamCancellation::new();
+        let mut endpoints = pool.open_all(cancellation).unwrap();
+        let source_stream = endpoints.take_node("source").unwrap();
+        let sink_stream = endpoints.take_node("sink").unwrap();
+
+        let (read_receipt, write_receipt) = tokio::join!(
+            broker.execute_with_streams(
+                &read_action,
+                &implementation,
+                &read_grant,
+                Some(source_stream),
+            ),
+            broker.execute_with_streams(
+                &write_action,
+                &implementation,
+                &write_grant,
+                Some(sink_stream),
+            ),
+        );
+        let read_receipt = read_receipt.unwrap();
+        let write_receipt = write_receipt.unwrap();
+
+        assert_eq!(std::fs::read(&destination_path).unwrap(), source_bytes);
+        assert_eq!(
+            read_receipt.transient_data["stream_sha256"],
+            write_receipt.transient_data["stream_sha256"]
+        );
+        let read_observation = DeterministicObserver
+            .observe(&read_proposal, &read_receipt)
+            .await
+            .unwrap();
+        Verifier
+            .verify(&read_proposal.expected_outcome, &read_observation)
+            .unwrap();
+        let write_observation = DeterministicObserver
+            .observe(&write_proposal, &write_receipt)
+            .await
+            .unwrap();
+        Verifier
+            .verify(&write_proposal.expected_outcome, &write_observation)
+            .unwrap();
     }
 }

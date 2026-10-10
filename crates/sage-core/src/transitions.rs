@@ -172,41 +172,74 @@ impl VerifiedAction {
                 "Verified action does not match its procedure checkpoint".into(),
             ));
         }
-        let crate::domain::Action::SetApplicationControl { control_id, .. } = &proposal.action
-        else {
-            return Err(CoreError::ExecutorUnavailable(
-                "This procedure output has no qualified verifier mapping".into(),
-            ));
-        };
-        let observed_value = self
-            .record
-            .evidence
-            .iter()
-            .find_map(|evidence| match evidence {
-                crate::observation::Evidence::ApplicationControlValue {
-                    control_id: observed_control,
-                    value,
-                    ..
-                } if observed_control == control_id => Some(value),
-                _ => None,
-            })
-            .ok_or_else(|| {
-                CoreError::VerificationFailed(
-                    "Verified procedure step has no matching fresh control readback".into(),
-                )
-            })?;
-        let value = match observed_value {
-            crate::domain::ApplicationControlValue::Boolean(value) => {
-                crate::agency::ProcedureValue::Boolean(*value)
+        let outputs = match &proposal.action {
+            crate::domain::Action::SetApplicationControl { control_id, .. } => {
+                let observed_value = self
+                    .record
+                    .evidence
+                    .iter()
+                    .find_map(|evidence| match evidence {
+                        crate::observation::Evidence::ApplicationControlValue {
+                            control_id: observed_control,
+                            value,
+                            ..
+                        } if observed_control == control_id => Some(value),
+                        _ => None,
+                    })
+                    .ok_or_else(|| {
+                        CoreError::VerificationFailed(
+                            "Verified procedure step has no matching fresh control readback".into(),
+                        )
+                    })?;
+                let value = match observed_value {
+                    crate::domain::ApplicationControlValue::Boolean(value) => {
+                        crate::agency::ProcedureValue::Boolean(*value)
+                    }
+                    crate::domain::ApplicationControlValue::Number(value) => {
+                        crate::agency::ProcedureValue::Number(*value)
+                    }
+                };
+                std::collections::BTreeMap::from([(
+                    "observed_value".to_owned(),
+                    crate::agency::ProcedureOutput::Value(value),
+                )])
             }
-            crate::domain::ApplicationControlValue::Number(value) => {
-                crate::agency::ProcedureValue::Number(*value)
+            crate::domain::Action::ReadFile { .. }
+                if proposal
+                    .metadata
+                    .get("procedure_stream_node")
+                    .map(String::as_str)
+                    == Some("true")
+                    && matches!(
+                        &self.record.expected,
+                        crate::domain::ExpectedOutcome::FileReadMatchesStream { .. }
+                    ) =>
+            {
+                // The stream's file digest and size were independently
+                // verified. Bytes are consumed through the bounded channel,
+                // never retained as a reusable procedure value.
+                std::collections::BTreeMap::new()
+            }
+            crate::domain::Action::WriteFile { content, .. }
+                if content.is_empty()
+                    && proposal
+                        .metadata
+                        .get("procedure_stream_node")
+                        .map(String::as_str)
+                        == Some("true")
+                    && matches!(
+                        &self.record.expected,
+                        crate::domain::ExpectedOutcome::FileMatchesStream { .. }
+                    ) =>
+            {
+                std::collections::BTreeMap::new()
+            }
+            _ => {
+                return Err(CoreError::ExecutorUnavailable(
+                    "This procedure output has no qualified verifier mapping".into(),
+                ));
             }
         };
-        let outputs = std::collections::BTreeMap::from([(
-            "observed_value".to_owned(),
-            crate::agency::ProcedureOutput::Value(value),
-        )]);
         checkpoint.runtime.record_verified_outputs(
             &checkpoint.procedure,
             node_id,
@@ -999,6 +1032,7 @@ mod tests {
             id: "atomic-dispatch-wave".into(),
             nodes: vec![
                 ProcedureNode {
+                    controller_binding: None,
                     id: "producer".into(),
                     depends_on: BTreeSet::new(),
                     outputs: BTreeMap::from([("chunks".into(), producer_chunk_port.clone())]),
@@ -1016,6 +1050,7 @@ mod tests {
                     },
                 },
                 ProcedureNode {
+                    controller_binding: None,
                     id: "consumer".into(),
                     depends_on: BTreeSet::new(),
                     outputs: BTreeMap::new(),
@@ -1060,10 +1095,12 @@ mod tests {
             CapabilityAssessment {
                 descriptor: producer,
                 evidence_state: CapabilityEvidenceState::ReversiblyExperimented,
+                restoration_evidence: None,
             },
             CapabilityAssessment {
                 descriptor: consumer,
                 evidence_state: CapabilityEvidenceState::ReversiblyExperimented,
+                restoration_evidence: None,
             },
         ];
         let task_id = Uuid::new_v4();
@@ -1369,6 +1406,7 @@ mod tests {
             id: "procedure-transition-test".into(),
             nodes: vec![
                 crate::agency::ProcedureNode {
+                    controller_binding: None,
                     id: "set-volume".into(),
                     depends_on: BTreeSet::new(),
                     outputs: BTreeMap::from([(output_port.name.clone(), output_port.clone())]),
@@ -1386,6 +1424,7 @@ mod tests {
                     },
                 },
                 crate::agency::ProcedureNode {
+                    controller_binding: None,
                     id: "set-volume-from-result".into(),
                     depends_on: BTreeSet::from(["set-volume".into()]),
                     outputs: BTreeMap::from([(output_port.name.clone(), output_port.clone())]),
@@ -1513,6 +1552,7 @@ mod tests {
         let assessment = crate::world_model::CapabilityAssessment {
             descriptor,
             evidence_state: crate::world_model::CapabilityEvidenceState::ReversiblyExperimented,
+            restoration_evidence: None,
         };
 
         let mut dispatch_checkpoint = store.load_procedure_checkpoint(task_id).unwrap().unwrap();

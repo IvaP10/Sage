@@ -65,34 +65,71 @@ def run() -> None:
         subprocess.run(["codesign", "--verify", "--deep", "--strict", str(app)], check=True)
 
         challenge = "0123456789abcdef" * 4
-        request = json.dumps(
-            {"protocol_version": 1, "kind": "hello", "challenge": challenge},
-            separators=(",", ":"),
-        ).encode("utf-8")
+        requests = [
+            {
+                "kind": "hello",
+                "protocol_version": 2,
+                "challenge": challenge,
+                "requested_features": ["heartbeat-v1"],
+            },
+            {
+                "kind": "ping",
+                "protocol_version": 2,
+                "challenge": challenge,
+                "sequence": 1,
+            },
+        ]
+        request = b"".join(
+            struct.pack(">I", len(payload)) + payload
+            for payload in (
+                json.dumps(message, separators=(",", ":")).encode("utf-8")
+                for message in requests
+            )
+        )
         handshake = subprocess.run(
             [str(helper_binary)],
-            input=struct.pack(">I", len(request)) + request,
+            input=request,
             check=False,
             capture_output=True,
             timeout=10,
         )
-        if handshake.returncode != 0 or len(handshake.stdout) < 4:
+        if handshake.returncode != 0 or len(handshake.stdout) < 8:
             raise SystemExit(
-                f"FAIL: worker handshake failed: {handshake.returncode}; {handshake.stderr!r}"
+                f"FAIL: worker protocol exchange failed: {handshake.returncode}; {handshake.stderr!r}"
             )
-        frame_size = struct.unpack(">I", handshake.stdout[:4])[0]
-        if frame_size != len(handshake.stdout) - 4:
-            raise SystemExit("FAIL: worker handshake returned a malformed frame")
-        response = json.loads(handshake.stdout[4:])
+        responses = []
+        offset = 0
+        while offset < len(handshake.stdout):
+            if len(handshake.stdout) - offset < 4:
+                raise SystemExit("FAIL: worker returned a truncated frame prefix")
+            frame_size = struct.unpack(">I", handshake.stdout[offset : offset + 4])[0]
+            offset += 4
+            if frame_size == 0 or offset + frame_size > len(handshake.stdout):
+                raise SystemExit("FAIL: worker returned a malformed frame")
+            responses.append(json.loads(handshake.stdout[offset : offset + frame_size]))
+            offset += frame_size
+        if len(responses) != 2:
+            raise SystemExit(f"FAIL: worker returned {len(responses)} responses, expected 2")
+        response, pong = responses
         if (
-            response.get("protocol_version") != 1
+            response.get("protocol_version") != 2
             or response.get("kind") != "hello"
             or response.get("challenge") != challenge
             or response.get("readiness") != "model_not_admitted"
+            or response.get("features") != ["heartbeat-v1"]
             or not isinstance(response.get("process_id"), int)
             or response["process_id"] <= 0
         ):
             raise SystemExit(f"FAIL: worker handshake response was invalid: {response!r}")
+        if (
+            pong.get("protocol_version") != 2
+            or pong.get("kind") != "pong"
+            or pong.get("challenge") != challenge
+            or pong.get("sequence") != 1
+            or pong.get("process_id") != response.get("process_id")
+            or pong.get("readiness") != "model_not_admitted"
+        ):
+            raise SystemExit(f"FAIL: worker heartbeat response was invalid: {pong!r}")
 
         supervisor_environment = os.environ.copy()
         supervisor_environment["SAGE_TEST_INFERENCE_WORKER_EXECUTABLE"] = str(helper_binary)
@@ -105,7 +142,7 @@ def run() -> None:
                 "sage-core",
                 "--bin",
                 "sage-core",
-                "inference_worker_process::tests::launches_the_configured_worker_and_completes_the_bounded_handshake",
+                "inference_worker_process::tests::launches_worker_and_verifies_inherited_readonly_artifact",
                 "--",
                 "--ignored",
                 "--exact",

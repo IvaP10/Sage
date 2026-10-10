@@ -3,7 +3,7 @@
 Command:
 
 ```sh
-cargo test -p sage-core --features qwen35-evaluation --release --lib grouped_query_attention_blockwise_latency_measurement -- --ignored --nocapture --test-threads=1
+cargo test --offline -p sage-inference-math --release --lib grouped_query_attention_blockwise_latency_measurement -- --ignored --nocapture --test-threads=1
 ```
 
 Host: Apple M3, macOS. The ignored release-only microbenchmark alternates 101 samples per path over deterministic synthetic binary16 key/value caches, 16 query heads, and 64-element head dimensions. It compares the fixed-2,048-score-block implementation against a full-score reference using identical cached values and validates output error before reporting latency.

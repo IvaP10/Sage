@@ -899,6 +899,8 @@ nonisolated struct Sage_Ipc_V2_UserAnswer: Sendable {
   init() {}
 }
 
+/// Deprecated v2 compatibility payload. Sage rejects configuration changes and
+/// does not persist provider endpoints or credentials.
 nonisolated struct Sage_Ipc_V2_SaveProviderSettings: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -923,6 +925,7 @@ nonisolated struct Sage_Ipc_V2_SaveProviderSettings: Sendable {
   init() {}
 }
 
+/// Deprecated v2 compatibility payload. Sage never performs provider probes.
 nonisolated struct Sage_Ipc_V2_TestProviderConnection: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -1194,6 +1197,7 @@ nonisolated struct Sage_Ipc_V2_StateSnapshot: Sendable {
   fileprivate var _knowledge: Sage_Ipc_V2_KnowledgeState? = nil
 }
 
+/// Deprecated v2 compatibility snapshot field. Sage always returns it empty.
 nonisolated struct Sage_Ipc_V2_ProviderSettings: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -1444,12 +1448,39 @@ nonisolated struct Sage_Ipc_V2_WorldModelCommand: Sendable {
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
-  /// discover_current_application, list, system, forget_system, approve_learning_session, run_learning_probe, stop_learning_session
+  /// discover_current_application, discover_paired_browser, discover_upnp_media_renderers, observe_upnp_transport, observe_upnp_protocol_info, list, system, synthesize_goal, run_goal, run_stream_procedure, run_file_stream_copy, compile_controller_draft, get_controller_draft, review_controller_draft, forget_system, approve_learning_session, run_learning_probe, stop_learning_session
   var operation: String = String()
 
   var id: String = String()
 
   var json: String = String()
+
+  var upnpRendererObservationTarget: Sage_Ipc_V2_UpnpRendererObservationTarget {
+    get {_upnpRendererObservationTarget ?? Sage_Ipc_V2_UpnpRendererObservationTarget()}
+    set {_upnpRendererObservationTarget = newValue}
+  }
+  /// Returns true if `upnpRendererObservationTarget` has been explicitly set.
+  var hasUpnpRendererObservationTarget: Bool {self._upnpRendererObservationTarget != nil}
+  /// Clears the value of `upnpRendererObservationTarget`. Subsequent reads from it will return its default value.
+  mutating func clearUpnpRendererObservationTarget() {self._upnpRendererObservationTarget = nil}
+
+  var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  init() {}
+
+  fileprivate var _upnpRendererObservationTarget: Sage_Ipc_V2_UpnpRendererObservationTarget? = nil
+}
+
+/// Exact passive-discovery identity used to request fresh, read-only device
+/// observations. It carries no network endpoint, pairing state or grant.
+nonisolated struct Sage_Ipc_V2_UpnpRendererObservationTarget: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  var uniqueDeviceName: String = String()
+
+  var descriptionSha256: String = String()
 
   var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -4223,7 +4254,7 @@ nonisolated extension Sage_Ipc_V2_WorkflowState: SwiftProtobuf.Message, SwiftPro
 
 nonisolated extension Sage_Ipc_V2_WorldModelCommand: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   static let protoMessageName: String = _protobuf_package + ".WorldModelCommand"
-  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}operation\0\u{1}id\0\u{1}json\0")
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}operation\0\u{1}id\0\u{1}json\0\u{3}upnp_renderer_observation_target\0")
 
   mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -4234,12 +4265,17 @@ nonisolated extension Sage_Ipc_V2_WorldModelCommand: SwiftProtobuf.Message, Swif
       case 1: try { try decoder.decodeSingularStringField(value: &self.operation) }()
       case 2: try { try decoder.decodeSingularStringField(value: &self.id) }()
       case 3: try { try decoder.decodeSingularStringField(value: &self.json) }()
+      case 4: try { try decoder.decodeSingularMessageField(value: &self._upnpRendererObservationTarget) }()
       default: break
       }
     }
   }
 
   func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
     if !self.operation.isEmpty {
       try visitor.visitSingularStringField(value: self.operation, fieldNumber: 1)
     }
@@ -4249,6 +4285,9 @@ nonisolated extension Sage_Ipc_V2_WorldModelCommand: SwiftProtobuf.Message, Swif
     if !self.json.isEmpty {
       try visitor.visitSingularStringField(value: self.json, fieldNumber: 3)
     }
+    try { if let v = self._upnpRendererObservationTarget {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 4)
+    } }()
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -4256,6 +4295,42 @@ nonisolated extension Sage_Ipc_V2_WorldModelCommand: SwiftProtobuf.Message, Swif
     if lhs.operation != rhs.operation {return false}
     if lhs.id != rhs.id {return false}
     if lhs.json != rhs.json {return false}
+    if lhs._upnpRendererObservationTarget != rhs._upnpRendererObservationTarget {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Sage_Ipc_V2_UpnpRendererObservationTarget: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  static let protoMessageName: String = _protobuf_package + ".UpnpRendererObservationTarget"
+  static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}unique_device_name\0\u{3}description_sha256\0")
+
+  mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.uniqueDeviceName) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.descriptionSha256) }()
+      default: break
+      }
+    }
+  }
+
+  func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.uniqueDeviceName.isEmpty {
+      try visitor.visitSingularStringField(value: self.uniqueDeviceName, fieldNumber: 1)
+    }
+    if !self.descriptionSha256.isEmpty {
+      try visitor.visitSingularStringField(value: self.descriptionSha256, fieldNumber: 2)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  static func ==(lhs: Sage_Ipc_V2_UpnpRendererObservationTarget, rhs: Sage_Ipc_V2_UpnpRendererObservationTarget) -> Bool {
+    if lhs.uniqueDeviceName != rhs.uniqueDeviceName {return false}
+    if lhs.descriptionSha256 != rhs.descriptionSha256 {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

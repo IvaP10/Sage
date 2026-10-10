@@ -1,0 +1,20 @@
+[package]
+name = "sage-constrained-generation"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+name = "sage_constrained_generation"
+path = "src/lib.rs"
+
+[dependencies]
+sage-qwen-tokenizer = { path = "../sage-qwen-tokenizer" }
+sage-qwen35-runtime = { path = "../sage-qwen35-runtime" }
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+sage-qwen-tokenizer = { path = "../sage-qwen-tokenizer", features = ["core-test-support"] }

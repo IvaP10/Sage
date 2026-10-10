@@ -77,6 +77,11 @@ pub(crate) enum StreamWriteInput {
     Finish,
 }
 
+pub(crate) enum StreamReadOutput {
+    Chunk(Zeroizing<Vec<u8>>),
+    Finish,
+}
+
 impl PinnedPath {
     pub(crate) fn open_directory(path: &Path) -> CoreResult<Self> {
         let pinned = if path.is_absolute() && path.parent().is_none() {
@@ -256,6 +261,77 @@ impl PinnedPath {
         }
         self.revalidate()?;
         Ok(bytes)
+    }
+
+    /// Read a pinned regular file into a one-item-bounded async channel. The
+    /// caller must run this blocking operation on Sage's bounded file lane.
+    pub(crate) fn read_stream(
+        &self,
+        limit: u64,
+        maximum_item_bytes: u64,
+        sender: tokio::sync::mpsc::Sender<StreamReadOutput>,
+        cancelled: &std::sync::atomic::AtomicBool,
+    ) -> CoreResult<(String, u64)> {
+        let limit = limit.min(MAX_BYTES);
+        if limit == 0 || maximum_item_bytes == 0 {
+            return Err(CoreError::InvalidAction(
+                "Streamed file read requires positive total and per-item byte limits".into(),
+            ));
+        }
+        self.revalidate()?;
+        let mut options = OpenOptions::new();
+        options.read(true).follow(FollowSymlinks::No);
+        let mut file = self.parent.open_with(&self.leaf, &options)?;
+        let before = identity(file.metadata()?)?;
+        if before.directory || Some(&before) != self.before.as_ref() {
+            return Err(CoreError::ApprovalRejected(
+                "Read target changed before streaming".into(),
+            ));
+        }
+        if before.size > limit {
+            return Err(CoreError::ExecutionFailed(
+                "File exceeds its authorized stream read limit".into(),
+            ));
+        }
+
+        let mut buffer = Zeroizing::new([0u8; 64 * 1024]);
+        let chunk_limit = maximum_item_bytes.min(buffer.len() as u64) as usize;
+        let mut digest = Sha256::new();
+        let mut total = 0u64;
+        loop {
+            if cancelled.load(std::sync::atomic::Ordering::Acquire) {
+                return Err(CoreError::Cancelled);
+            }
+            let count = file.read(&mut buffer[..chunk_limit])?;
+            if count == 0 {
+                break;
+            }
+            let next_total = total
+                .checked_add(count as u64)
+                .filter(|value| *value <= limit)
+                .ok_or_else(|| {
+                    CoreError::ExecutionFailed(
+                        "File grew beyond its authorized stream read limit".into(),
+                    )
+                })?;
+            digest.update(&buffer[..count]);
+            sender
+                .blocking_send(StreamReadOutput::Chunk(Zeroizing::new(
+                    buffer[..count].to_vec(),
+                )))
+                .map_err(|_| CoreError::Cancelled)?;
+            total = next_total;
+        }
+        if identity(file.metadata()?)? != before {
+            return Err(CoreError::ApprovalRejected(
+                "Read target changed while streaming".into(),
+            ));
+        }
+        self.revalidate()?;
+        sender
+            .blocking_send(StreamReadOutput::Finish)
+            .map_err(|_| CoreError::Cancelled)?;
+        Ok((format!("{:x}", digest.finalize()), total))
     }
 
     pub fn digest(&self, limit: u64) -> CoreResult<String> {

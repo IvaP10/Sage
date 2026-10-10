@@ -7,7 +7,7 @@ Host: Apple M3, arm64, 8 GB unified memory. The release-only microbenchmark alte
 Command:
 
 ```sh
-cargo test -p sage-core --features qwen35-evaluation --release --lib --locked --offline grouped_query_attention_blockwise_latency_measurement -- --ignored --nocapture --test-threads=1
+cargo test --release -p sage-inference-math --lib --locked --offline tests::grouped_query_attention_blockwise_latency_measurement -- --ignored --nocapture --test-threads=1
 ```
 
 ## Results

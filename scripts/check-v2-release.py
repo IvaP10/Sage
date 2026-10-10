@@ -19,6 +19,7 @@ REQUIRED = {
     "process_isolation": "security_review",
     "native_macos": "device_acceptance",
     "native_windows": "device_acceptance",
+    "task_handoff_live": "device_acceptance",
     "browser_live": "device_acceptance",
     "encrypted_migration": "fault_injection",
     "file_races": "fault_injection",

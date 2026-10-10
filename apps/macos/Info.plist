@@ -34,5 +34,7 @@
   <string>Sage transcribes voice commands on this Mac after you start voice input or enable the wake word.</string>
   <key>NSHumanReadableCopyright</key>
   <string>Copyright © 2026 Sage. All rights reserved.</string>
+  <key>NSLocalNetworkUsageDescription</key>
+  <string>Sage searches your private local network for UPnP media renderers only when you ask. Results are untrusted and do not authorize device control.</string>
 </dict>
 </plist>

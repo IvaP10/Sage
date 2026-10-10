@@ -53,6 +53,16 @@ pub enum Evidence {
         stream_sha256: String,
         bytes: u64,
     },
+    FileReadStreamHash {
+        path: String,
+        channel_id: String,
+        producer_node: String,
+        output_port: String,
+        consumer_node: String,
+        file_sha256: String,
+        stream_sha256: String,
+        bytes: u64,
+    },
     ApplicationState {
         application: String,
         running: bool,
@@ -238,6 +248,65 @@ impl Observer for DeterministicObserver {
                     bytes: file_bytes,
                 }]
             }
+            ExpectedOutcome::FileReadMatchesStream {
+                path,
+                channel_id,
+                producer_node,
+                output_port,
+                consumer_node,
+                maximum_bytes,
+            } => {
+                let receipt_text = |field: &str| {
+                    receipt
+                        .transient_data
+                        .get(field)
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or_else(|| {
+                            CoreError::VerificationFailed(format!(
+                                "Streamed read receipt has no {field}"
+                            ))
+                        })
+                };
+                let stream_channel_id = receipt_text("stream_channel_id")?;
+                let stream_producer_node = receipt_text("stream_producer_node")?;
+                let stream_output_port = receipt_text("stream_output_port")?;
+                let stream_consumer_node = receipt_text("stream_consumer_node")?;
+                let stream_sha256 = receipt_text("stream_sha256")?;
+                let bytes = receipt
+                    .transient_data
+                    .get("bytes_read")
+                    .and_then(serde_json::Value::as_u64)
+                    .filter(|bytes| *maximum_bytes > 0 && *bytes <= *maximum_bytes)
+                    .ok_or_else(|| {
+                        CoreError::VerificationFailed(
+                            "Streamed read receipt has no valid byte count".into(),
+                        )
+                    })?;
+                let (file_sha256, file_bytes) = hash_file_with_size(path).await?;
+                if receipt.executor != "native-os-executor"
+                    || stream_channel_id != channel_id
+                    || stream_producer_node != producer_node
+                    || stream_output_port != output_port
+                    || stream_consumer_node != consumer_node
+                    || !valid_sha256(stream_sha256)
+                    || file_sha256 != stream_sha256
+                    || file_bytes != bytes
+                {
+                    return Err(CoreError::VerificationFailed(
+                        "Fresh source file differs from the completed output stream".into(),
+                    ));
+                }
+                vec![Evidence::FileReadStreamHash {
+                    path: path.to_string_lossy().into_owned(),
+                    channel_id: channel_id.clone(),
+                    producer_node: producer_node.clone(),
+                    output_port: output_port.clone(),
+                    consumer_node: consumer_node.clone(),
+                    file_sha256,
+                    stream_sha256: stream_sha256.to_owned(),
+                    bytes: file_bytes,
+                }]
+            }
             ExpectedOutcome::CommandExit { .. } => {
                 let code = receipt
                     .transient_data
@@ -368,6 +437,16 @@ fn summarize(evidence: &[Evidence]) -> String {
                 ..
             } => format!(
                 "streamed file {path} received {bytes} bytes from {producer_node} via {channel_id}"
+            ),
+            Evidence::FileReadStreamHash {
+                path,
+                channel_id,
+                producer_node,
+                consumer_node,
+                bytes,
+                ..
+            } => format!(
+                "streamed {bytes} bytes from {path} at {producer_node} to {consumer_node} via {channel_id}"
             ),
             Evidence::ApplicationState {
                 application,

@@ -16,11 +16,13 @@ use std::{
 
 use tokio::sync::{mpsc, oneshot};
 
+use sage_qwen35_runtime::qwen35::SAGE_OUTPUT_LIMIT;
+
 use crate::model::{ModelProvider, ModelRole, PlanningContext, ProviderDescriptor, ReplanContext};
 use crate::{
     CoreError, CoreResult,
     model::{ModelTurn, TurnContext, UntrustedContext},
-    qwen35::Qwen35CandidateModel,
+    qwen35_loader::Qwen35CandidateModel,
 };
 
 const PENDING_REQUEST_CAPACITY: usize = 1;
@@ -116,8 +118,7 @@ impl CandidateGenerationLane {
         cancelled: Arc<AtomicBool>,
         updates: Option<mpsc::Sender<String>>,
     ) -> CoreResult<oneshot::Receiver<CoreResult<ModelTurn>>> {
-        if maximum_new_tokens == 0 || maximum_new_tokens > crate::qwen35::SAGE_OUTPUT_LIMIT as usize
-        {
+        if maximum_new_tokens == 0 || maximum_new_tokens > SAGE_OUTPUT_LIMIT as usize {
             return Err(CoreError::Model(
                 "Candidate output reservation is outside Sage's limit".into(),
             ));
@@ -159,7 +160,7 @@ impl CandidateModelProvider {
 
     async fn generate(&self, context: TurnContext) -> CoreResult<ModelTurn> {
         self.lane
-            .generate(context, crate::qwen35::SAGE_OUTPUT_LIMIT as usize)
+            .generate(context, SAGE_OUTPUT_LIMIT as usize)
             .await
     }
 
@@ -252,7 +253,7 @@ impl ModelProvider for CandidateModelProvider {
         updates: mpsc::Sender<String>,
     ) -> CoreResult<ModelTurn> {
         self.lane
-            .generate_with_updates(context, crate::qwen35::SAGE_OUTPUT_LIMIT as usize, updates)
+            .generate_with_updates(context, SAGE_OUTPUT_LIMIT as usize, updates)
             .await
     }
 }
@@ -456,10 +457,7 @@ mod tests {
         let invoked_by_worker = Arc::clone(&invoked);
         let lane = test_lane(move |context, maximum_new_tokens, cancelled| {
             assert_eq!(context.planning.user_request, "test");
-            assert_eq!(
-                maximum_new_tokens,
-                crate::qwen35::SAGE_OUTPUT_LIMIT as usize
-            );
+            assert_eq!(maximum_new_tokens, super::SAGE_OUTPUT_LIMIT as usize);
             assert!(!cancelled.load(Ordering::Acquire));
             invoked_by_worker.store(true, Ordering::Release);
             Ok(ModelTurn::Answer("generated locally".into()))

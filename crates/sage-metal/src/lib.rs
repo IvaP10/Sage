@@ -32,6 +32,10 @@ mod unavailable {
             Err("Sage Metal inference is available only on macOS".into())
         }
 
+        pub fn buffer_private(&self, _bytes: &[u8]) -> Result<MetalBuffer, String> {
+            Err("Sage Metal inference is available only on macOS".into())
+        }
+
         pub fn q4_workspace(
             self: &Arc<Self>,
             _rows: usize,
@@ -40,6 +44,26 @@ mod unavailable {
             Err("Sage Metal inference is available only on macOS".into())
         }
 
+        pub fn q4_batch_workspace(
+            self: &Arc<Self>,
+            _rows: usize,
+            _columns: usize,
+            _batch_size: usize,
+        ) -> Result<MetalQ4Workspace, String> {
+            Err("Sage Metal inference is available only on macOS".into())
+        }
+
+        pub fn q4_batch_workspace_with_tile(
+            self: &Arc<Self>,
+            _rows: usize,
+            _columns: usize,
+            _batch_size: usize,
+            _batch_tile_size: usize,
+        ) -> Result<MetalQ4Workspace, String> {
+            Err("Sage Metal inference is available only on macOS".into())
+        }
+
+        #[allow(clippy::too_many_arguments)]
         pub fn project_q4_into(
             &self,
             _weights: &MetalBuffer,
@@ -47,6 +71,52 @@ mod unavailable {
             _rows: usize,
             _columns: usize,
             _group_size: usize,
+            _input: &[f32],
+            _output: &mut [f32],
+            _workspace: &mut MetalQ4Workspace,
+        ) -> Result<(), String> {
+            Err("Sage Metal inference is available only on macOS".into())
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        pub fn project_q4_profiled(
+            &self,
+            _weights: &MetalBuffer,
+            _scales: &MetalBuffer,
+            _rows: usize,
+            _columns: usize,
+            _group_size: usize,
+            _input: &[f32],
+            _output: &mut [f32],
+            _workspace: &mut MetalQ4Workspace,
+        ) -> Result<u64, String> {
+            Err("Sage Metal inference is available only on macOS".into())
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        pub fn project_q4_rows4_profiled(
+            &self,
+            _weights: &MetalBuffer,
+            _scales: &MetalBuffer,
+            _rows: usize,
+            _columns: usize,
+            _group_size: usize,
+            _input: &[f32],
+            _output: &mut [f32],
+            _workspace: &mut MetalQ4Workspace,
+        ) -> Result<u64, String> {
+            Err("Sage Metal inference is available only on macOS".into())
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        pub fn project_q4_batch_into(
+            &self,
+            _weights: &MetalBuffer,
+            _scales: &MetalBuffer,
+            _rows: usize,
+            _columns: usize,
+            _group_size: usize,
+            _batch_size: usize,
             _input: &[f32],
             _output: &mut [f32],
             _workspace: &mut MetalQ4Workspace,

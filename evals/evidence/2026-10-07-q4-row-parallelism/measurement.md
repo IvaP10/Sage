@@ -13,7 +13,7 @@ The existing Qwen hidden-size benchmark uses a synthetic 2,560×2,560 Q4 matrix,
 Command:
 
 ```sh
-cargo test -p sage-core --features qwen35-evaluation --release --lib qwen_hidden_q4_projection_latency_measurement -- --ignored --nocapture --test-threads=1
+cargo test --offline -p sage-inference-math --release --lib qwen_hidden_q4_projection_latency_measurement -- --ignored --nocapture --test-threads=1
 ```
 
 ## Results

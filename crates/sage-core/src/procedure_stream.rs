@@ -353,6 +353,30 @@ pub struct ProcedureStreamSender {
 }
 
 impl ProcedureStreamSender {
+    pub fn channel_id(&self) -> &str {
+        &self.binding.channel.id
+    }
+
+    pub fn producer_node(&self) -> &str {
+        &self.binding.channel.producer_node
+    }
+
+    pub fn consumer_node(&self) -> &str {
+        &self.binding.channel.consumer_node
+    }
+
+    pub fn output_port(&self) -> &DataPort {
+        &self.binding.producer_port
+    }
+
+    pub fn maximum_total_bytes(&self) -> u64 {
+        self.binding.maximum_total_bytes
+    }
+
+    pub fn maximum_item_bytes(&self) -> u64 {
+        self.binding.channel.maximum_item_bytes
+    }
+
     /// Send one typed item. A full queue blocks the producer; cancellation or
     /// receiver failure settles the send without dispatching later items.
     pub async fn send(&mut self, bytes: Vec<u8>) -> CoreResult<()> {
@@ -792,6 +816,7 @@ mod tests {
             Vec::new(),
         );
         let producer = ProcedureNode {
+            controller_binding: None,
             id: "producer".into(),
             depends_on: Default::default(),
             outputs: std::collections::BTreeMap::from([(
@@ -806,6 +831,7 @@ mod tests {
             },
         };
         let consumer = ProcedureNode {
+            controller_binding: None,
             id: "consumer".into(),
             depends_on: Default::default(),
             outputs: Default::default(),
@@ -1219,7 +1245,6 @@ mod tests {
             tier: InteractionTier::StructuredIntegration,
             executor: ExecutionDomain::Native,
             operation: "test stream consumer".into(),
-            requires_fresh_observation: true,
         };
         let compiled = CompiledAction {
             proposal: proposal.clone(),
@@ -1227,7 +1252,7 @@ mod tests {
         };
         let capabilities_broker = CapabilityBroker::default();
         let grant = capabilities_broker
-            .issue(&proposal, ExecutionDomain::Native)
+            .issue_unprepared_for_test(&proposal, ExecutionDomain::Native)
             .await
             .expect("one-use action capability");
         let mut broker = ExecutionBroker::new(capabilities_broker);
@@ -1281,7 +1306,6 @@ mod tests {
             tier: InteractionTier::StructuredIntegration,
             executor: ExecutionDomain::Native,
             operation: "test stream consumer".into(),
-            requires_fresh_observation: true,
         };
         let compiled = CompiledAction {
             proposal: proposal.clone(),
@@ -1289,7 +1313,7 @@ mod tests {
         };
         let capabilities = CapabilityBroker::default();
         let grant = capabilities
-            .issue(&proposal, ExecutionDomain::Native)
+            .issue_unprepared_for_test(&proposal, ExecutionDomain::Native)
             .await
             .expect("one-use action capability");
         let mut broker = ExecutionBroker::new(capabilities);

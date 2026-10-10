@@ -7,7 +7,7 @@ Toolchain: rustc 1.98.0, optimized Rust release test binary
 ## Command
 
 ```sh
-cargo test -p sage-core --release --features qwen35-evaluation --lib qwen_mrope_prepared_angle_latency_measurement -- --ignored --nocapture
+cargo test --offline -p sage-inference-math --release --lib qwen_mrope_prepared_angle_latency_measurement -- --ignored --nocapture
 ```
 
 The benchmark uses the pinned full-attention head shape: 16 query heads, four key heads, 256 values per head, and 64 rotary dimensions. The MRoPE triplet is `[123, 47, 89]`. Each trial has 101 alternating baseline/optimized samples.

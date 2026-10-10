@@ -19,6 +19,72 @@ pub fn bind_required_outcome(proposal: &mut ActionProposal) -> CoreResult<()> {
             cursor: cursor.clone(),
         },
         Action::FetchPublic { url, .. } => ExpectedOutcome::PublicResource { url: url.clone() },
+        Action::ReadFile { path, max_bytes }
+            if proposal.metadata.contains_key("procedure_stream_output") =>
+        {
+            let valid_identifier = |name: &str| {
+                !name.is_empty()
+                    && name.len() <= 96
+                    && name
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
+            };
+            let metadata_value = |key: &str, description: &str| {
+                proposal
+                    .metadata
+                    .get(key)
+                    .filter(|value| valid_identifier(value))
+                    .ok_or_else(|| CoreError::InvalidAction(description.into()))
+            };
+            let channel_id = metadata_value(
+                "procedure_stream_channel_id",
+                "Streamed file read requires one exact bounded channel identity",
+            )?;
+            let producer_node = metadata_value(
+                "procedure_node_id",
+                "Streamed file read requires an exact producer node",
+            )?;
+            let output_port = metadata_value(
+                "procedure_stream_output",
+                "Streamed file read requires one exact output port",
+            )?;
+            let consumer_node = metadata_value(
+                "procedure_stream_consumer_node",
+                "Streamed file read requires an exact consumer node",
+            )?;
+            let maximum_bytes = proposal
+                .metadata
+                .get("procedure_stream_max_bytes")
+                .and_then(|bytes| bytes.parse::<u64>().ok())
+                .filter(|bytes| {
+                    (1..=crate::execution::files::MAX_BYTES).contains(bytes) && bytes <= max_bytes
+                })
+                .ok_or_else(|| {
+                    CoreError::InvalidAction(
+                        "Streamed file read requires a bounded byte count within its read grant"
+                            .into(),
+                    )
+                })?;
+            if proposal
+                .metadata
+                .get("procedure_stream_node")
+                .map(String::as_str)
+                != Some("true")
+                || !proposal.metadata.contains_key("procedure_id")
+            {
+                return Err(CoreError::InvalidAction(
+                    "Streamed file read metadata is missing its procedure identity".into(),
+                ));
+            }
+            ExpectedOutcome::FileReadMatchesStream {
+                path: path.clone(),
+                channel_id: channel_id.clone(),
+                producer_node: producer_node.clone(),
+                output_port: output_port.clone(),
+                consumer_node: consumer_node.clone(),
+                maximum_bytes,
+            }
+        }
         Action::ReadFile { path, .. } => ExpectedOutcome::Condition {
             condition: Condition::FileExists { path: path.clone() },
         },
@@ -216,6 +282,36 @@ impl Verifier {
                         && *maximum_bytes <= crate::execution::files::MAX_BYTES
                         && *bytes <= *maximum_bytes
                 )),
+            ExpectedOutcome::FileReadMatchesStream {
+                path,
+                channel_id,
+                producer_node,
+                output_port,
+                consumer_node,
+                maximum_bytes,
+            } => observation.evidence.iter().any(|evidence| matches!(
+                evidence,
+                Evidence::FileReadStreamHash {
+                    path: observed_path,
+                    channel_id: observed_channel,
+                    producer_node: observed_producer,
+                    output_port: observed_port,
+                    consumer_node: observed_consumer,
+                    file_sha256,
+                    stream_sha256,
+                    bytes,
+                } if observed_path == &path.to_string_lossy()
+                    && observed_channel == channel_id
+                    && observed_producer == producer_node
+                    && observed_port == output_port
+                    && observed_consumer == consumer_node
+                    && file_sha256.len() == 64
+                    && file_sha256.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                    && file_sha256 == stream_sha256
+                    && *maximum_bytes > 0
+                    && *maximum_bytes <= crate::execution::files::MAX_BYTES
+                    && *bytes <= *maximum_bytes
+            )),
             ExpectedOutcome::CommandExit { code } => observation.evidence.iter().any(
                 |evidence| matches!(evidence, Evidence::CommandState { exit_code } if exit_code == code),
             ),

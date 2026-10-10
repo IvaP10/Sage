@@ -93,6 +93,38 @@ struct ControllerDraftRecord: Decodable, Identifiable {
     let taskId: String?
     let steps: [ControllerDraftStep]?
 }
+struct RendererCandidateRecord: Decodable, Identifiable {
+    let source: String
+    let uniqueDeviceName: String
+    let deviceType: String
+    let friendlyName: String
+    let manufacturer: String?
+    let modelName: String?
+    let avTransportServiceType: String
+    let connectionManagerServiceType: String?
+    let descriptionSha256: String
+    let observedAt: String
+    let evidenceScope: String
+
+    var id: String { uniqueDeviceName }
+}
+struct RendererTransportObservationRecord: Decodable {
+    let uniqueDeviceName: String
+    let state: String
+    let status: String
+    let currentSpeed: String
+}
+struct RendererProtocolInfoEntryRecord: Decodable {
+    let `protocol`: String
+    let network: String
+    let contentFormat: String
+    let additionalInfo: String
+}
+struct RendererProtocolInfoObservationRecord: Decodable {
+    let uniqueDeviceName: String
+    let source: [RendererProtocolInfoEntryRecord]
+    let sink: [RendererProtocolInfoEntryRecord]
+}
 struct WorkflowData: Decodable {
     let skills: [SkillRecord]; let workflows: [WorkflowRecord]; let schedules: [ScheduleRecord]
     let routineLearningEnabled: Bool?

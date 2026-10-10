@@ -49,9 +49,49 @@ struct SageApp: App {
             }
             .disabled(true)
             .help("Browser discovery stays unavailable until the exact paired-tab flow passes live Chrome acceptance.")
+            Button(model.worldModelBusy ? "Discovering local renderers…" : "Discover local media renderers") {
+                model.discoverLocalMediaRenderers()
+            }
+            .disabled(model.worldModelBusy || model.learningSessionID != nil)
+            .help("A passive private-LAN scan reads UPnP descriptions only. Devices remain untrusted and receive no control commands.")
+            if !model.upnpRendererCandidates.isEmpty {
+                Section("Unpaired renderer candidates") {
+                    Text("Passive discovery only. These devices are not trusted and cannot be controlled.")
+                    ForEach(model.upnpRendererCandidates) { candidate in
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(candidate.friendlyName)
+                            Text("\(candidate.manufacturer ?? "Unknown maker") · \(candidate.modelName ?? candidate.deviceType) · \(candidate.source)")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            if let state = model.upnpRendererTransportStates[candidate.id] {
+                                Text("Reported playback: \(state)")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            if let formats = model.upnpRendererProtocolSummaries[candidate.id] {
+                                Text("Advertised receiver formats: \(formats)")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Button("Read playback state") {
+                                model.observeRendererTransport(candidate)
+                            }
+                            .disabled(model.worldModelBusy || model.learningSessionID != nil)
+                            .help("Revalidates the discovered renderer and requests read-only AVTransport state. The response remains untrusted.")
+                            if candidate.connectionManagerServiceType != nil {
+                                Button("Read receiver formats") {
+                                    model.observeRendererProtocolInfo(candidate)
+                                }
+                                .disabled(model.worldModelBusy || model.learningSessionID != nil)
+                                .help("Revalidates the renderer and reads its advertised ConnectionManager formats. This does not pair, stream, or control playback.")
+                            }
+                        }
+                    }
+                }
+            }
             if !model.controllerDrafts.isEmpty {
                 Section("Controller drafts") {
-                    Text("Inspect the saved steps, then compare them with the current app. Review never runs a control or grants access.")
+                    Text("Review only checks the saved steps against the current app. Run once starts a task with fresh approval for each effect.")
                     ForEach(model.controllerDrafts) { draft in
                         Button("\(draft.systemLabel) · \(draft.stepCount) steps · \(draft.status)") {
                             openWindow(id: "main")

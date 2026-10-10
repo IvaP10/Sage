@@ -21,6 +21,40 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const WORLD_MODEL_FEATURE: &str = "world_model_v1";
 const APPLICATION_CONTROL_FEATURE: &str = "application_control_v1";
 const PROCEDURE_EXECUTION_FEATURE: &str = "procedure_execution_v1";
+const NATIVE_FILE_STREAM_FEATURE: &str = "native_file_stream_v1";
+const LAN_DEVICE_DISCOVERY_FEATURE: &str = "lan_device_discovery_v1";
+const LAN_RENDERER_OBSERVATION_FEATURE: &str = "lan_renderer_observation_v1";
+
+fn requires_lan_device_discovery_feature(operation: &str) -> bool {
+    operation == "discover_upnp_media_renderers"
+}
+
+fn requires_lan_renderer_observation_feature(operation: &str) -> bool {
+    matches!(
+        operation,
+        "observe_upnp_transport" | "observe_upnp_protocol_info"
+    )
+}
+
+fn negotiated_lan_renderer_observation(features: &[String]) -> bool {
+    features
+        .iter()
+        .any(|feature| feature == LAN_RENDERER_OBSERVATION_FEATURE)
+        && features
+            .iter()
+            .any(|feature| feature == LAN_DEVICE_DISCOVERY_FEATURE)
+}
+
+fn requires_procedure_execution_feature(operation: &str) -> bool {
+    matches!(
+        operation,
+        "run_goal" | "run_controller" | "run_stream_procedure" | "run_file_stream_copy"
+    )
+}
+
+fn requires_native_file_stream_feature(operation: &str) -> bool {
+    matches!(operation, "run_stream_procedure" | "run_file_stream_copy")
+}
 
 fn negotiate_features(client_kind: i32, client_features: &[String]) -> Vec<String> {
     let mut negotiated = Vec::new();
@@ -29,6 +63,23 @@ fn negotiate_features(client_kind: i32, client_features: &[String]) -> Vec<Strin
         .any(|feature| feature == WORLD_MODEL_FEATURE)
     {
         negotiated.push(WORLD_MODEL_FEATURE.to_owned());
+    }
+    if client_features
+        .iter()
+        .any(|feature| feature == LAN_DEVICE_DISCOVERY_FEATURE)
+    {
+        negotiated.push(LAN_DEVICE_DISCOVERY_FEATURE.to_owned());
+    }
+    if client_kind == wire::ClientKind::Macos as i32
+        && cfg!(target_os = "macos")
+        && client_features
+            .iter()
+            .any(|feature| feature == LAN_DEVICE_DISCOVERY_FEATURE)
+        && client_features
+            .iter()
+            .any(|feature| feature == LAN_RENDERER_OBSERVATION_FEATURE)
+    {
+        negotiated.push(LAN_RENDERER_OBSERVATION_FEATURE.to_owned());
     }
     if client_kind == wire::ClientKind::Macos as i32
         && cfg!(target_os = "macos")
@@ -51,6 +102,17 @@ fn negotiate_features(client_kind: i32, client_features: &[String]) -> Vec<Strin
             .any(|feature| feature == WORLD_MODEL_FEATURE)
     {
         negotiated.push(PROCEDURE_EXECUTION_FEATURE.to_owned());
+    }
+    if client_kind == wire::ClientKind::Macos as i32
+        && cfg!(target_os = "macos")
+        && client_features
+            .iter()
+            .any(|feature| feature == NATIVE_FILE_STREAM_FEATURE)
+        && negotiated
+            .iter()
+            .any(|feature| feature == PROCEDURE_EXECUTION_FEATURE)
+    {
+        negotiated.push(NATIVE_FILE_STREAM_FEATURE.to_owned());
     }
     negotiated.sort();
     negotiated
@@ -164,8 +226,11 @@ where
                     core_instance_id: instance_id,
                     supported_features: vec![
                         APPLICATION_CONTROL_FEATURE.into(),
+                        NATIVE_FILE_STREAM_FEATURE.into(),
                         PROCEDURE_EXECUTION_FEATURE.into(),
                         WORLD_MODEL_FEATURE.into(),
+                        LAN_DEVICE_DISCOVERY_FEATURE.into(),
+                        LAN_RENDERER_OBSERVATION_FEATURE.into(),
                     ],
                 }),
             ),
@@ -313,7 +378,7 @@ where
                     let requests_procedure_execution = matches!(
                         command.command.as_ref(),
                         Some(wire::ui_command::Command::WorldModelCommand(world_model))
-                            if world_model.operation == "run_goal"
+                            if requires_procedure_execution_feature(&world_model.operation)
                     );
                     if requests_procedure_execution
                         && !negotiated_features
@@ -325,6 +390,67 @@ where
                                 request_id,
                                 CoreError::Protocol(
                                     "Client did not negotiate procedure_execution_v1".into(),
+                                ),
+                            )),
+                            super::writer::Lane::Control,
+                        )?;
+                        continue;
+                    }
+                    let requests_native_file_stream = matches!(
+                        command.command.as_ref(),
+                        Some(wire::ui_command::Command::WorldModelCommand(world_model))
+                            if requires_native_file_stream_feature(&world_model.operation)
+                    );
+                    if requests_native_file_stream
+                        && !negotiated_features
+                            .iter()
+                            .any(|feature| feature == NATIVE_FILE_STREAM_FEATURE)
+                    {
+                        outbound.enqueue(
+                            wire::frame::Payload::CoreEvent(error_event(
+                                request_id,
+                                CoreError::Protocol(
+                                    "Client did not negotiate native_file_stream_v1".into(),
+                                ),
+                            )),
+                            super::writer::Lane::Control,
+                        )?;
+                        continue;
+                    }
+                    let requests_lan_device_discovery = matches!(
+                        command.command.as_ref(),
+                        Some(wire::ui_command::Command::WorldModelCommand(world_model))
+                            if requires_lan_device_discovery_feature(&world_model.operation)
+                    );
+                    if requests_lan_device_discovery
+                        && !negotiated_features
+                            .iter()
+                            .any(|feature| feature == LAN_DEVICE_DISCOVERY_FEATURE)
+                    {
+                        outbound.enqueue(
+                            wire::frame::Payload::CoreEvent(error_event(
+                                request_id,
+                                CoreError::Protocol(
+                                    "Client did not negotiate lan_device_discovery_v1".into(),
+                                ),
+                            )),
+                            super::writer::Lane::Control,
+                        )?;
+                        continue;
+                    }
+                    let requests_lan_renderer_observation = matches!(
+                        command.command.as_ref(),
+                        Some(wire::ui_command::Command::WorldModelCommand(world_model))
+                            if requires_lan_renderer_observation_feature(&world_model.operation)
+                    );
+                    if requests_lan_renderer_observation
+                        && !negotiated_lan_renderer_observation(&negotiated_features)
+                    {
+                        outbound.enqueue(
+                            wire::frame::Payload::CoreEvent(error_event(
+                                request_id,
+                                CoreError::Protocol(
+                                    "Client did not negotiate lan_renderer_observation_v1 with lan_device_discovery_v1".into(),
                                 ),
                             )),
                             super::writer::Lane::Control,
@@ -1433,6 +1559,75 @@ mod protocol_v2_tests {
                 vec![APPLICATION_CONTROL_FEATURE.to_owned()]
             } else {
                 Vec::new()
+            }
+        );
+        assert!(requires_procedure_execution_feature("run_stream_procedure"));
+        assert!(requires_procedure_execution_feature("run_file_stream_copy"));
+        assert!(requires_procedure_execution_feature("run_goal"));
+        assert!(!requires_procedure_execution_feature("synthesize_goal"));
+        assert!(requires_native_file_stream_feature("run_stream_procedure"));
+        assert!(requires_native_file_stream_feature("run_file_stream_copy"));
+        assert!(!requires_native_file_stream_feature("run_goal"));
+        assert!(requires_lan_device_discovery_feature(
+            "discover_upnp_media_renderers"
+        ));
+        assert!(!requires_lan_device_discovery_feature(
+            "discover_current_application"
+        ));
+        assert!(requires_lan_renderer_observation_feature(
+            "observe_upnp_transport"
+        ));
+        assert!(requires_lan_renderer_observation_feature(
+            "observe_upnp_protocol_info"
+        ));
+        assert!(!requires_lan_renderer_observation_feature(
+            "discover_upnp_media_renderers"
+        ));
+        let lan_observation_features = vec![
+            LAN_DEVICE_DISCOVERY_FEATURE.to_owned(),
+            LAN_RENDERER_OBSERVATION_FEATURE.to_owned(),
+        ];
+        assert!(negotiated_lan_renderer_observation(
+            &lan_observation_features
+        ));
+        assert!(!negotiated_lan_renderer_observation(&[
+            LAN_DEVICE_DISCOVERY_FEATURE.to_owned()
+        ]));
+        assert!(!negotiated_lan_renderer_observation(&[
+            LAN_RENDERER_OBSERVATION_FEATURE.to_owned()
+        ]));
+        assert_eq!(
+            negotiate_features(wire::ClientKind::Windows as i32, &lan_observation_features),
+            vec![LAN_DEVICE_DISCOVERY_FEATURE.to_owned()]
+        );
+        assert_eq!(
+            negotiate_features(wire::ClientKind::Macos as i32, &lan_observation_features),
+            if cfg!(target_os = "macos") {
+                vec![
+                    LAN_DEVICE_DISCOVERY_FEATURE.to_owned(),
+                    LAN_RENDERER_OBSERVATION_FEATURE.to_owned(),
+                ]
+            } else {
+                vec![LAN_DEVICE_DISCOVERY_FEATURE.to_owned()]
+            }
+        );
+        let file_stream_features = vec![
+            APPLICATION_CONTROL_FEATURE.to_owned(),
+            PROCEDURE_EXECUTION_FEATURE.to_owned(),
+            WORLD_MODEL_FEATURE.to_owned(),
+            NATIVE_FILE_STREAM_FEATURE.to_owned(),
+        ];
+        assert_eq!(
+            negotiate_features(wire::ClientKind::Macos as i32, &file_stream_features),
+            if cfg!(target_os = "macos") {
+                vec![
+                    APPLICATION_CONTROL_FEATURE.to_owned(),
+                    NATIVE_FILE_STREAM_FEATURE.to_owned(),
+                    PROCEDURE_EXECUTION_FEATURE.to_owned(),
+                    WORLD_MODEL_FEATURE.to_owned(),
+                ]
+            } else {
+                vec![WORLD_MODEL_FEATURE.to_owned()]
             }
         );
     }

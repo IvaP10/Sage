@@ -19,6 +19,10 @@ pub(crate) struct RunSignal {
 }
 
 impl RunSignal {
+    pub(crate) fn peer_compute_cancellation(&self) -> crate::peer_compute::PeerComputeCancellation {
+        crate::peer_compute::PeerComputeCancellation::from_run_signal(self.clone())
+    }
+
     pub(crate) fn action_retired(&self, id: Uuid) -> bool {
         self.retired_actions
             .read()

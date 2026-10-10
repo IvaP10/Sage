@@ -343,9 +343,24 @@ fn compile_application_control_procedure(
         existing_action_ids,
     } = context;
 
+    if !procedure.streams.is_empty() {
+        return compile_native_file_stream_procedure(
+            procedure,
+            request,
+            task_id,
+            ProcedureCompilationContext {
+                systems,
+                assessments,
+                current_evidence_ids,
+                runtime,
+                selected_node_ids,
+                existing_action_ids,
+            },
+        );
+    }
+
     procedure.validate()?;
     if procedure.nodes.len() > 32
-        || !procedure.streams.is_empty()
         || procedure.completion.len() != 1
         || !matches!(
             procedure.completion[0],
@@ -442,11 +457,15 @@ fn compile_application_control_procedure(
             ));
         }
         descriptor.validate()?;
-        let control_id = descriptor.interface_control_id.clone().ok_or_else(|| {
-            CoreError::VerificationFailed(
-                "Learned capability has no semantic control identity".into(),
-            )
-        })?;
+        let control_id = if let Some(binding) = &node.controller_binding {
+            binding.control_id.clone()
+        } else {
+            descriptor.interface_control_id.clone().ok_or_else(|| {
+                CoreError::VerificationFailed(
+                    "Learned capability has no semantic control identity".into(),
+                )
+            })?
+        };
         let (expected_probe, port_type) = match descriptor.interface_probe_kind {
             Some(ProbeKind::RestoreSliderValue) => {
                 (ProbeKind::RestoreSliderValue, PortType::Number)
@@ -519,6 +538,14 @@ fn compile_application_control_procedure(
             ("procedure_id".into(), procedure.id.clone()),
             ("procedure_node_id".into(), node.id.clone()),
         ]);
+        if let Some(binding) = &node.controller_binding {
+            metadata.insert("controller_id".into(), binding.controller_id.clone());
+            metadata.insert(
+                "controller_revision".into(),
+                binding.controller_revision.to_string(),
+            );
+            metadata.insert("controller_step_id".into(), node.id.clone());
+        }
         if procedure
             .streams
             .iter()
@@ -585,6 +612,1240 @@ fn compile_application_control_procedure(
     Ok(graph)
 }
 
+/// Compile the currently supported live-stream product subset: one bounded
+/// local file read connected directly to one local file write. Both actions
+/// still enter the ordinary policy, grant, broker, verifier, and receipt path.
+fn compile_native_file_stream_procedure(
+    procedure: &crate::agency::ProcedureIr,
+    request: &str,
+    task_id: Uuid,
+    context: ProcedureCompilationContext<'_>,
+) -> CoreResult<ActionGraph> {
+    use crate::agency::{
+        CompletionCondition, ProcedureNodeKind, ProcedureValue, ResolvedProcedureInput,
+        ValueBinding,
+    };
+    use crate::contracts::Effect;
+    use crate::domain::{ProvenanceSource, TrustClass};
+    use crate::world_model::{CapabilityEvidenceState, PortType};
+
+    let ProcedureCompilationContext {
+        systems,
+        assessments,
+        current_evidence_ids,
+        runtime,
+        selected_node_ids,
+        existing_action_ids,
+    } = context;
+    procedure.validate()?;
+    if procedure.nodes.len() != 2
+        || procedure.streams.len() != 1
+        || procedure.completion.len() != 1
+        || !matches!(
+            procedure.completion[0],
+            CompletionCondition::AllNodesSucceeded
+        )
+    {
+        return Err(CoreError::ExecutorUnavailable(
+            "The task runner currently streams only one local file directly into another file"
+                .into(),
+        ));
+    }
+
+    let channel = &procedure.streams[0];
+    let source_node = procedure
+        .nodes
+        .iter()
+        .find(|node| node.id == channel.producer_node)
+        .ok_or_else(|| CoreError::InvalidAction("File stream producer is missing".into()))?;
+    let sink_node = procedure
+        .nodes
+        .iter()
+        .find(|node| node.id == channel.consumer_node)
+        .ok_or_else(|| CoreError::InvalidAction("File stream consumer is missing".into()))?;
+    if source_node.id == sink_node.id
+        || !source_node.depends_on.is_empty()
+        || !sink_node.depends_on.is_empty()
+        || channel.producer_output != "bytes"
+        || channel.consumer_input != "content"
+        || channel.maximum_item_bytes > crate::execution::files::MAX_BYTES
+    {
+        return Err(CoreError::InvalidAction(
+            "File stream endpoints must be independent and use the bounded bytes-to-content contract".into(),
+        ));
+    }
+
+    let selected = selected_node_ids.iter().cloned().collect::<BTreeSet<_>>();
+    if selected.len() != selected_node_ids.len()
+        || selected != BTreeSet::from([source_node.id.clone(), sink_node.id.clone()])
+    {
+        return Err(CoreError::InvalidAction(
+            "A file stream must dispatch its producer and consumer as one ready cohort".into(),
+        ));
+    }
+
+    let (source_capability_id, source_system_id, source_fingerprint, source_bindings) =
+        match &source_node.kind {
+            ProcedureNodeKind::CapabilityCall {
+                capability_id,
+                system_id,
+                system_fingerprint,
+                input_bindings,
+            } => (
+                capability_id,
+                *system_id,
+                system_fingerprint,
+                input_bindings,
+            ),
+            _ => {
+                return Err(CoreError::InvalidAction(
+                    "File stream producer must be a capability call".into(),
+                ));
+            }
+        };
+    let (sink_capability_id, sink_system_id, sink_fingerprint, sink_bindings) =
+        match &sink_node.kind {
+            ProcedureNodeKind::CapabilityCall {
+                capability_id,
+                system_id,
+                system_fingerprint,
+                input_bindings,
+            } => (
+                capability_id,
+                *system_id,
+                system_fingerprint,
+                input_bindings,
+            ),
+            _ => {
+                return Err(CoreError::InvalidAction(
+                    "File stream consumer must be a capability call".into(),
+                ));
+            }
+        };
+    if source_system_id != sink_system_id || source_fingerprint != sink_fingerprint {
+        return Err(CoreError::VerificationFailed(
+            "A local file stream must remain within one current system identity".into(),
+        ));
+    }
+
+    let system = systems
+        .iter()
+        .find(|system| system.id == source_system_id)
+        .filter(|system| system.fingerprint == *source_fingerprint)
+        .ok_or_else(|| {
+            CoreError::ExecutorUnavailable("File stream target system is no longer current".into())
+        })?;
+    let assessment_by_id = assessments
+        .iter()
+        .map(|assessment| (assessment.descriptor.id.as_str(), assessment))
+        .collect::<BTreeMap<_, _>>();
+    if assessment_by_id.len() != assessments.len() {
+        return Err(CoreError::VerificationFailed(
+            "Current capability identities are ambiguous".into(),
+        ));
+    }
+    let source_assessment = assessment_by_id
+        .get(source_capability_id.as_str())
+        .ok_or_else(|| CoreError::ExecutorUnavailable("File reader capability is stale".into()))?;
+    let sink_assessment = assessment_by_id
+        .get(sink_capability_id.as_str())
+        .ok_or_else(|| CoreError::ExecutorUnavailable("File writer capability is stale".into()))?;
+    let source = &source_assessment.descriptor;
+    let sink = &sink_assessment.descriptor;
+    for assessment in [source_assessment, sink_assessment] {
+        let descriptor = &assessment.descriptor;
+        descriptor.validate()?;
+        let first_party_file = assessment.evidence_state
+            == CapabilityEvidenceState::SageCodeRegistered
+            && matches!(
+                descriptor.executor_id.as_deref(),
+                Some("read_file" | "write_file")
+            );
+        if (assessment.evidence_state != CapabilityEvidenceState::ReversiblyExperimented
+            && !first_party_file)
+            || descriptor.system_id != source_system_id
+            || descriptor.system_fingerprint != *source_fingerprint
+            || descriptor
+                .evidence_ids
+                .iter()
+                .chain(&descriptor.preconditions.observed_state_fact_ids)
+                .any(|evidence| !current_evidence_ids.contains(evidence))
+        {
+            return Err(CoreError::PermissionRequired(
+                "File stream capabilities require current, experimented evidence".into(),
+            ));
+        }
+    }
+
+    let read_inputs = BTreeMap::from([("max_bytes", PortType::Number), ("path", PortType::Text)]);
+    let write_inputs = BTreeMap::from([
+        ("content", PortType::Bytes),
+        ("overwrite", PortType::Boolean),
+        ("path", PortType::Text),
+    ]);
+    if source.executor_id.as_deref() != Some("read_file")
+        || source.effects != BTreeSet::from([Effect::Read])
+        || source.input_ports.len() != read_inputs.len()
+        || source.output_ports.len() != 1
+        || source.output_ports[0].name != "bytes"
+        || source.output_ports[0].value_type != PortType::Bytes
+        || source.output_ports[0].max_bytes > crate::execution::files::MAX_BYTES
+        || sink.executor_id.as_deref() != Some("write_file")
+        || sink.effects != BTreeSet::from([Effect::Create, Effect::Modify])
+        || sink.input_ports.len() != write_inputs.len()
+        || !sink.output_ports.is_empty()
+        || source_bindings.len() != read_inputs.len()
+        || sink_bindings.len() != write_inputs.len()
+        || source_bindings
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>()
+            != read_inputs.keys().copied().collect()
+        || sink_bindings
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>()
+            != write_inputs.keys().copied().collect()
+        || !matches!(sink_bindings.get("content"), Some(ValueBinding::Stream { channel_id }) if channel_id == &channel.id)
+    {
+        return Err(CoreError::PermissionRequired(
+            "Procedure stream does not match the sealed native file read/write signatures".into(),
+        ));
+    }
+    for descriptor in [source, sink] {
+        let expected = if descriptor.executor_id.as_deref() == Some("read_file") {
+            &read_inputs
+        } else {
+            &write_inputs
+        };
+        if descriptor.input_ports.len() != expected.len()
+            || descriptor
+                .input_ports
+                .iter()
+                .any(|port| expected.get(port.name.as_str()) != Some(&port.value_type))
+        {
+            return Err(CoreError::VerificationFailed(
+                "Native file capability input types differ from the registered operation".into(),
+            ));
+        }
+    }
+
+    let capabilities = assessments
+        .iter()
+        .map(|assessment| assessment.descriptor.clone())
+        .collect::<Vec<_>>();
+    let source_inputs =
+        crate::agency::resolve_call_inputs(source_node, procedure, runtime, &capabilities)
+            .ok_or_else(|| {
+                CoreError::PermissionRequired(
+                    "File stream source inputs are not fully resolved".into(),
+                )
+            })?;
+    let sink_inputs =
+        crate::agency::resolve_call_inputs(sink_node, procedure, runtime, &capabilities)
+            .ok_or_else(|| {
+                CoreError::PermissionRequired(
+                    "File stream sink inputs are not fully resolved".into(),
+                )
+            })?;
+    let read_path = match source_inputs.get("path") {
+        Some(ResolvedProcedureInput::Value {
+            value: ProcedureValue::Text(value),
+            target_port,
+            ..
+        }) if source.input_ports.iter().find(|port| port.name == "path") == Some(target_port) => {
+            std::path::PathBuf::from(value)
+        }
+        _ => {
+            return Err(CoreError::InvalidAction(
+                "File stream source path must be an exact text input".into(),
+            ));
+        }
+    };
+    let requested_max_bytes = match source_inputs.get("max_bytes") {
+        Some(ResolvedProcedureInput::Value {
+            value: ProcedureValue::Number(value),
+            target_port,
+            ..
+        }) if source
+            .input_ports
+            .iter()
+            .find(|port| port.name == "max_bytes")
+            == Some(target_port)
+            && value.is_finite()
+            && *value >= 1.0
+            && *value <= crate::execution::files::MAX_BYTES as f64
+            && value.fract() == 0.0 =>
+        {
+            *value as u64
+        }
+        _ => {
+            return Err(CoreError::InvalidAction(
+                "File stream byte limit must be a positive bounded integer".into(),
+            ));
+        }
+    };
+    let write_path = match sink_inputs.get("path") {
+        Some(ResolvedProcedureInput::Value {
+            value: ProcedureValue::Text(value),
+            target_port,
+            ..
+        }) if sink.input_ports.iter().find(|port| port.name == "path") == Some(target_port) => {
+            std::path::PathBuf::from(value)
+        }
+        _ => {
+            return Err(CoreError::InvalidAction(
+                "File stream destination path must be an exact text input".into(),
+            ));
+        }
+    };
+    let overwrite = match sink_inputs.get("overwrite") {
+        Some(ResolvedProcedureInput::Value {
+            value: ProcedureValue::Boolean(value),
+            target_port,
+            ..
+        }) if sink
+            .input_ports
+            .iter()
+            .find(|port| port.name == "overwrite")
+            == Some(target_port) =>
+        {
+            *value
+        }
+        _ => {
+            return Err(CoreError::InvalidAction(
+                "File stream overwrite must be an exact Boolean input".into(),
+            ));
+        }
+    };
+    if read_path == write_path {
+        return Err(CoreError::PolicyDenied(
+            "A streamed file copy cannot overwrite its source".into(),
+        ));
+    }
+    let maximum_bytes = source.output_ports[0]
+        .max_bytes
+        .min(
+            sink.input_ports
+                .iter()
+                .find(|port| port.name == "content")
+                .unwrap()
+                .max_bytes,
+        )
+        .min(crate::execution::files::MAX_BYTES);
+    if maximum_bytes == 0
+        || channel.maximum_item_bytes > maximum_bytes
+        || requested_max_bytes < maximum_bytes
+    {
+        return Err(CoreError::InvalidAction(
+            "File stream channel exceeds the requested or current file capability byte bound"
+                .into(),
+        ));
+    }
+    let read_limit = requested_max_bytes;
+
+    let action_ids = [source_node, sink_node]
+        .into_iter()
+        .map(|node| {
+            (
+                node.id.clone(),
+                existing_action_ids
+                    .get(&node.id)
+                    .copied()
+                    .unwrap_or_else(Uuid::new_v4),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut source_metadata = BTreeMap::from([
+        ("procedure_id".into(), procedure.id.clone()),
+        ("procedure_node_id".into(), source_node.id.clone()),
+        ("procedure_stream_node".into(), "true".into()),
+        (
+            "procedure_stream_output".into(),
+            channel.producer_output.clone(),
+        ),
+        ("procedure_stream_channel_id".into(), channel.id.clone()),
+        (
+            "procedure_stream_consumer_node".into(),
+            sink_node.id.clone(),
+        ),
+        (
+            "procedure_stream_max_bytes".into(),
+            maximum_bytes.to_string(),
+        ),
+    ]);
+    source_metadata.insert(
+        "procedure_stream_item_bytes".into(),
+        channel.maximum_item_bytes.to_string(),
+    );
+    let sink_metadata = BTreeMap::from([
+        ("procedure_id".into(), procedure.id.clone()),
+        ("procedure_node_id".into(), sink_node.id.clone()),
+        ("procedure_stream_node".into(), "true".into()),
+        (
+            "procedure_stream_input".into(),
+            channel.consumer_input.clone(),
+        ),
+        ("procedure_stream_channel_id".into(), channel.id.clone()),
+        (
+            "procedure_stream_producer_node".into(),
+            source_node.id.clone(),
+        ),
+        (
+            "procedure_stream_max_bytes".into(),
+            maximum_bytes.to_string(),
+        ),
+    ]);
+    let source_action = ActionProposal {
+        id: action_ids[&source_node.id],
+        task_id,
+        action: Action::ReadFile {
+            path: read_path.clone(),
+            max_bytes: read_limit,
+        },
+        expected_outcome: ExpectedOutcome::FileReadMatchesStream {
+            path: read_path.clone(),
+            channel_id: channel.id.clone(),
+            producer_node: source_node.id.clone(),
+            output_port: channel.producer_output.clone(),
+            consumer_node: sink_node.id.clone(),
+            maximum_bytes,
+        },
+        target_resource: read_path.to_string_lossy().into_owned(),
+        provenance: Provenance {
+            source: ProvenanceSource::SageCore,
+            trust: TrustClass::TrustedComponent,
+            source_id: Some(format!("procedure:{}", procedure.id)),
+            parent_ids: vec![
+                format!("capability:{source_capability_id}"),
+                format!("node:{}", source_node.id),
+            ],
+        },
+        metadata: source_metadata,
+    };
+    let sink_action = ActionProposal {
+        id: action_ids[&sink_node.id],
+        task_id,
+        action: Action::WriteFile {
+            path: write_path.clone(),
+            content: String::new(),
+            overwrite,
+        },
+        expected_outcome: ExpectedOutcome::FileMatchesStream {
+            path: write_path.clone(),
+            channel_id: channel.id.clone(),
+            producer_node: source_node.id.clone(),
+            maximum_bytes,
+        },
+        target_resource: write_path.to_string_lossy().into_owned(),
+        provenance: Provenance {
+            source: ProvenanceSource::SageCore,
+            trust: TrustClass::TrustedComponent,
+            source_id: Some(format!("procedure:{}", procedure.id)),
+            parent_ids: vec![
+                format!("capability:{sink_capability_id}"),
+                format!("node:{}", sink_node.id),
+            ],
+        },
+        metadata: sink_metadata,
+    };
+    let graph = ActionGraph {
+        goal: request.trim().to_owned(),
+        nodes: vec![
+            crate::domain::ActionNode {
+                proposal: source_action,
+                depends_on: BTreeSet::new(),
+            },
+            crate::domain::ActionNode {
+                proposal: sink_action,
+                depends_on: BTreeSet::new(),
+            },
+        ],
+    };
+    graph.validate(task_id).map_err(CoreError::InvalidAction)?;
+    let _ = system;
+    Ok(graph)
+}
+
+fn native_file_system_fingerprint() -> String {
+    format!(
+        "{:x}",
+        sha2::Sha256::digest(format!(
+            "sage-native-file-executor-v1\0{}\0{}",
+            std::env::consts::OS,
+            env!("CARGO_PKG_VERSION")
+        ))
+    )
+}
+
+fn registered_native_file_capabilities(
+    system_id: Uuid,
+    system_fingerprint: &str,
+    evidence_id: Uuid,
+    now: chrono::DateTime<Utc>,
+) -> Vec<crate::world_model::CapabilityDescriptor> {
+    use crate::contracts::{Effect, Sensitivity};
+    use crate::world_model::{CapabilityDescriptor, DataPort, PortType, Preconditions};
+
+    let port = |name: &str, value_type, max_bytes| DataPort {
+        name: name.into(),
+        value_type,
+        max_bytes,
+        privacy: Sensitivity::Private,
+    };
+    let base = |id: &str, label: &str, inputs, outputs, effects| CapabilityDescriptor {
+        schema_version: 1,
+        id: id.into(),
+        system_id,
+        system_fingerprint: system_fingerprint.into(),
+        interface_control_id: None,
+        interface_probe_kind: None,
+        label: label.into(),
+        input_ports: inputs,
+        output_ports: outputs,
+        preconditions: Preconditions {
+            observed_state_fact_ids: vec![evidence_id],
+            description: "Sage's versioned native file executor is registered for this platform"
+                .into(),
+        },
+        effects,
+        verification: "Fresh exact file identity, size, and content digest".into(),
+        restoration: None,
+        cancellation:
+            "Stop prevents new dispatch and tracks any started file operation until settled".into(),
+        executor_id: None,
+        evidence_ids: vec![evidence_id],
+        updated_at: now,
+    };
+    let mut read = base(
+        "sage.local.read_file",
+        "Read a bounded local file",
+        vec![
+            port("path", PortType::Text, 4096),
+            port("max_bytes", PortType::Number, 8),
+        ],
+        vec![port(
+            "bytes",
+            PortType::Bytes,
+            crate::execution::files::MAX_BYTES,
+        )],
+        BTreeSet::from([Effect::Read]),
+    );
+    read.executor_id = Some("read_file".into());
+    let mut write = base(
+        "sage.local.write_file",
+        "Write a bounded local file",
+        vec![
+            port("path", PortType::Text, 4096),
+            port(
+                "content",
+                PortType::Bytes,
+                crate::execution::files::MAX_BYTES,
+            ),
+            port("overwrite", PortType::Boolean, 1),
+        ],
+        Vec::new(),
+        BTreeSet::from([Effect::Create, Effect::Modify]),
+    );
+    write.executor_id = Some("write_file".into());
+    vec![read, write]
+}
+
+fn register_native_file_capabilities(
+    store: &LocalStore,
+) -> CoreResult<(
+    crate::world_model::SystemDescriptor,
+    Vec<crate::world_model::CapabilityAssessment>,
+)> {
+    use crate::contracts::Sensitivity;
+    use crate::world_model::{
+        CapabilityEvidenceState, EvidenceOrigin, FactValue, ObservationEnvelope, ObservedFact,
+        SystemDescriptor, SystemKind,
+    };
+
+    let now = Utc::now();
+    let fingerprint = native_file_system_fingerprint();
+    let system = store.observe_system(SystemDescriptor {
+        id: Uuid::nil(),
+        kind: SystemKind::Device,
+        key: "sage.local-filesystem".into(),
+        label: "Sage local filesystem".into(),
+        fingerprint: fingerprint.clone(),
+        revision: 0,
+        updated_at: now,
+    })?;
+    let evidence_id = Uuid::new_v4();
+    store.record_world_observation(&ObservationEnvelope {
+        id: evidence_id,
+        system_id: system.id,
+        session_id: None,
+        worker_session: None,
+        system_fingerprint: fingerprint.clone(),
+        origin: EvidenceOrigin::SageCode,
+        privacy: Sensitivity::Private,
+        observed_at: now,
+        facts: vec![
+            ObservedFact {
+                name: "sage.executor.registered".into(),
+                subject: Some("read_file".into()),
+                value: FactValue::Identifier("read_file".into()),
+            },
+            ObservedFact {
+                name: "sage.executor.registered".into(),
+                subject: Some("write_file".into()),
+                value: FactValue::Identifier("write_file".into()),
+            },
+        ],
+    })?;
+    for descriptor in registered_native_file_capabilities(system.id, &fingerprint, evidence_id, now)
+    {
+        store.record_capability_candidate(&descriptor)?;
+    }
+    let assessments = store.capability_assessments(system.id)?;
+    if assessments.len() != 2
+        || assessments.iter().any(|assessment| {
+            assessment.evidence_state != CapabilityEvidenceState::SageCodeRegistered
+        })
+    {
+        return Err(CoreError::VerificationFailed(
+            "Sage's native file capabilities did not retain their exact first-party registration evidence".into(),
+        ));
+    }
+    Ok((system, assessments))
+}
+
+fn native_file_copy_procedure(
+    system: &crate::world_model::SystemDescriptor,
+    source_path: &str,
+    destination_path: &str,
+    overwrite: bool,
+    procedure_id: String,
+    assessments: &[crate::world_model::CapabilityAssessment],
+) -> CoreResult<crate::agency::ProcedureIr> {
+    use crate::agency::{
+        CompletionCondition, ProcedureIr, ProcedureNode, ProcedureNodeKind, ProcedureValue,
+        StreamBackpressure, StreamChannel, ValueBinding,
+    };
+
+    let descriptors = assessments
+        .iter()
+        .map(|assessment| {
+            (
+                assessment.descriptor.executor_id.as_deref(),
+                &assessment.descriptor,
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let read = descriptors.get(&Some("read_file")).ok_or_else(|| {
+        CoreError::ExecutorUnavailable("Registered local file reader is missing".into())
+    })?;
+    let write = descriptors.get(&Some("write_file")).ok_or_else(|| {
+        CoreError::ExecutorUnavailable("Registered local file writer is missing".into())
+    })?;
+    let read_path_port = read
+        .input_ports
+        .iter()
+        .find(|port| port.name == "path")
+        .ok_or_else(|| CoreError::VerificationFailed("Local reader path port is missing".into()))?;
+    let read_limit_port = read
+        .input_ports
+        .iter()
+        .find(|port| port.name == "max_bytes")
+        .ok_or_else(|| {
+            CoreError::VerificationFailed("Local reader limit port is missing".into())
+        })?;
+    let bytes_port = read
+        .output_ports
+        .iter()
+        .find(|port| port.name == "bytes")
+        .ok_or_else(|| {
+            CoreError::VerificationFailed("Local reader Bytes port is missing".into())
+        })?;
+    let write_path_port = write
+        .input_ports
+        .iter()
+        .find(|port| port.name == "path")
+        .ok_or_else(|| CoreError::VerificationFailed("Local writer path port is missing".into()))?;
+    let write_overwrite_port = write
+        .input_ports
+        .iter()
+        .find(|port| port.name == "overwrite")
+        .ok_or_else(|| {
+            CoreError::VerificationFailed("Local writer overwrite port is missing".into())
+        })?;
+    let procedure = ProcedureIr {
+        schema_version: 2,
+        id: procedure_id,
+        nodes: vec![
+            ProcedureNode {
+                id: "source".into(),
+                depends_on: BTreeSet::new(),
+                outputs: BTreeMap::from([(bytes_port.name.clone(), bytes_port.clone())]),
+                kind: ProcedureNodeKind::CapabilityCall {
+                    capability_id: read.id.clone(),
+                    system_id: system.id,
+                    system_fingerprint: system.fingerprint.clone(),
+                    input_bindings: BTreeMap::from([
+                        (
+                            "path".into(),
+                            ValueBinding::Literal {
+                                value: ProcedureValue::Text(source_path.into()),
+                                port: read_path_port.clone(),
+                            },
+                        ),
+                        (
+                            "max_bytes".into(),
+                            ValueBinding::Literal {
+                                value: ProcedureValue::Number(
+                                    crate::execution::files::MAX_BYTES as f64,
+                                ),
+                                port: read_limit_port.clone(),
+                            },
+                        ),
+                    ]),
+                },
+                controller_binding: None,
+            },
+            ProcedureNode {
+                id: "destination".into(),
+                depends_on: BTreeSet::new(),
+                outputs: BTreeMap::new(),
+                kind: ProcedureNodeKind::CapabilityCall {
+                    capability_id: write.id.clone(),
+                    system_id: system.id,
+                    system_fingerprint: system.fingerprint.clone(),
+                    input_bindings: BTreeMap::from([
+                        (
+                            "path".into(),
+                            ValueBinding::Literal {
+                                value: ProcedureValue::Text(destination_path.into()),
+                                port: write_path_port.clone(),
+                            },
+                        ),
+                        (
+                            "content".into(),
+                            ValueBinding::Stream {
+                                channel_id: "source-to-destination".into(),
+                            },
+                        ),
+                        (
+                            "overwrite".into(),
+                            ValueBinding::Literal {
+                                value: ProcedureValue::Boolean(overwrite),
+                                port: write_overwrite_port.clone(),
+                            },
+                        ),
+                    ]),
+                },
+                controller_binding: None,
+            },
+        ],
+        streams: vec![StreamChannel {
+            id: "source-to-destination".into(),
+            producer_node: "source".into(),
+            producer_output: "bytes".into(),
+            consumer_node: "destination".into(),
+            consumer_input: "content".into(),
+            capacity_items: 2,
+            maximum_item_bytes: 64 * 1024,
+            backpressure: StreamBackpressure::BlockProducer,
+        }],
+        completion: vec![CompletionCondition::AllNodesSucceeded],
+    };
+    procedure.validate()?;
+    Ok(procedure)
+}
+
+fn normalize_file_stream_targets(
+    mut procedure: crate::agency::ProcedureIr,
+    assessments: &[crate::world_model::CapabilityAssessment],
+    resolver: &ResourceResolver,
+) -> CoreResult<crate::agency::ProcedureIr> {
+    use crate::agency::{ProcedureNodeKind, ProcedureValue, ValueBinding};
+
+    if procedure.streams.len() != 1 || procedure.nodes.len() != 2 {
+        return Ok(procedure);
+    }
+    let channel = &procedure.streams[0];
+    let Some(source_index) = procedure
+        .nodes
+        .iter()
+        .position(|node| node.id == channel.producer_node)
+    else {
+        return Err(CoreError::InvalidAction(
+            "File stream source node is missing".into(),
+        ));
+    };
+    let Some(destination_index) = procedure
+        .nodes
+        .iter()
+        .position(|node| node.id == channel.consumer_node)
+    else {
+        return Err(CoreError::InvalidAction(
+            "File stream destination node is missing".into(),
+        ));
+    };
+    let source_node = procedure.nodes[source_index].clone();
+    let destination_node = procedure.nodes[destination_index].clone();
+    let capability_by_id = assessments
+        .iter()
+        .map(|assessment| (assessment.descriptor.id.as_str(), &assessment.descriptor))
+        .collect::<BTreeMap<_, _>>();
+    fn capability_id(node: &crate::agency::ProcedureNode) -> Option<&str> {
+        match &node.kind {
+            ProcedureNodeKind::CapabilityCall { capability_id, .. } => Some(capability_id.as_str()),
+            _ => None,
+        }
+    }
+    let (Some(source_capability), Some(destination_capability)) = (
+        capability_id(&source_node).and_then(|id| capability_by_id.get(id)),
+        capability_id(&destination_node).and_then(|id| capability_by_id.get(id)),
+    ) else {
+        return Ok(procedure);
+    };
+    if source_capability.executor_id.as_deref() != Some("read_file")
+        || destination_capability.executor_id.as_deref() != Some("write_file")
+    {
+        return Ok(procedure);
+    }
+
+    let resolve_path =
+        |node: &crate::agency::ProcedureNode, action: Action| -> CoreResult<std::path::PathBuf> {
+            let proposal = ActionProposal {
+                id: Uuid::new_v4(),
+                task_id: Uuid::new_v4(),
+                target_resource: "file stream target resolution".into(),
+                action,
+                expected_outcome: ExpectedOutcome::UserAnswered,
+                provenance: Provenance::user(),
+                metadata: BTreeMap::new(),
+            };
+            let resolved = resolver.prepare_proposal(&proposal)?;
+            match resolved.action {
+                Action::ReadFile { path, .. } | Action::WriteFile { path, .. } => Ok(path),
+                _ => Err(CoreError::VerificationFailed(format!(
+                    "File stream node {} resolved to another action type",
+                    node.id
+                ))),
+            }
+        };
+    let source_path = match &source_node.kind {
+        ProcedureNodeKind::CapabilityCall { input_bindings, .. } => {
+            match input_bindings.get("path") {
+                Some(ValueBinding::Literal {
+                    value: ProcedureValue::Text(path),
+                    port,
+                }) if port.name == "path" => path.clone(),
+                _ => {
+                    return Err(CoreError::InvalidAction(
+                        "File stream source path must be a typed literal".into(),
+                    ));
+                }
+            }
+        }
+        _ => return Ok(procedure),
+    };
+    let destination_path = match &destination_node.kind {
+        ProcedureNodeKind::CapabilityCall { input_bindings, .. } => {
+            match input_bindings.get("path") {
+                Some(ValueBinding::Literal {
+                    value: ProcedureValue::Text(path),
+                    port,
+                }) if port.name == "path" => path.clone(),
+                _ => {
+                    return Err(CoreError::InvalidAction(
+                        "File stream destination path must be a typed literal".into(),
+                    ));
+                }
+            }
+        }
+        _ => return Ok(procedure),
+    };
+    let source_limit = match &source_node.kind {
+        ProcedureNodeKind::CapabilityCall { input_bindings, .. } => {
+            match input_bindings.get("max_bytes") {
+                Some(ValueBinding::Literal {
+                    value: ProcedureValue::Number(limit),
+                    port,
+                }) if port.name == "max_bytes"
+                    && limit.is_finite()
+                    && *limit >= 1.0
+                    && *limit <= crate::execution::files::MAX_BYTES as f64
+                    && limit.fract() == 0.0 =>
+                {
+                    *limit as u64
+                }
+                _ => {
+                    return Err(CoreError::InvalidAction(
+                        "File stream byte limit must be a positive bounded integer".into(),
+                    ));
+                }
+            }
+        }
+        _ => return Ok(procedure),
+    };
+    let overwrite = match &destination_node.kind {
+        ProcedureNodeKind::CapabilityCall { input_bindings, .. } => {
+            match input_bindings.get("overwrite") {
+                Some(ValueBinding::Literal {
+                    value: ProcedureValue::Boolean(overwrite),
+                    port,
+                }) if port.name == "overwrite" => *overwrite,
+                _ => {
+                    return Err(CoreError::InvalidAction(
+                        "File stream overwrite must be an exact Boolean input".into(),
+                    ));
+                }
+            }
+        }
+        _ => return Ok(procedure),
+    };
+    let resolved_source = resolve_path(
+        &source_node,
+        Action::ReadFile {
+            path: source_path.into(),
+            max_bytes: source_limit,
+        },
+    )?;
+    let resolved_destination = resolve_path(
+        &destination_node,
+        Action::WriteFile {
+            path: destination_path.into(),
+            content: String::new(),
+            overwrite: false,
+        },
+    )?;
+    if resolved_source == resolved_destination {
+        return Err(CoreError::PolicyDenied(
+            "A streamed file copy cannot overwrite its source".into(),
+        ));
+    }
+    let source = crate::execution::files::PinnedPath::open(&resolved_source)?;
+    let source_identity = source
+        .snapshot_identity()?
+        .ok_or_else(|| CoreError::InvalidAction("The source file no longer exists".into()))?;
+    if source_identity.directory {
+        return Err(CoreError::InvalidAction(
+            "A streamed file copy requires a regular source file".into(),
+        ));
+    }
+    if source_identity.size > source_limit {
+        return Err(CoreError::InvalidAction(format!(
+            "The source file exceeds the authorized stream limit of {source_limit} bytes"
+        )));
+    }
+    let destination = crate::execution::files::PinnedPath::open(&resolved_destination)?;
+    if let Some(destination_identity) = destination.snapshot_identity()? {
+        if destination_identity.directory {
+            return Err(CoreError::InvalidAction(
+                "A streamed file copy requires a file destination".into(),
+            ));
+        }
+        if !overwrite {
+            return Err(CoreError::InvalidAction(
+                "The destination already exists; enable replacement to continue".into(),
+            ));
+        }
+    }
+    let replace_path =
+        |node: &mut crate::agency::ProcedureNode, resolved: std::path::PathBuf| -> CoreResult<()> {
+            let path = resolved.to_str().ok_or_else(|| {
+                CoreError::InvalidAction("Resolved file stream path is not valid Unicode".into())
+            })?;
+            let ProcedureNodeKind::CapabilityCall { input_bindings, .. } = &mut node.kind else {
+                return Err(CoreError::InvalidAction(
+                    "File stream endpoint must be a capability call".into(),
+                ));
+            };
+            let Some(ValueBinding::Literal { value, .. }) = input_bindings.get_mut("path") else {
+                return Err(CoreError::InvalidAction(
+                    "File stream path binding changed during target resolution".into(),
+                ));
+            };
+            *value = ProcedureValue::Text(path.to_owned());
+            Ok(())
+        };
+    replace_path(&mut procedure.nodes[source_index], resolved_source)?;
+    replace_path(
+        &mut procedure.nodes[destination_index],
+        resolved_destination,
+    )?;
+    procedure.validate()?;
+    Ok(procedure)
+}
+
+/// Turn a freshly revalidated reviewed controller into the same bounded
+/// procedure representation used by goal synthesis. The returned capability
+/// assessments are invocation-local views: their semantic control IDs and
+/// precondition evidence are rebound to this exact passive observation. They
+/// do not alter stored capabilities or grant execution authority.
+struct ReviewedControllerRunContext<'a> {
+    controller_id: &'a str,
+    controller_revision: u64,
+    controller: &'a crate::agency::ControllerIr,
+    rebinding: &'a crate::agency::ControllerRebinding,
+    observation: &'a crate::world_model::ObservationEnvelope,
+    assessments: &'a [crate::world_model::CapabilityAssessment],
+}
+
+fn prepare_reviewed_controller_run(
+    context: ReviewedControllerRunContext<'_>,
+    task_id: Uuid,
+    now: chrono::DateTime<Utc>,
+) -> CoreResult<(
+    crate::agency::ProcedureIr,
+    Vec<crate::world_model::CapabilityAssessment>,
+)> {
+    use crate::agency::{
+        CompletionCondition, ControllerPrimitive, ProcedureIr, ProcedureNode, ProcedureNodeKind,
+    };
+    use crate::contracts::Effect;
+    use crate::world_model::CapabilityEvidenceState;
+
+    let ReviewedControllerRunContext {
+        controller_id,
+        controller_revision,
+        controller,
+        rebinding,
+        observation,
+        assessments,
+    } = context;
+    controller.validate()?;
+    if controller.steps.is_empty()
+        || controller.steps.len() > 32
+        || observation.system_id != controller.system_id
+        || observation.system_fingerprint != controller.system_fingerprint
+        || rebinding.control_ids_by_step.len() != controller.steps.len()
+    {
+        return Err(CoreError::ExecutorUnavailable(
+            "Reviewed controller exceeds the current task-runner bounds or target identity".into(),
+        ));
+    }
+    let observed_fingerprint = observation
+        .facts
+        .iter()
+        .find(|fact| fact.subject.is_none() && fact.name == "application.interface_fingerprint")
+        .and_then(|fact| match &fact.value {
+            crate::world_model::FactValue::Identifier(value) => Some(value.as_str()),
+            _ => None,
+        });
+    if observed_fingerprint != Some(rebinding.observed_interface_fingerprint.as_str()) {
+        return Err(CoreError::VerificationFailed(
+            "Controller rebind does not match its exact fresh interface observation".into(),
+        ));
+    }
+
+    let assessments_by_id = assessments
+        .iter()
+        .map(|assessment| (assessment.descriptor.id.as_str(), assessment))
+        .collect::<BTreeMap<_, _>>();
+    if assessments_by_id.len() != assessments.len() {
+        return Err(CoreError::VerificationFailed(
+            "Current controller capability identities are ambiguous".into(),
+        ));
+    }
+    let safe_probes = crate::world_model::safe_probe_candidates(observation);
+    let mut rebound_assessments =
+        BTreeMap::<String, crate::world_model::CapabilityAssessment>::new();
+    let mut nodes = Vec::with_capacity(controller.steps.len());
+
+    for step in &controller.steps {
+        if step.primitive != ControllerPrimitive::InvokeRegisteredCapability
+            || !step.preconditions.is_empty()
+        {
+            return Err(CoreError::ExecutorUnavailable(
+                "This task runner supports reviewed registered-capability steps without separate controller conditions".into(),
+            ));
+        }
+        let capability_id = step.capability_id.as_ref().ok_or_else(|| {
+            CoreError::VerificationFailed(
+                "Reviewed controller step has no registered capability identity".into(),
+            )
+        })?;
+        let assessment = assessments_by_id
+            .get(capability_id.as_str())
+            .ok_or_else(|| {
+                CoreError::ExecutorUnavailable(
+                    "Reviewed controller capability is no longer current".into(),
+                )
+            })?;
+        let descriptor = &assessment.descriptor;
+        if assessment.evidence_state != CapabilityEvidenceState::ReversiblyExperimented
+            || descriptor.system_id != controller.system_id
+            || descriptor.system_fingerprint != controller.system_fingerprint
+            || descriptor.interface_control_id.as_deref() != Some(step.anchor.id.as_str())
+            || descriptor
+                .label
+                .strip_prefix("Set ")
+                .is_none_or(|label| label != step.anchor.accessible_name)
+            || descriptor.effects != BTreeSet::from([Effect::ControlApplication])
+            || descriptor.executor_id.as_deref() != Some("set_application_control")
+        {
+            return Err(CoreError::PermissionRequired(
+                "Reviewed controller no longer matches its reversibly tested application capability".into(),
+            ));
+        }
+        let probe_kind = descriptor.interface_probe_kind.ok_or_else(|| {
+            CoreError::PermissionRequired(
+                "Reviewed controller capability is not a bounded reversible control".into(),
+            )
+        })?;
+        let rebound_control_id = rebinding.control_ids_by_step.get(&step.id).ok_or_else(|| {
+            CoreError::VerificationFailed(
+                "Reviewed controller step was not rebound to the current interface".into(),
+            )
+        })?;
+        let control_facts = observation
+            .facts
+            .iter()
+            .filter(|fact| fact.subject.as_deref() == Some(rebound_control_id.as_str()))
+            .collect::<Vec<_>>();
+        let roles = control_facts
+            .iter()
+            .filter(|fact| fact.name == "control.role")
+            .filter_map(|fact| match &fact.value {
+                crate::world_model::FactValue::Text(value) => Some(value.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let labels = control_facts
+            .iter()
+            .filter(|fact| fact.name == "control.label")
+            .filter_map(|fact| match &fact.value {
+                crate::world_model::FactValue::Text(value) => Some(value.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let enabled = control_facts
+            .iter()
+            .filter(|fact| fact.name == "control.enabled")
+            .filter_map(|fact| match &fact.value {
+                crate::world_model::FactValue::Boolean(value) => Some(*value),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if roles.as_slice() != [step.anchor.role.as_str()]
+            || labels.as_slice() != [step.anchor.accessible_name.as_str()]
+            || enabled.as_slice() != [true]
+        {
+            return Err(CoreError::VerificationFailed(
+                "Fresh controller binding does not match one enabled control with the reviewed role and name".into(),
+            ));
+        }
+        if !step.anchor.ancestor_names.is_empty() {
+            let paths = control_facts
+                .iter()
+                .filter(|fact| fact.name == "application.control.ancestors")
+                .filter_map(|fact| match &fact.value {
+                    crate::world_model::FactValue::Text(value) => Some(value.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            let [path] = paths.as_slice() else {
+                return Err(CoreError::VerificationFailed(
+                    "Fresh controller binding omitted or duplicated its reviewed ancestor path"
+                        .into(),
+                ));
+            };
+            let path = if path.starts_with('[') {
+                serde_json::from_str::<Vec<String>>(path).map_err(|_| {
+                    CoreError::VerificationFailed(
+                        "Fresh controller binding has malformed ancestor evidence".into(),
+                    )
+                })?
+            } else {
+                path.split(" > ").map(str::to_owned).collect()
+            };
+            if path != step.anchor.ancestor_names {
+                return Err(CoreError::VerificationFailed(
+                    "Fresh controller binding changed its reviewed ancestor path".into(),
+                ));
+            }
+        }
+        if safe_probes.get(rebound_control_id) != Some(&probe_kind) {
+            return Err(CoreError::PermissionRequired(
+                "The current semantic control no longer qualifies for its reviewed reversible effect".into(),
+            ));
+        }
+
+        let mut rebound = (*assessment).clone();
+        rebound.descriptor.interface_control_id = Some(rebound_control_id.clone());
+        rebound.descriptor.preconditions.observed_state_fact_ids = vec![observation.id];
+        if !rebound.descriptor.evidence_ids.contains(&observation.id) {
+            rebound.descriptor.evidence_ids.push(observation.id);
+        }
+        rebound.descriptor.updated_at = now;
+        rebound.descriptor.validate()?;
+        if let Some(existing) = rebound_assessments.get(capability_id) {
+            if existing.descriptor.interface_control_id != rebound.descriptor.interface_control_id {
+                return Err(CoreError::VerificationFailed(
+                    "One capability was rebound to conflicting controller controls".into(),
+                ));
+            }
+        } else {
+            rebound_assessments.insert(capability_id.clone(), rebound);
+        }
+
+        nodes.push(ProcedureNode {
+            controller_binding: Some(crate::agency::ControllerStepExecutionBinding {
+                controller_id: controller_id.to_owned(),
+                controller_revision,
+                control_id: rebound_control_id.clone(),
+            }),
+            id: step.id.clone(),
+            depends_on: step.depends_on.clone(),
+            outputs: step.outputs.clone(),
+            kind: ProcedureNodeKind::CapabilityCall {
+                capability_id: capability_id.clone(),
+                system_id: controller.system_id,
+                system_fingerprint: controller.system_fingerprint.clone(),
+                input_bindings: step.input_bindings.clone(),
+            },
+        });
+    }
+
+    let procedure = ProcedureIr {
+        schema_version: 3,
+        id: format!("controller-{controller_id}-run-{task_id}"),
+        nodes,
+        streams: Vec::new(),
+        completion: vec![CompletionCondition::AllNodesSucceeded],
+    };
+    procedure.validate()?;
+    let rebound_assessments = rebound_assessments.into_values().collect::<Vec<_>>();
+    controller.validate_against(&assessments_for_controller(controller, assessments)?)?;
+    procedure.validate_against(
+        &rebound_assessments
+            .iter()
+            .map(|assessment| assessment.descriptor.clone())
+            .collect::<Vec<_>>(),
+    )?;
+    Ok((procedure, rebound_assessments))
+}
+
+fn assessments_for_controller(
+    controller: &crate::agency::ControllerIr,
+    assessments: &[crate::world_model::CapabilityAssessment],
+) -> CoreResult<Vec<crate::world_model::CapabilityAssessment>> {
+    let by_id = assessments
+        .iter()
+        .map(|assessment| (assessment.descriptor.id.as_str(), assessment))
+        .collect::<BTreeMap<_, _>>();
+    let mut selected = BTreeMap::new();
+    for step in &controller.steps {
+        let Some(capability_id) = step.capability_id.as_deref() else {
+            continue;
+        };
+        let assessment = by_id.get(capability_id).ok_or_else(|| {
+            CoreError::ExecutorUnavailable(
+                "Reviewed controller capability is no longer current".into(),
+            )
+        })?;
+        selected.insert(capability_id, (*assessment).clone());
+    }
+    Ok(selected.into_values().collect())
+}
+
 fn validate_procedure_action_binding(
     task: &crate::domain::Task,
     procedure: &crate::agency::ProcedureIr,
@@ -609,7 +1870,16 @@ fn validate_procedure_action_binding(
             .get("procedure_node_id")
             .ok_or_else(|| {
                 CoreError::VerificationFailed(
-                    "Procedure task action is missing its node binding".into(),
+                    format!(
+                        "Procedure task action {action_id} is missing its node binding (metadata keys: {})",
+                        state
+                            .proposal
+                            .metadata
+                            .keys()
+                            .map(String::as_str)
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    ),
                 )
             })?;
         if state.proposal.metadata.get("procedure_id") != Some(&procedure.id)
@@ -649,11 +1919,16 @@ fn validate_procedure_action_binding(
                 "Only capability-call procedures can bind to the ordinary task graph".into(),
             ));
         };
-        if !matches!(
-            &action.proposal.action,
-            Action::SetApplicationControl { capability_id: action_capability, .. }
-                if action_capability == capability_id
-        ) {
+        let action_matches_node = if node_has_stream {
+            native_file_stream_action_binding_matches(node_id, node, action, procedure)
+        } else {
+            matches!(
+                &action.proposal.action,
+                Action::SetApplicationControl { capability_id: action_capability, .. }
+                    if action_capability == capability_id
+            )
+        };
+        if !action_matches_node {
             return Err(CoreError::VerificationFailed(
                 "Accepted procedure action differs from its capability node".into(),
             ));
@@ -676,6 +1951,128 @@ fn validate_procedure_action_binding(
         }
     }
     Ok(())
+}
+
+fn native_file_stream_action_binding_matches(
+    node_id: &str,
+    node: &crate::agency::ProcedureNode,
+    action: &crate::domain::ActionState,
+    procedure: &crate::agency::ProcedureIr,
+) -> bool {
+    use crate::agency::{ProcedureNodeKind, ProcedureValue, ValueBinding};
+    use crate::domain::ExpectedOutcome;
+    use crate::world_model::PortType;
+
+    let ProcedureNodeKind::CapabilityCall {
+        capability_id,
+        input_bindings,
+        ..
+    } = &node.kind
+    else {
+        return false;
+    };
+    let metadata = &action.proposal.metadata;
+    let bound_text = |name: &str| -> Option<&str> {
+        match input_bindings.get(name)? {
+            ValueBinding::Literal {
+                value: ProcedureValue::Text(value),
+                port,
+            } if port.name == name && port.value_type == PortType::Text => Some(value),
+            _ => None,
+        }
+    };
+    let channel = procedure
+        .streams
+        .iter()
+        .find(|channel| channel.producer_node == node_id || channel.consumer_node == node_id);
+    let Some(channel) = channel else {
+        return false;
+    };
+    if metadata.get("procedure_stream_channel_id") != Some(&channel.id)
+        || metadata.get("procedure_stream_max_bytes").is_none()
+    {
+        return false;
+    }
+    let maximum_bytes = metadata
+        .get("procedure_stream_max_bytes")
+        .and_then(|value| value.parse::<u64>().ok());
+    let Some(maximum_bytes) = maximum_bytes else {
+        return false;
+    };
+
+    if channel.producer_node == node_id {
+        let Some(source_path) = bound_text("path") else {
+            return false;
+        };
+        let requested_max_bytes = match input_bindings.get("max_bytes") {
+            Some(ValueBinding::Literal {
+                value: ProcedureValue::Number(value),
+                port,
+            }) if port.name == "max_bytes" && port.value_type == PortType::Number => *value as u64,
+            _ => return false,
+        };
+        let Action::ReadFile { path, max_bytes } = &action.proposal.action else {
+            return false;
+        };
+        capability_id == "sage.local.read_file"
+            && path == std::path::Path::new(source_path)
+            && *max_bytes == requested_max_bytes
+            && metadata.get("procedure_stream_output") == Some(&channel.producer_output)
+            && metadata.get("procedure_stream_consumer_node") == Some(&channel.consumer_node)
+            && matches!(
+                &action.proposal.expected_outcome,
+                ExpectedOutcome::FileReadMatchesStream {
+                    path: expected_path,
+                    channel_id,
+                    producer_node,
+                    output_port,
+                    consumer_node,
+                    maximum_bytes: outcome_maximum_bytes,
+                } if expected_path == path
+                    && channel_id == &channel.id
+                    && producer_node == &channel.producer_node
+                    && output_port == &channel.producer_output
+                    && consumer_node == &channel.consumer_node
+                    && *outcome_maximum_bytes == maximum_bytes
+            )
+    } else {
+        let Some(destination_path) = bound_text("path") else {
+            return false;
+        };
+        let overwrite = match input_bindings.get("overwrite") {
+            Some(ValueBinding::Literal {
+                value: ProcedureValue::Boolean(value),
+                port,
+            }) if port.name == "overwrite" && port.value_type == PortType::Boolean => *value,
+            _ => return false,
+        };
+        let Action::WriteFile {
+            path,
+            content,
+            overwrite: action_overwrite,
+        } = &action.proposal.action
+        else {
+            return false;
+        };
+        capability_id == "sage.local.write_file"
+            && path == std::path::Path::new(destination_path)
+            && content.is_empty()
+            && overwrite == *action_overwrite
+            && metadata.get("procedure_stream_input") == Some(&channel.consumer_input)
+            && metadata.get("procedure_stream_producer_node") == Some(&channel.producer_node)
+            && matches!(
+                &action.proposal.expected_outcome,
+                ExpectedOutcome::FileMatchesStream {
+                    path: expected_path,
+                    channel_id,
+                    producer_node,
+                    maximum_bytes: outcome_maximum_bytes,
+                } if expected_path == path
+                    && channel_id == &channel.id
+                    && producer_node == &channel.producer_node
+                    && *outcome_maximum_bytes == maximum_bytes
+            )
+    }
 }
 
 fn prepare_application_controls(
@@ -1482,10 +2879,135 @@ pub struct SageCore {
     scheduler_lane: Mutex<()>,
     effect_ownership: crate::effect_ownership::EffectArbiter,
     execution_timings: std::sync::Mutex<crate::scheduling::Timings>,
+    timing_persistence: crate::scheduling::TimingPersistence,
     pub(crate) application_preparations: std::sync::Mutex<crate::preparation::Applications>,
     streamed_runs: std::sync::Mutex<HashMap<Uuid, StreamedRun>>,
     procedure_streams: std::sync::Mutex<HashMap<Uuid, ProcedureStreamRun>>,
     procedure_dispatch_waves: ProcedureDispatchWaveRegistry,
+}
+
+async fn revalidate_upnp_renderer(
+    command: &sage_protocol::sage::ipc::v2::WorldModelCommand,
+) -> CoreResult<sage_upnp_av::RendererCandidate> {
+    if !command.json.is_empty() || !command.id.is_empty() {
+        return Err(CoreError::InvalidAction(
+            "Renderer observation must use its typed identity field".into(),
+        ));
+    }
+    let requested = command
+        .upnp_renderer_observation_target
+        .as_ref()
+        .ok_or_else(|| {
+            CoreError::InvalidAction(
+                "Renderer observation omitted its typed discovery identity".into(),
+            )
+        })?;
+    if requested.unique_device_name.is_empty()
+        || requested.unique_device_name.len() > 256
+        || requested.description_sha256.len() != 64
+        || !requested
+            .description_sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(CoreError::InvalidAction(
+            "Renderer observation identity is malformed".into(),
+        ));
+    }
+    let candidates = sage_upnp_av::discover_media_renderers(std::time::Duration::from_secs(2))
+        .await
+        .map_err(|error| {
+            CoreError::ExecutorUnavailable(format!(
+                "Private-LAN renderer revalidation failed: {error:#}"
+            ))
+        })?;
+    candidates
+        .into_iter()
+        .find(|candidate| {
+            candidate.unique_device_name() == requested.unique_device_name
+                && candidate
+                    .description_sha256()
+                    .eq_ignore_ascii_case(&requested.description_sha256)
+        })
+        .ok_or_else(|| {
+            CoreError::VerificationFailed(
+                "The renderer changed or left the network. Discover it again before reading its state.".into(),
+            )
+        })
+}
+
+fn persist_renderer_protocol_info(
+    store: &LocalStore,
+    unique_device_name: &str,
+    friendly_name: &str,
+    description_sha256: &str,
+    protocol_info: &sage_upnp_av::ProtocolInfoObservation,
+) -> CoreResult<(Uuid, Uuid)> {
+    if protocol_info.unique_device_name != unique_device_name
+        || protocol_info.description_sha256 != description_sha256
+        || protocol_info.sink.len() > 16
+    {
+        return Err(CoreError::VerificationFailed(
+            "Renderer protocol evidence does not match its bounded discovery target".into(),
+        ));
+    }
+
+    let now = protocol_info.observed_at;
+    let identity_digest = format!("{:x}", sha2::Sha256::digest(unique_device_name.as_bytes()));
+    let mut label = redact_for_persistence(friendly_name);
+    if label.is_empty() || label.len() > 256 {
+        label = format!("UPnP renderer {}", &identity_digest[..12]);
+    }
+    let system = store.observe_system(crate::world_model::SystemDescriptor {
+        id: Uuid::nil(),
+        kind: crate::world_model::SystemKind::Device,
+        key: format!("upnp:renderer:{identity_digest}"),
+        label,
+        fingerprint: protocol_info.description_sha256.clone(),
+        revision: 0,
+        updated_at: now,
+    })?;
+
+    let mut facts = vec![crate::world_model::ObservedFact {
+        name: "device.protocol_info.sink_count".into(),
+        subject: None,
+        value: crate::world_model::FactValue::Number(protocol_info.sink.len() as f64),
+    }];
+    for (index, entry) in protocol_info.sink.iter().enumerate() {
+        let subject = Some(format!("sink-{index:02}"));
+        for (name, value) in [
+            ("device.protocol_info.sink.protocol", &entry.protocol),
+            ("device.protocol_info.sink.network", &entry.network),
+            (
+                "device.protocol_info.sink.content_format",
+                &entry.content_format,
+            ),
+            (
+                "device.protocol_info.sink.additional_info",
+                &entry.additional_info,
+            ),
+        ] {
+            facts.push(crate::world_model::ObservedFact {
+                name: name.into(),
+                subject: subject.clone(),
+                value: crate::world_model::FactValue::Text(value.clone()),
+            });
+        }
+    }
+    facts.sort_by(|left, right| (&left.name, &left.subject).cmp(&(&right.name, &right.subject)));
+    let observation_id = Uuid::new_v4();
+    store.record_world_observation(&crate::world_model::ObservationEnvelope {
+        id: observation_id,
+        system_id: system.id,
+        session_id: None,
+        worker_session: None,
+        system_fingerprint: system.fingerprint,
+        origin: crate::world_model::EvidenceOrigin::DeviceAdvertisement,
+        privacy: crate::contracts::Sensitivity::Private,
+        observed_at: now,
+        facts,
+    })?;
+    Ok((system.id, observation_id))
 }
 
 impl std::fmt::Debug for SageCore {
@@ -1501,6 +3023,16 @@ impl std::fmt::Debug for SageCore {
 impl SageCore {
     pub fn new(config: CoreConfig, model: Arc<dyn ModelProvider>) -> CoreResult<Arc<Self>> {
         Self::new_with_secret_store(config, model, Arc::new(OsSecretStore))
+    }
+
+    /// Returns a cancellation handle bound to the current execution generation
+    /// for a task. It grants no execution authority and is intended for bounded
+    /// adapters such as the peer-compute worker.
+    pub fn peer_compute_cancellation(
+        &self,
+        task_id: Uuid,
+    ) -> CoreResult<crate::peer_compute::PeerComputeCancellation> {
+        Ok(self.runtime.current(task_id)?.peer_compute_cancellation())
     }
 
     pub fn new_with_secret_store(
@@ -1546,6 +3078,9 @@ impl SageCore {
         };
 
         let storage_hydrated = std::sync::atomic::AtomicBool::new(!store.is_locked());
+        let mut execution_timings = crate::scheduling::Timings::default();
+        execution_timings.restore(store.load_execution_timings()?);
+        let timing_persistence = crate::scheduling::TimingPersistence::new(store.clone());
         Ok(Arc::new(Self {
             config,
             model,
@@ -1572,7 +3107,8 @@ impl SageCore {
             storage_hydrated,
             scheduler_lane: Mutex::new(()),
             effect_ownership: crate::effect_ownership::EffectArbiter::default(),
-            execution_timings: Default::default(),
+            execution_timings: std::sync::Mutex::new(execution_timings),
+            timing_persistence,
             application_preparations: Default::default(),
             streamed_runs: Default::default(),
             procedure_streams: Default::default(),
@@ -1596,13 +3132,17 @@ impl SageCore {
             let _guard = guard;
             let store = core.store.clone();
             let secrets = core.secret_store.clone();
-            let tasks = tokio::task::spawn_blocking(move || {
+            let (tasks, timings) = tokio::task::spawn_blocking(move || {
                 store.unlock(secrets.as_ref())?;
-                store.load_tasks(true)
+                Ok::<_, CoreError>((store.load_tasks(true)?, store.load_execution_timings()?))
             })
             .await
             .map_err(|_| CoreError::SecretStore("Protected storage worker exited".into()))??;
             *core.tasks.write().await = tasks.into_iter().map(|task| (task.id, task)).collect();
+            core.execution_timings
+                .lock()
+                .expect("timings poisoned")
+                .restore(timings);
             core.storage_hydrated
                 .store(true, std::sync::atomic::Ordering::Release);
             Ok(())
@@ -2620,8 +4160,16 @@ impl SageCore {
             }
         }
         if let Some(graph) = graph {
-            task.install_plan(crate::workflows::instantiate(&graph, task.id)?)
-                .map_err(CoreError::InvalidAction)?;
+            let graph = if procedure.is_some() {
+                // Procedure action IDs and node bindings are compiled against
+                // this exact fresh task. Generic skill instantiation clears
+                // metadata by design, so applying it here would sever the
+                // procedure checkpoint from its actions.
+                graph
+            } else {
+                crate::workflows::instantiate(&graph, task.id)?
+            };
+            task.install_plan(graph).map_err(CoreError::InvalidAction)?;
         } else if continuation.is_none()
             && background_expiry.is_none()
             && let Some(intent) = crate::intent::compile(
@@ -2773,6 +4321,23 @@ impl SageCore {
     ) -> CoreResult<()> {
         if status == TaskStatus::Cancelled {
             return self.stop_task(task_id).await;
+        }
+        if status == TaskStatus::Running {
+            let store = self.store.clone();
+            crate::execution::io::bounded_read(move |_| {
+                if let Some((checkpoint, _)) = store.load_task_checkpoint(task_id)?
+                    && (checkpoint.execution_owner.generation != 1
+                        || checkpoint.state != crate::agency::CheckpointState::Settled
+                        || !checkpoint.dispatched_effects_settled
+                        || !checkpoint.pending_obligations.is_empty())
+                {
+                    return Err(CoreError::PermissionRequired(
+                        "This task remains paused until this device rechecks its resources and obtains fresh permissions".into(),
+                    ));
+                }
+                Ok(())
+            })
+            .await?;
         }
         if status == TaskStatus::Paused {
             self.signal_hold(task_id);
@@ -3400,6 +4965,39 @@ impl SageCore {
                             ),
                         },
                     ))?;
+                } else if let Some(previous) = reference_observation.clone()
+                    && previous
+                        .state
+                        .get("available")
+                        .and_then(serde_json::Value::as_bool)
+                        == Some(true)
+                    && previous
+                        .state
+                        .get("target_changed")
+                        .and_then(serde_json::Value::as_bool)
+                        != Some(true)
+                {
+                    let refreshed = crate::context::refresh_live_reference(
+                        &previous,
+                        self.adapters.reference(include_page_text).await,
+                        reference_kind,
+                    );
+                    let target_changed = refreshed
+                        .state
+                        .get("target_changed")
+                        .and_then(serde_json::Value::as_bool)
+                        == Some(true);
+                    reference_observation = Some(refreshed);
+                    if target_changed {
+                        self.publish(CoreEvent::new(
+                            Some(task_id),
+                            CoreEventKind::ReferenceContext {
+                                summary: crate::context::reference_summary(
+                                    reference_observation.as_ref().expect("just refreshed"),
+                                ),
+                            },
+                        ))?;
+                    }
                 }
                 let observation = reference_observation
                     .as_ref()
@@ -3779,7 +5377,6 @@ impl SageCore {
 
     async fn execute_action(&self, task_id: Uuid, action_id: Uuid) -> Result<(), StepFailure> {
         let _prepared = self.files.preparation_guard(action_id);
-        let started = std::time::Instant::now();
         let result = self.execute_action_inner(task_id, action_id).await;
         if let Err(error) = &result {
             let is_stream_action = self.procedure_dispatch_wave_for_action(action_id).is_some();
@@ -3788,18 +5385,6 @@ impl SageCore {
                 self.cancel_procedure_stream_run(task_id);
             }
             self.capabilities.revoke_action(task_id, action_id).await;
-        }
-        if result.is_ok()
-            && let Ok(task) = self.get_task(task_id).await
-            && let Some(action) = task.actions.get(&action_id)
-        {
-            self.execution_timings
-                .lock()
-                .expect("timings poisoned")
-                .record(
-                    action.proposal.action.kind(),
-                    started.elapsed().as_micros().min(u64::MAX as u128) as u64,
-                );
         }
         self.files.discard(action_id);
         let Err(error) = result else {
@@ -4032,7 +5617,7 @@ impl SageCore {
         }
         let grant = self
             .capabilities
-            .issue(&proposal, implementation.executor)
+            .issue(&prepared, implementation.executor)
             .await?;
         let domain = if implementation.executor == crate::domain::ExecutionDomain::Browser {
             "browser"
@@ -4053,15 +5638,29 @@ impl SageCore {
             self.broker
                 .execute_with_streams(&compiled, &implementation, &grant, stream_endpoints);
         tokio::pin!(execution);
-        let receipt = loop {
+        let executor_started = std::time::Instant::now();
+        let execution_result = loop {
             let changed = self.control_changed.notified();
             tokio::pin!(changed);
             changed.as_mut().enable();
             if self.get_task(task_id).await?.status == TaskStatus::Cancelled {
                 return Err(CoreError::Cancelled);
             }
-            tokio::select! { result=&mut execution => break result?, _=&mut changed => {} }
+            tokio::select! { result=&mut execution => break result, _=&mut changed => {} }
         };
+        let elapsed_micros = executor_started.elapsed().as_micros().clamp(1, 60_000_000) as u64;
+        let succeeded = execution_result.is_ok();
+        self.execution_timings
+            .lock()
+            .expect("timings poisoned")
+            .record(proposal.action.kind(), elapsed_micros, succeeded);
+        self.timing_persistence
+            .submit(crate::scheduling::TimingMeasurement {
+                operation: proposal.action.kind().to_owned(),
+                elapsed_micros,
+                succeeded,
+            });
+        let receipt = execution_result?;
         if let Some(rollback) = &receipt.rollback {
             self.store.save_rollback(task_id, rollback)?;
             self.update_task(task_id, |task| {
@@ -5230,9 +6829,33 @@ impl SageCore {
             return Ok(());
         };
         crate::features::validate(&proposal.action)?;
+        let controller_binding = match (
+            proposal.metadata.get("controller_id"),
+            proposal.metadata.get("controller_revision"),
+            proposal.metadata.get("controller_step_id"),
+        ) {
+            (None, None, None) => None,
+            (Some(controller_id), Some(revision), Some(step_id)) => Some((
+                controller_id.clone(),
+                revision.parse::<u64>().map_err(|_| {
+                    CoreError::VerificationFailed(
+                        "Controller action has an invalid reviewed revision".into(),
+                    )
+                })?,
+                step_id.clone(),
+            )),
+            _ => {
+                return Err(CoreError::VerificationFailed(
+                    "Controller action metadata is incomplete".into(),
+                ));
+            }
+        };
 
         let store = self.store.clone();
-        let (system, assessment) = tokio::task::spawn_blocking(move || {
+        let lookup_binding = controller_binding.clone();
+        let lookup_system_fingerprint = system_fingerprint.clone();
+        let lookup_capability_id = capability_id.clone();
+        let (system, assessment, controller_anchor) = tokio::task::spawn_blocking(move || {
             let system = store
                 .observed_systems()?
                 .into_iter()
@@ -5252,7 +6875,51 @@ impl SageCore {
                         "The selected application capability is not a stored Sage discovery".into(),
                     )
                 })?;
-            Ok::<_, CoreError>((system, assessment))
+            let controller_anchor = if let Some((controller_id, revision, step_id)) = lookup_binding
+            {
+                let record = store.load_controller(&controller_id)?.ok_or_else(|| {
+                    CoreError::PermissionRequired(
+                        "The reviewed controller for this task is no longer available".into(),
+                    )
+                })?;
+                if record.status != crate::agency::ControllerStatus::Reviewed
+                    || record.revision != revision
+                    || record.controller.system_id != system_id
+                    || record.controller.system_fingerprint != lookup_system_fingerprint
+                {
+                    return Err(CoreError::PermissionRequired(
+                        "The reviewed controller changed or was disabled before this action".into(),
+                    ));
+                }
+                let step = record
+                    .controller
+                    .steps
+                    .iter()
+                    .find(|step| step.id == step_id)
+                    .ok_or_else(|| {
+                        CoreError::VerificationFailed(
+                            "Controller action names an unknown reviewed step".into(),
+                        )
+                    })?;
+                if step.primitive != crate::agency::ControllerPrimitive::InvokeRegisteredCapability
+                    || step.capability_id.as_deref() != Some(lookup_capability_id.as_str())
+                    || assessment.descriptor.interface_control_id.as_deref()
+                        != Some(step.anchor.id.as_str())
+                    || assessment
+                        .descriptor
+                        .label
+                        .strip_prefix("Set ")
+                        .is_none_or(|label| label != step.anchor.accessible_name)
+                {
+                    return Err(CoreError::VerificationFailed(
+                        "Controller step no longer matches its stored learned capability".into(),
+                    ));
+                }
+                Some(step.anchor.clone())
+            } else {
+                None
+            };
+            Ok::<_, CoreError>((system, assessment, controller_anchor))
         })
         .await
         .map_err(|_| CoreError::Storage("Learned-control lookup worker exited".into()))??;
@@ -5270,7 +6937,10 @@ impl SageCore {
             || descriptor.executor_id.as_deref() != Some("set_application_control")
             || descriptor.system_id != system_id
             || descriptor.system_fingerprint != system_fingerprint
-            || descriptor.interface_control_id.as_deref() != Some(control_id.as_str())
+            || (descriptor.interface_control_id.as_deref() != Some(control_id.as_str())
+                && controller_anchor.as_ref().is_none_or(|anchor| {
+                    descriptor.interface_control_id.as_deref() != Some(anchor.id.as_str())
+                }))
             || descriptor.interface_probe_kind.is_none()
             || descriptor.input_ports.len() != 1
             || descriptor.input_ports[0].name != "value"
@@ -5344,6 +7014,12 @@ impl SageCore {
                 && !(expected_role == "toggle"
                     && matches!(control.semantic.role.as_str(), "checkbox" | "switch")))
             || control.semantic.label != original_label
+            || controller_anchor.as_ref().is_some_and(|anchor| {
+                control.semantic.role != anchor.role
+                    || control.semantic.label != anchor.accessible_name
+                    || (!anchor.ancestor_names.is_empty()
+                        && control.semantic.ancestors != anchor.ancestor_names)
+            })
         {
             return Err(CoreError::VerificationFailed(
                 "The learned control's label, role, or enabled state changed".into(),
@@ -5454,9 +7130,30 @@ impl SageCore {
         descriptor.evidence_ids = vec![observation.id];
         descriptor.updated_at = now;
         let store = self.store.clone();
+        let binding = controller_binding.clone();
+        let observed_control_id = control_id.clone();
         tokio::task::spawn_blocking(move || {
             store.record_world_observation(&observation)?;
-            store.record_capability_candidate(&descriptor)
+            if let Some((controller_id, revision, step_id)) = binding {
+                let revalidated = store.revalidate_stored_controller(
+                    &controller_id,
+                    observation.id,
+                    Utc::now(),
+                )?;
+                if revalidated.record.revision != revision
+                    || revalidated.record.status != crate::agency::ControllerStatus::Reviewed
+                    || revalidated.rebinding.control_ids_by_step.get(&step_id)
+                        != Some(&observed_control_id)
+                {
+                    return Err(CoreError::VerificationFailed(
+                        "Controller action no longer matches the unique fresh semantic rebind"
+                            .into(),
+                    ));
+                }
+                Ok(())
+            } else {
+                store.record_capability_candidate(&descriptor)
+            }
         })
         .await
         .map_err(|_| CoreError::Storage("Learned-control evidence worker exited".into()))??;
@@ -5464,6 +7161,136 @@ impl SageCore {
             proposal.metadata.extend(expected_metadata);
         }
         Ok(())
+    }
+
+    async fn submit_stream_procedure(
+        self: &Arc<Self>,
+        mut procedure: crate::agency::ProcedureIr,
+        task_request: &str,
+        command_key: crate::commands::SubmissionKey,
+    ) -> CoreResult<(Uuid, crate::agency::ProcedureIr)> {
+        if procedure.streams.is_empty() {
+            return Err(CoreError::InvalidAction(
+                "Stream execution requires at least one declared live channel".into(),
+            ));
+        }
+        procedure.validate()?;
+        let system_ids = procedure
+            .nodes
+            .iter()
+            .filter_map(|node| match &node.kind {
+                crate::agency::ProcedureNodeKind::CapabilityCall { system_id, .. } => {
+                    Some(*system_id)
+                }
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
+        if system_ids.is_empty() {
+            return Err(CoreError::InvalidAction(
+                "Stream procedure has no capability targets".into(),
+            ));
+        }
+        let systems = self
+            .store
+            .observed_systems()?
+            .into_iter()
+            .filter(|system| system_ids.contains(&system.id))
+            .collect::<Vec<_>>();
+        if systems.len() != system_ids.len() {
+            return Err(CoreError::ExecutorUnavailable(
+                "A stream procedure target is no longer present in Sage's discovery graph".into(),
+            ));
+        }
+        let mut assessments_by_id = BTreeMap::new();
+        let mut current_evidence_ids = BTreeSet::new();
+        for system in &systems {
+            current_evidence_ids.extend(
+                self.store
+                    .current_world_evidence_ids(system.id, &system.fingerprint)?,
+            );
+            let assessments = self.store.capability_assessments(system.id)?;
+            current_evidence_ids.extend(assessments.iter().flat_map(|assessment| {
+                assessment
+                    .descriptor
+                    .evidence_ids
+                    .iter()
+                    .chain(&assessment.descriptor.preconditions.observed_state_fact_ids)
+                    .copied()
+            }));
+            for assessment in assessments {
+                if assessments_by_id
+                    .insert(assessment.descriptor.id.clone(), assessment)
+                    .is_some()
+                {
+                    return Err(CoreError::VerificationFailed(
+                        "Current stream capability identities are ambiguous".into(),
+                    ));
+                }
+            }
+        }
+        let assessments = assessments_by_id.into_values().collect::<Vec<_>>();
+        let descriptors = assessments
+            .iter()
+            .map(|assessment| assessment.descriptor.clone())
+            .collect::<Vec<_>>();
+        let resolver = self.resolver.clone();
+        let normalization_assessments = assessments.clone();
+        procedure = tokio::task::spawn_blocking(move || {
+            normalize_file_stream_targets(procedure, &normalization_assessments, &resolver)
+        })
+        .await
+        .map_err(|_| CoreError::Storage("File stream target resolution worker exited".into()))??;
+        procedure.validate_against(&descriptors)?;
+        let task_id = Uuid::new_v4();
+        let mut procedure_runtime =
+            crate::agency::ProcedureRuntimeState::new_for_task(&procedure, task_id)?;
+        let first_wave = crate::agency::advance_procedure(
+            &procedure,
+            &assessments,
+            &current_evidence_ids,
+            &mut procedure_runtime,
+            &BTreeMap::new(),
+            4,
+        )?;
+        let first_node_ids = first_wave
+            .proposal_wave
+            .iter()
+            .map(|proposal| proposal.node_id.clone())
+            .collect::<Vec<_>>();
+        if first_node_ids.is_empty() {
+            return Err(CoreError::ExecutorUnavailable(
+                "The stream procedure has no currently executable ready cohort".into(),
+            ));
+        }
+        let graph = compile_application_control_procedure(
+            &procedure,
+            task_request,
+            task_id,
+            ProcedureCompilationContext {
+                systems: &systems,
+                assessments: &assessments,
+                current_evidence_ids: &current_evidence_ids,
+                runtime: &procedure_runtime,
+                selected_node_ids: &first_node_ids,
+                existing_action_ids: &BTreeMap::new(),
+            },
+        )?;
+        let task_id = self
+            .submit_run(RunSubmission {
+                request: task_request.to_owned(),
+                conversation_id: None,
+                task_id: Some(task_id),
+                graph: Some(graph),
+                procedure: Some(procedure.clone()),
+                resources: Vec::new(),
+                authority: RunAuthority::Interactive {
+                    command: Some(command_key),
+                },
+                skill_lineages: Vec::new(),
+                streamed_prefix: None,
+            })
+            .await?;
+        Ok((task_id, procedure))
     }
 
     pub async fn world_model_command(
@@ -5670,6 +7497,66 @@ impl SageCore {
                     "learning_available": false
                 }))
             }
+            "discover_upnp_media_renderers" => {
+                let candidates =
+                    sage_upnp_av::discover_media_renderers(std::time::Duration::from_secs(2))
+                        .await
+                        .map_err(|error| {
+                            CoreError::ExecutorUnavailable(format!(
+                                "Private-LAN renderer discovery failed: {error:#}"
+                            ))
+                        })?;
+                Ok(json!({
+                    "renderer_candidates": candidates,
+                    "execution_available": false,
+                    "pairing_required": true,
+                    "trust_established": false,
+                    "discovery_scope": "private_lan_ipv4"
+                }))
+            }
+            "observe_upnp_transport" => {
+                let candidate = revalidate_upnp_renderer(&command).await?;
+                let observation =
+                    sage_upnp_av::observe_transport(&candidate)
+                        .await
+                        .map_err(|error| {
+                            CoreError::ExecutorUnavailable(format!(
+                                "Private-LAN renderer state observation failed: {error:#}"
+                            ))
+                        })?;
+                Ok(json!({
+                    "transport_observation": observation,
+                    "trust_established": false,
+                    "mutation_available": false,
+                    "target_revalidated": true
+                }))
+            }
+            "observe_upnp_protocol_info" => {
+                let candidate = revalidate_upnp_renderer(&command).await?;
+                let observation = sage_upnp_av::observe_protocol_info(&candidate)
+                    .await
+                    .map_err(|error| {
+                        CoreError::ExecutorUnavailable(format!(
+                            "Private-LAN renderer protocol observation failed: {error:#}"
+                        ))
+                    })?;
+                let (system_id, world_observation_id) = persist_renderer_protocol_info(
+                    &self.store,
+                    candidate.unique_device_name(),
+                    candidate.friendly_name(),
+                    candidate.description_sha256(),
+                    &observation,
+                )?;
+                Ok(json!({
+                    "protocol_info_observation": observation,
+                    "world_model_system_id": system_id,
+                    "world_observation_id": world_observation_id,
+                    "trust_established": false,
+                    "mutation_available": false,
+                    "target_revalidated": true,
+                    "compatibility_proven": false
+                }))
+            }
             "list" => Ok(json!({ "systems": self.store.observed_systems()? })),
             "record_relation" => {
                 #[derive(serde::Deserialize)]
@@ -5798,6 +7685,131 @@ impl SageCore {
                     "requires_fresh_authority_and_runtime_review": true,
                 }))
             }
+            "run_stream_procedure" => {
+                #[derive(serde::Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct StreamProcedureRequest {
+                    procedure: crate::agency::ProcedureIr,
+                    request: String,
+                }
+
+                if command.json.len() > 64 * 1024 {
+                    return Err(CoreError::InvalidAction(
+                        "Stream procedure request exceeds its size bound".into(),
+                    ));
+                }
+                let command_key = crate::commands::SubmissionKey::for_world_model(
+                    &command.id,
+                    &command.operation,
+                    &command.json,
+                )?;
+                if let Some(task_id) = self.store.accepted_submission(&command_key)? {
+                    return Ok(json!({
+                        "task_id": task_id,
+                        "deduplicated": true,
+                        "task_submitted": true,
+                        "requires_fresh_authority_and_verification": true,
+                    }));
+                }
+                let request: StreamProcedureRequest = serde_json::from_str(&command.json)?;
+                let task_request = request.request.trim();
+                if task_request.is_empty() || task_request.len() > 4096 {
+                    return Err(CoreError::InvalidAction(
+                        "Stream procedure requires a bounded, non-empty user request".into(),
+                    ));
+                }
+                if request.procedure.streams.is_empty() {
+                    return Err(CoreError::InvalidAction(
+                        "This operation accepts only ProcedureIR with at least one live stream"
+                            .into(),
+                    ));
+                }
+                let (task_id, procedure) = self
+                    .submit_stream_procedure(request.procedure, task_request, command_key)
+                    .await?;
+                Ok(json!({
+                    "task_id": task_id,
+                    "deduplicated": false,
+                    "procedure": procedure,
+                    "task_submitted": true,
+                    "requires_fresh_authority_and_verification": true,
+                }))
+            }
+            "run_file_stream_copy" => {
+                #[derive(serde::Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct FileStreamCopyRequest {
+                    source_path: String,
+                    destination_path: String,
+                    overwrite: bool,
+                    request: String,
+                }
+
+                if command.json.len() > 16 * 1024 {
+                    return Err(CoreError::InvalidAction(
+                        "File stream copy request exceeds its size bound".into(),
+                    ));
+                }
+                let command_key = crate::commands::SubmissionKey::for_world_model(
+                    &command.id,
+                    &command.operation,
+                    &command.json,
+                )?;
+                if let Some(task_id) = self.store.accepted_submission(&command_key)? {
+                    return Ok(json!({
+                        "task_id": task_id,
+                        "deduplicated": true,
+                        "task_submitted": true,
+                        "maximum_bytes": crate::execution::files::MAX_BYTES,
+                        "requires_fresh_authority_and_verification": true,
+                    }));
+                }
+                let request: FileStreamCopyRequest = serde_json::from_str(&command.json)?;
+                let task_request = request.request.trim();
+                if task_request.is_empty()
+                    || task_request.len() > 4096
+                    || request.source_path.trim().is_empty()
+                    || request.destination_path.trim().is_empty()
+                    || request.source_path.len() > 4096
+                    || request.destination_path.len() > 4096
+                    || request.source_path.chars().any(char::is_control)
+                    || request.destination_path.chars().any(char::is_control)
+                    || request.source_path.contains('\0')
+                    || request.destination_path.contains('\0')
+                {
+                    return Err(CoreError::InvalidAction(
+                        "File stream copy requires bounded exact paths and a user request".into(),
+                    ));
+                }
+                let store = self.store.clone();
+                let (system, assessments) =
+                    tokio::task::spawn_blocking(move || register_native_file_capabilities(&store))
+                        .await
+                        .map_err(|_| {
+                            CoreError::Storage(
+                                "Native file capability registration worker exited".into(),
+                            )
+                        })??;
+                let procedure = native_file_copy_procedure(
+                    &system,
+                    &request.source_path,
+                    &request.destination_path,
+                    request.overwrite,
+                    format!("native-file-copy-{}", command_key.id.simple()),
+                    &assessments,
+                )?;
+                let (task_id, procedure) = self
+                    .submit_stream_procedure(procedure, task_request, command_key)
+                    .await?;
+                Ok(json!({
+                    "task_id": task_id,
+                    "deduplicated": false,
+                    "procedure": procedure,
+                    "maximum_bytes": crate::execution::files::MAX_BYTES,
+                    "task_submitted": true,
+                    "requires_fresh_authority_and_verification": true,
+                }))
+            }
             "run_goal" => {
                 #[derive(serde::Deserialize)]
                 #[serde(deny_unknown_fields)]
@@ -5918,6 +7930,251 @@ impl SageCore {
                     "task_id": task_id,
                     "deduplicated": false,
                     "proposal": procedure,
+                    "task_submitted": true,
+                    "requires_fresh_authority_and_verification": true,
+                }))
+            }
+            "run_controller" => {
+                #[derive(serde::Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct ControllerRunRequest {
+                    controller_id: String,
+                    expected_revision: u64,
+                }
+
+                if command.json.len() > 4096 {
+                    return Err(CoreError::InvalidAction(
+                        "Controller execution request exceeds its size bound".into(),
+                    ));
+                }
+                let command_key = crate::commands::SubmissionKey::for_world_model(
+                    &command.id,
+                    &command.operation,
+                    &command.json,
+                )?;
+                if let Some(task_id) = self.store.accepted_submission(&command_key)? {
+                    return Ok(json!({
+                        "task_id": task_id,
+                        "deduplicated": true,
+                        "task_submitted": true,
+                        "requires_fresh_authority_and_verification": true,
+                    }));
+                }
+                let request: ControllerRunRequest = serde_json::from_str(&command.json)?;
+                let controller_id = request.controller_id.trim().to_owned();
+                if controller_id.is_empty() || controller_id.len() > 64 {
+                    return Err(CoreError::InvalidAction(
+                        "Controller execution requires a bounded stored controller identity".into(),
+                    ));
+                }
+                let expected_revision = request.expected_revision;
+                let load_id = controller_id.clone();
+                let store = self.store.clone();
+                let saved = tokio::task::spawn_blocking(move || store.load_controller(&load_id))
+                    .await
+                    .map_err(|_| CoreError::Storage("Controller lookup worker exited".into()))??
+                    .ok_or_else(|| {
+                        CoreError::InvalidAction("Reviewed controller was not found".into())
+                    })?;
+                if saved.status != crate::agency::ControllerStatus::Reviewed
+                    || saved.revision != expected_revision
+                {
+                    return Err(CoreError::PermissionRequired(
+                        "Run requires the exact current reviewed controller revision".into(),
+                    ));
+                }
+                if !self
+                    .adapters
+                    .supports_feature("native", "application_control_v1")
+                    .await
+                {
+                    return Err(CoreError::ExecutorUnavailable(
+                        "A connected native adapter with application-control support is required"
+                            .into(),
+                    ));
+                }
+                let native_session = self.adapters.session_id("native").await.ok_or_else(|| {
+                    CoreError::ExecutorUnavailable(
+                        "A connected native adapter is required to run this controller".into(),
+                    )
+                })?;
+                let discovery = Box::pin(self.world_model_command(
+                    sage_protocol::sage::ipc::v2::WorldModelCommand {
+                        operation: "discover_current_application".into(),
+                        ..Default::default()
+                    },
+                ))
+                .await?;
+                if self.adapters.session_id("native").await.as_deref()
+                    != Some(native_session.as_str())
+                {
+                    return Err(CoreError::ExecutorUnavailable(
+                        "The native adapter changed during controller revalidation".into(),
+                    ));
+                }
+                let discovered_system: crate::world_model::SystemDescriptor =
+                    serde_json::from_value(discovery["system"].clone())?;
+                let application_target: crate::application_target::ApplicationTarget =
+                    serde_json::from_value(discovery["application_target"].clone())?;
+                application_target.validate()?;
+                if discovered_system.id != saved.controller.system_id
+                    || discovered_system.fingerprint != saved.controller.system_fingerprint
+                    || application_target.identifier != discovered_system.key
+                    || application_target.code_digest != discovered_system.fingerprint
+                {
+                    return Err(CoreError::PermissionRequired(
+                        "The foreground application does not match this controller's signed target"
+                            .into(),
+                    ));
+                }
+                let observation_id = discovery["observation_id"]
+                    .as_str()
+                    .ok_or_else(|| {
+                        CoreError::Protocol(
+                            "Fresh application discovery omitted its observation identity".into(),
+                        )
+                    })?
+                    .parse::<Uuid>()
+                    .map_err(|_| {
+                        CoreError::Protocol(
+                            "Fresh application discovery returned an invalid observation identity"
+                                .into(),
+                        )
+                    })?;
+
+                let task_id = Uuid::new_v4();
+                let prepare_id = controller_id.clone();
+                let store = self.store.clone();
+                let prepared = tokio::task::spawn_blocking(move || {
+                    let revalidated = store.revalidate_stored_controller(
+                        &prepare_id,
+                        observation_id,
+                        Utc::now(),
+                    )?;
+                    if revalidated.record.revision != expected_revision
+                        || revalidated.record.status != crate::agency::ControllerStatus::Reviewed
+                    {
+                        return Err(CoreError::VerificationFailed(
+                            "Controller revision changed during fresh-target validation".into(),
+                        ));
+                    }
+                    let systems = store.observed_systems()?;
+                    let current_system = systems
+                        .into_iter()
+                        .find(|system| system.id == revalidated.record.controller.system_id)
+                        .ok_or_else(|| {
+                            CoreError::ExecutorUnavailable(
+                                "Controller target is no longer in Sage's discovery graph".into(),
+                            )
+                        })?;
+                    if current_system.fingerprint
+                        != revalidated.record.controller.system_fingerprint
+                        || current_system.key != discovered_system.key
+                    {
+                        return Err(CoreError::VerificationFailed(
+                            "Controller target changed after passive discovery".into(),
+                        ));
+                    }
+                    let assessments = store.capability_assessments(current_system.id)?;
+                    let now = Utc::now();
+                    let (procedure, procedure_assessments) = prepare_reviewed_controller_run(
+                        ReviewedControllerRunContext {
+                            controller_id: &prepare_id,
+                            controller_revision: expected_revision,
+                            controller: &revalidated.record.controller,
+                            rebinding: &revalidated.rebinding,
+                            observation: &revalidated.observation,
+                            assessments: &assessments,
+                        },
+                        task_id,
+                        now,
+                    )?;
+                    let mut current_evidence_ids = store.current_world_evidence_ids(
+                        current_system.id,
+                        &current_system.fingerprint,
+                    )?;
+                    current_evidence_ids.insert(revalidated.observation.id);
+                    current_evidence_ids.extend(procedure_assessments.iter().flat_map(
+                        |assessment| {
+                            assessment
+                                .descriptor
+                                .evidence_ids
+                                .iter()
+                                .chain(&assessment.descriptor.preconditions.observed_state_fact_ids)
+                                .copied()
+                        },
+                    ));
+                    Ok::<_, CoreError>((
+                        current_system,
+                        procedure,
+                        procedure_assessments,
+                        current_evidence_ids,
+                    ))
+                })
+                .await
+                .map_err(|_| CoreError::Storage("Controller preparation worker exited".into()))??;
+                if self.adapters.session_id("native").await.as_deref()
+                    != Some(native_session.as_str())
+                {
+                    return Err(CoreError::ExecutorUnavailable(
+                        "The native adapter changed before controller task acceptance".into(),
+                    ));
+                }
+                let (system, procedure, procedure_assessments, current_evidence_ids) = prepared;
+                let request_text = format!("Run reviewed controller for {}", system.label);
+                let mut procedure_runtime =
+                    crate::agency::ProcedureRuntimeState::new_for_task(&procedure, task_id)?;
+                let first_wave = crate::agency::advance_procedure(
+                    &procedure,
+                    &procedure_assessments,
+                    &current_evidence_ids,
+                    &mut procedure_runtime,
+                    &BTreeMap::new(),
+                    4,
+                )?;
+                if first_wave.proposal_wave.is_empty() {
+                    return Err(CoreError::ExecutorUnavailable(
+                        "The reviewed controller has no currently executable first step".into(),
+                    ));
+                }
+                let first_node_ids = first_wave
+                    .proposal_wave
+                    .iter()
+                    .map(|proposal| proposal.node_id.clone())
+                    .collect::<Vec<_>>();
+                let graph = compile_application_control_procedure(
+                    &procedure,
+                    &request_text,
+                    task_id,
+                    ProcedureCompilationContext {
+                        systems: std::slice::from_ref(&system),
+                        assessments: &procedure_assessments,
+                        current_evidence_ids: &current_evidence_ids,
+                        runtime: &procedure_runtime,
+                        selected_node_ids: &first_node_ids,
+                        existing_action_ids: &BTreeMap::new(),
+                    },
+                )?;
+                let task_id = self
+                    .submit_run(RunSubmission {
+                        request: request_text,
+                        conversation_id: None,
+                        task_id: Some(task_id),
+                        graph: Some(graph),
+                        procedure: Some(procedure.clone()),
+                        resources: Vec::new(),
+                        authority: RunAuthority::Interactive {
+                            command: Some(command_key),
+                        },
+                        skill_lineages: Vec::new(),
+                        streamed_prefix: None,
+                    })
+                    .await?;
+                Ok(json!({
+                    "task_id": task_id,
+                    "controller_id": controller_id,
+                    "step_count": procedure.nodes.len(),
+                    "deduplicated": false,
                     "task_submitted": true,
                     "requires_fresh_authority_and_verification": true,
                 }))
@@ -7191,6 +9448,34 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn peer_compute_cancellation_tracks_the_active_core_run_generation() {
+        let data = tempdir().unwrap();
+        let core = SageCore::new(
+            CoreConfig::for_test(data.path()),
+            Arc::new(UnconfiguredModelProvider),
+        )
+        .unwrap();
+        let task_id = Uuid::new_v4();
+        let run = core.runtime.begin(task_id).unwrap();
+        let cancellation = core.peer_compute_cancellation(task_id).unwrap();
+
+        assert!(!cancellation.is_cancelled());
+        assert!(core.runtime.stop(task_id));
+        tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            cancellation.cancelled(),
+        )
+        .await
+        .unwrap();
+        assert!(cancellation.is_cancelled());
+        assert!(matches!(
+            core.peer_compute_cancellation(task_id),
+            Err(CoreError::Cancelled)
+        ));
+        drop(run);
+    }
+
+    #[tokio::test]
     async fn failed_procedure_dispatch_wave_unblocks_waiting_peers() {
         let wave = ProcedureDispatchWave::new(
             Uuid::from_u128(1),
@@ -7297,6 +9582,7 @@ mod tests {
             crate::world_model::CapabilityAssessment {
                 descriptor,
                 evidence_state: crate::world_model::CapabilityEvidenceState::ReversiblyExperimented,
+                restoration_evidence: None,
             },
         )
     }
@@ -7320,6 +9606,7 @@ mod tests {
             id: "learned-control-goal".into(),
             nodes: (0..node_count)
                 .map(|index| crate::agency::ProcedureNode {
+                    controller_binding: None,
                     id: format!("control-{}", index + 1),
                     depends_on: if index == 0 {
                         BTreeSet::new()
@@ -7344,6 +9631,658 @@ mod tests {
             streams: Vec::new(),
             completion: vec![crate::agency::CompletionCondition::AllNodesSucceeded],
         }
+    }
+
+    fn native_file_stream_fixture(
+        source_path: &std::path::Path,
+        destination_path: &std::path::Path,
+    ) -> (
+        crate::agency::ProcedureIr,
+        crate::world_model::SystemDescriptor,
+        Vec<crate::world_model::CapabilityAssessment>,
+        BTreeSet<Uuid>,
+    ) {
+        use crate::agency::{
+            CompletionCondition, ProcedureIr, ProcedureNode, ProcedureNodeKind, ProcedureValue,
+            StreamBackpressure, StreamChannel, ValueBinding,
+        };
+        use crate::contracts::{Effect, Sensitivity};
+        use crate::world_model::{
+            CapabilityAssessment, CapabilityDescriptor, CapabilityEvidenceState, DataPort,
+            PortType, Preconditions, SystemDescriptor, SystemKind,
+        };
+
+        let now = Utc::now();
+        let system = SystemDescriptor {
+            id: Uuid::new_v4(),
+            kind: SystemKind::Device,
+            key: "local-filesystem".into(),
+            label: "Local filesystem".into(),
+            fingerprint: "a".repeat(64),
+            revision: 1,
+            updated_at: now,
+        };
+        let evidence_id = Uuid::new_v4();
+        let port = |name: &str, value_type, max_bytes| DataPort {
+            name: name.into(),
+            value_type,
+            max_bytes,
+            privacy: Sensitivity::Private,
+        };
+        let descriptor =
+            |id: &str, executor: &str, inputs, outputs, effects| CapabilityAssessment {
+                descriptor: CapabilityDescriptor {
+                    schema_version: 1,
+                    id: id.into(),
+                    system_id: system.id,
+                    system_fingerprint: system.fingerprint.clone(),
+                    interface_control_id: None,
+                    interface_probe_kind: None,
+                    label: id.into(),
+                    input_ports: inputs,
+                    output_ports: outputs,
+                    preconditions: Preconditions {
+                        observed_state_fact_ids: vec![evidence_id],
+                        description: "Current local filesystem target".into(),
+                    },
+                    effects,
+                    verification: "Exact file digest and size".into(),
+                    restoration: Some("Verified file rollback".into()),
+                    cancellation: "Stop dispatch and settle the active file operation".into(),
+                    executor_id: Some(executor.into()),
+                    evidence_ids: vec![evidence_id],
+                    updated_at: now,
+                },
+                evidence_state: CapabilityEvidenceState::ReversiblyExperimented,
+                restoration_evidence: None,
+            };
+        let source = descriptor(
+            "local-read",
+            "read_file",
+            vec![
+                port("path", PortType::Text, 4096),
+                port("max_bytes", PortType::Number, 8),
+            ],
+            vec![port("bytes", PortType::Bytes, 1024)],
+            BTreeSet::from([Effect::Read]),
+        );
+        let sink = descriptor(
+            "local-write",
+            "write_file",
+            vec![
+                port("path", PortType::Text, 4096),
+                port("content", PortType::Bytes, 1024),
+                port("overwrite", PortType::Boolean, 1),
+            ],
+            Vec::new(),
+            BTreeSet::from([Effect::Create, Effect::Modify]),
+        );
+        let path_port = port("path", PortType::Text, 4096);
+        let limit_port = port("max_bytes", PortType::Number, 8);
+        let overwrite_port = port("overwrite", PortType::Boolean, 1);
+        let bytes_port = port("bytes", PortType::Bytes, 1024);
+        let procedure = ProcedureIr {
+            schema_version: 2,
+            id: "bounded-local-file-copy".into(),
+            nodes: vec![
+                ProcedureNode {
+                    id: "source".into(),
+                    depends_on: BTreeSet::new(),
+                    outputs: BTreeMap::from([("bytes".into(), bytes_port)]),
+                    kind: ProcedureNodeKind::CapabilityCall {
+                        capability_id: "local-read".into(),
+                        system_id: system.id,
+                        system_fingerprint: system.fingerprint.clone(),
+                        input_bindings: BTreeMap::from([
+                            (
+                                "path".into(),
+                                ValueBinding::Literal {
+                                    value: ProcedureValue::Text(
+                                        source_path.to_string_lossy().into_owned(),
+                                    ),
+                                    port: path_port.clone(),
+                                },
+                            ),
+                            (
+                                "max_bytes".into(),
+                                ValueBinding::Literal {
+                                    value: ProcedureValue::Number(1024.0),
+                                    port: limit_port,
+                                },
+                            ),
+                        ]),
+                    },
+                    controller_binding: None,
+                },
+                ProcedureNode {
+                    id: "destination".into(),
+                    depends_on: BTreeSet::new(),
+                    outputs: BTreeMap::new(),
+                    kind: ProcedureNodeKind::CapabilityCall {
+                        capability_id: "local-write".into(),
+                        system_id: system.id,
+                        system_fingerprint: system.fingerprint.clone(),
+                        input_bindings: BTreeMap::from([
+                            (
+                                "path".into(),
+                                ValueBinding::Literal {
+                                    value: ProcedureValue::Text(
+                                        destination_path.to_string_lossy().into_owned(),
+                                    ),
+                                    port: path_port,
+                                },
+                            ),
+                            (
+                                "content".into(),
+                                ValueBinding::Stream {
+                                    channel_id: "source-to-destination".into(),
+                                },
+                            ),
+                            (
+                                "overwrite".into(),
+                                ValueBinding::Literal {
+                                    value: ProcedureValue::Boolean(false),
+                                    port: overwrite_port,
+                                },
+                            ),
+                        ]),
+                    },
+                    controller_binding: None,
+                },
+            ],
+            streams: vec![StreamChannel {
+                id: "source-to-destination".into(),
+                producer_node: "source".into(),
+                producer_output: "bytes".into(),
+                consumer_node: "destination".into(),
+                consumer_input: "content".into(),
+                capacity_items: 4,
+                maximum_item_bytes: 256,
+                backpressure: StreamBackpressure::BlockProducer,
+            }],
+            completion: vec![CompletionCondition::AllNodesSucceeded],
+        };
+        (
+            procedure,
+            system,
+            vec![source, sink],
+            BTreeSet::from([evidence_id]),
+        )
+    }
+
+    #[test]
+    fn native_file_stream_compiles_to_two_authorized_file_actions() {
+        let directory = tempdir().unwrap();
+        let source_path = directory.path().join("source.bin");
+        let destination_path = directory.path().join("destination.bin");
+        let (procedure, system, assessments, current_evidence_ids) =
+            native_file_stream_fixture(&source_path, &destination_path);
+        let task_id = Uuid::new_v4();
+        let runtime = crate::agency::ProcedureRuntimeState::new(&procedure).unwrap();
+        let graph = compile_application_control_procedure(
+            &procedure,
+            "copy source to destination",
+            task_id,
+            ProcedureCompilationContext {
+                systems: std::slice::from_ref(&system),
+                assessments: &assessments,
+                current_evidence_ids: &current_evidence_ids,
+                runtime: &runtime,
+                selected_node_ids: &["source".into(), "destination".into()],
+                existing_action_ids: &BTreeMap::new(),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(graph.nodes.len(), 2);
+        assert!(matches!(
+            &graph.nodes[0].proposal.action,
+            Action::ReadFile { path, max_bytes: 1024 }
+                if path == &source_path
+        ));
+        assert!(matches!(
+            &graph.nodes[0].proposal.expected_outcome,
+            ExpectedOutcome::FileReadMatchesStream {
+                path,
+                channel_id,
+                producer_node,
+                output_port,
+                consumer_node,
+                maximum_bytes: 1024,
+            } if path == &source_path
+                && channel_id == "source-to-destination"
+                && producer_node == "source"
+                && output_port == "bytes"
+                && consumer_node == "destination"
+        ));
+        assert!(matches!(
+            &graph.nodes[1].proposal.action,
+            Action::WriteFile { path, content, overwrite: false }
+                if path == &destination_path && content.is_empty()
+        ));
+        assert!(matches!(
+            &graph.nodes[1].proposal.expected_outcome,
+            ExpectedOutcome::FileMatchesStream {
+                path,
+                channel_id,
+                producer_node,
+                maximum_bytes: 1024,
+            } if path == &destination_path
+                && channel_id == "source-to-destination"
+                && producer_node == "source"
+        ));
+        assert_eq!(
+            graph.nodes[0].proposal.metadata["procedure_stream_max_bytes"],
+            "1024"
+        );
+    }
+
+    #[test]
+    fn native_file_stream_refuses_source_overwrite_and_stale_evidence() {
+        let directory = tempdir().unwrap();
+        let source_path = directory.path().join("source.bin");
+        let destination_path = directory.path().join("destination.bin");
+        let (mut procedure, system, assessments, current_evidence_ids) =
+            native_file_stream_fixture(&source_path, &destination_path);
+        let task_id = Uuid::new_v4();
+        let crate::agency::ProcedureNodeKind::CapabilityCall { input_bindings, .. } =
+            &mut procedure.nodes[1].kind
+        else {
+            unreachable!()
+        };
+        input_bindings.insert(
+            "path".into(),
+            crate::agency::ValueBinding::Literal {
+                value: crate::agency::ProcedureValue::Text(
+                    source_path.to_string_lossy().into_owned(),
+                ),
+                port: assessments[1].descriptor.input_ports[0].clone(),
+            },
+        );
+        let runtime = crate::agency::ProcedureRuntimeState::new(&procedure).unwrap();
+        let same_path_result = compile_application_control_procedure(
+            &procedure,
+            "copy source to itself",
+            task_id,
+            ProcedureCompilationContext {
+                systems: std::slice::from_ref(&system),
+                assessments: &assessments,
+                current_evidence_ids: &current_evidence_ids,
+                runtime: &runtime,
+                selected_node_ids: &["source".into(), "destination".into()],
+                existing_action_ids: &BTreeMap::new(),
+            },
+        );
+        assert!(matches!(same_path_result, Err(CoreError::PolicyDenied(_))));
+
+        let (procedure, system, mut assessments, current_evidence_ids) =
+            native_file_stream_fixture(&source_path, &destination_path);
+        assessments[1].evidence_state =
+            crate::world_model::CapabilityEvidenceState::PassivelyObserved;
+        let runtime = crate::agency::ProcedureRuntimeState::new(&procedure).unwrap();
+        let stale_evidence_result = compile_application_control_procedure(
+            &procedure,
+            "copy source to destination",
+            task_id,
+            ProcedureCompilationContext {
+                systems: std::slice::from_ref(&system),
+                assessments: &assessments,
+                current_evidence_ids: &current_evidence_ids,
+                runtime: &runtime,
+                selected_node_ids: &["source".into(), "destination".into()],
+                existing_action_ids: &BTreeMap::new(),
+            },
+        );
+        assert!(matches!(
+            stale_evidence_result,
+            Err(CoreError::PermissionRequired(_))
+        ));
+    }
+
+    #[test]
+    fn native_file_stream_preflight_rejects_oversize_and_unapproved_replacement() {
+        let directory = tempdir().unwrap();
+        let source_path = directory.path().join("source.bin");
+        let destination_path = directory.path().join("destination.bin");
+        let (procedure, _system, assessments, _) =
+            native_file_stream_fixture(&source_path, &destination_path);
+        std::fs::write(&source_path, vec![0x5a; 1025]).unwrap();
+        let resolver = ResourceResolver::new(Vec::new()).unwrap();
+
+        let oversized = normalize_file_stream_targets(procedure, &assessments, &resolver)
+            .expect_err("an oversized source should fail before task acceptance");
+        assert!(
+            matches!(oversized, CoreError::InvalidAction(message) if message.contains("stream limit"))
+        );
+
+        std::fs::write(&source_path, b"small source").unwrap();
+        std::fs::write(&destination_path, b"existing destination").unwrap();
+        let (mut procedure, _system, assessments, _) =
+            native_file_stream_fixture(&source_path, &destination_path);
+        let cannot_replace =
+            normalize_file_stream_targets(procedure.clone(), &assessments, &resolver)
+                .expect_err("existing destination needs explicit replacement intent");
+        assert!(
+            matches!(cannot_replace, CoreError::InvalidAction(message) if message.contains("already exists"))
+        );
+
+        let crate::agency::ProcedureNodeKind::CapabilityCall { input_bindings, .. } =
+            &mut procedure.nodes[1].kind
+        else {
+            unreachable!()
+        };
+        let Some(crate::agency::ValueBinding::Literal {
+            value: crate::agency::ProcedureValue::Boolean(overwrite),
+            ..
+        }) = input_bindings.get_mut("overwrite")
+        else {
+            unreachable!()
+        };
+        *overwrite = true;
+        assert!(normalize_file_stream_targets(procedure, &assessments, &resolver).is_ok());
+    }
+
+    #[test]
+    fn reviewed_controller_run_rebinds_to_fresh_passive_evidence() {
+        let (system, assessment) = learned_slider_assessment("com.example.Editor", "Volume");
+        let old_control_id = assessment.descriptor.interface_control_id.clone().unwrap();
+        let fresh_control_id = "d".repeat(64);
+        let now = Utc::now();
+        let prepared = prepare_application_controls(vec![ApplicationDiscoveryControl {
+            id: fresh_control_id.clone(),
+            role: "slider".into(),
+            label: "Volume".into(),
+            enabled: true,
+            ancestors: vec!["Audio".into()],
+            value: Some(json!(0.5)),
+            step: Some(0.1),
+            minimum: Some(0.0),
+            maximum: Some(1.0),
+        }])
+        .unwrap();
+        let mut facts = prepared.facts;
+        facts.push(crate::world_model::ObservedFact {
+            name: "application.interface_fingerprint".into(),
+            subject: None,
+            value: crate::world_model::FactValue::Identifier(
+                prepared.interface_fingerprint.clone(),
+            ),
+        });
+        let observation = crate::world_model::ObservationEnvelope {
+            id: Uuid::new_v4(),
+            system_id: system.id,
+            session_id: None,
+            worker_session: None,
+            system_fingerprint: system.fingerprint.clone(),
+            origin: crate::world_model::EvidenceOrigin::OperatingSystem,
+            privacy: crate::contracts::Sensitivity::Private,
+            observed_at: now,
+            facts,
+        };
+        let mut controller = crate::agency::ControllerIr {
+            schema_version: 2,
+            system_id: system.id,
+            system_fingerprint: system.fingerprint.clone(),
+            interface_fingerprint: "c".repeat(64),
+            steps: vec![crate::agency::ControllerStep {
+                id: "set-volume".into(),
+                primitive: crate::agency::ControllerPrimitive::InvokeRegisteredCapability,
+                anchor: crate::agency::SemanticAnchor {
+                    id: old_control_id,
+                    role: "slider".into(),
+                    accessible_name: "Volume".into(),
+                    ancestor_names: vec!["Audio".into()],
+                },
+                capability_id: Some(assessment.descriptor.id.clone()),
+                input_bindings: BTreeMap::from([(
+                    "value".into(),
+                    crate::agency::ValueBinding::Literal {
+                        value: crate::agency::ProcedureValue::Number(0.7),
+                        port: assessment.descriptor.input_ports[0].clone(),
+                    },
+                )]),
+                depends_on: BTreeSet::new(),
+                outputs: assessment
+                    .descriptor
+                    .output_ports
+                    .iter()
+                    .cloned()
+                    .map(|port| (port.name.clone(), port))
+                    .collect(),
+                preconditions: Vec::new(),
+                expected_effect: "Set Volume".into(),
+                verification: "Read back Volume".into(),
+                restoration: Some("Restore the previous value".into()),
+                evidence_ids: assessment.descriptor.evidence_ids.clone(),
+            }],
+        };
+        let mut dependent_step = controller.steps[0].clone();
+        dependent_step.id = "set-volume-from-result".into();
+        dependent_step.depends_on = BTreeSet::from(["set-volume".into()]);
+        dependent_step.input_bindings = BTreeMap::from([(
+            "value".into(),
+            crate::agency::ValueBinding::Result {
+                producer: "set-volume".into(),
+                output: "observed_value".into(),
+            },
+        )]);
+        controller.steps.push(dependent_step);
+        let rebind = crate::agency::ControllerRebinding {
+            observed_interface_fingerprint: prepared.interface_fingerprint,
+            interface_changed: true,
+            control_ids_by_step: BTreeMap::from([
+                ("set-volume".into(), fresh_control_id.clone()),
+                ("set-volume-from-result".into(), fresh_control_id.clone()),
+            ]),
+        };
+
+        let (procedure, rebound_assessments) = prepare_reviewed_controller_run(
+            ReviewedControllerRunContext {
+                controller_id: &"e".repeat(64),
+                controller_revision: 2,
+                controller: &controller,
+                rebinding: &rebind,
+                observation: &observation,
+                assessments: std::slice::from_ref(&assessment),
+            },
+            Uuid::new_v4(),
+            now,
+        )
+        .unwrap();
+        assert_eq!(procedure.nodes.len(), 2);
+        assert!(procedure.streams.is_empty());
+        let crate::agency::ProcedureNodeKind::CapabilityCall { capability_id, .. } =
+            &procedure.nodes[0].kind
+        else {
+            panic!("reviewed controller should compile to its registered capability")
+        };
+        assert_eq!(capability_id, &assessment.descriptor.id);
+        assert_eq!(
+            rebound_assessments[0]
+                .descriptor
+                .interface_control_id
+                .as_deref(),
+            Some(fresh_control_id.as_str())
+        );
+        assert!(
+            rebound_assessments[0]
+                .descriptor
+                .evidence_ids
+                .contains(&observation.id)
+        );
+        assert_eq!(
+            rebound_assessments[0]
+                .descriptor
+                .preconditions
+                .observed_state_fact_ids,
+            [observation.id]
+        );
+        assert!(
+            assessment
+                .descriptor
+                .interface_control_id
+                .as_deref()
+                .is_some_and(|control_id| control_id == "b".repeat(64))
+        );
+
+        let current_evidence_ids = rebound_assessments
+            .iter()
+            .flat_map(|assessment| {
+                assessment
+                    .descriptor
+                    .evidence_ids
+                    .iter()
+                    .chain(&assessment.descriptor.preconditions.observed_state_fact_ids)
+                    .copied()
+            })
+            .collect::<BTreeSet<_>>();
+        let task_id = Uuid::new_v4();
+        let mut runtime =
+            crate::agency::ProcedureRuntimeState::new_for_task(&procedure, task_id).unwrap();
+        runtime
+            .record_dispatched(
+                &procedure,
+                &rebound_assessments,
+                &current_evidence_ids,
+                "set-volume",
+                Uuid::new_v4(),
+            )
+            .unwrap();
+        runtime
+            .record_verified_success(
+                &procedure,
+                "set-volume",
+                BTreeMap::from([(
+                    "observed_value".into(),
+                    crate::agency::ProcedureValue::Number(0.6),
+                )]),
+                Uuid::new_v4(),
+            )
+            .unwrap();
+        let systems = vec![system];
+        let selected_node_ids = vec!["set-volume-from-result".into()];
+        let existing_action_ids = BTreeMap::from([("set-volume".into(), Uuid::new_v4())]);
+        let graph = compile_application_control_procedure(
+            &procedure,
+            "set volume from its verified value",
+            task_id,
+            ProcedureCompilationContext {
+                systems: &systems,
+                assessments: &rebound_assessments,
+                current_evidence_ids: &current_evidence_ids,
+                runtime: &runtime,
+                selected_node_ids: &selected_node_ids,
+                existing_action_ids: &existing_action_ids,
+            },
+        )
+        .unwrap();
+        assert_eq!(graph.nodes.len(), 1);
+        let later_proposal = &graph.nodes[0].proposal;
+        assert_eq!(later_proposal.metadata["controller_id"], "e".repeat(64));
+        assert_eq!(later_proposal.metadata["controller_revision"], "2");
+        assert_eq!(
+            later_proposal.metadata["controller_step_id"],
+            "set-volume-from-result"
+        );
+        assert!(matches!(
+            &later_proposal.action,
+            Action::SetApplicationControl { control_id, value: crate::domain::ApplicationControlValue::Number(value), .. }
+                if control_id == &fresh_control_id && *value == 0.6
+        ));
+    }
+
+    #[test]
+    fn reviewed_controller_run_rejects_controls_without_fresh_safe_value_evidence() {
+        let (system, assessment) = learned_slider_assessment("com.example.Editor", "Volume");
+        let old_control_id = assessment.descriptor.interface_control_id.clone().unwrap();
+        let fresh_control_id = "f".repeat(64);
+        let now = Utc::now();
+        let prepared = prepare_application_controls(vec![ApplicationDiscoveryControl {
+            id: fresh_control_id.clone(),
+            role: "slider".into(),
+            label: "Volume".into(),
+            enabled: true,
+            ancestors: vec!["Audio".into()],
+            value: None,
+            step: None,
+            minimum: None,
+            maximum: None,
+        }])
+        .unwrap();
+        let mut facts = prepared.facts;
+        facts.push(crate::world_model::ObservedFact {
+            name: "application.interface_fingerprint".into(),
+            subject: None,
+            value: crate::world_model::FactValue::Identifier(
+                prepared.interface_fingerprint.clone(),
+            ),
+        });
+        let observation = crate::world_model::ObservationEnvelope {
+            id: Uuid::new_v4(),
+            system_id: system.id,
+            session_id: None,
+            worker_session: None,
+            system_fingerprint: system.fingerprint.clone(),
+            origin: crate::world_model::EvidenceOrigin::OperatingSystem,
+            privacy: crate::contracts::Sensitivity::Private,
+            observed_at: now,
+            facts,
+        };
+        let controller = crate::agency::ControllerIr {
+            schema_version: 2,
+            system_id: system.id,
+            system_fingerprint: system.fingerprint.clone(),
+            interface_fingerprint: "c".repeat(64),
+            steps: vec![crate::agency::ControllerStep {
+                id: "set-volume".into(),
+                primitive: crate::agency::ControllerPrimitive::InvokeRegisteredCapability,
+                anchor: crate::agency::SemanticAnchor {
+                    id: old_control_id,
+                    role: "slider".into(),
+                    accessible_name: "Volume".into(),
+                    ancestor_names: vec!["Audio".into()],
+                },
+                capability_id: Some(assessment.descriptor.id.clone()),
+                input_bindings: BTreeMap::from([(
+                    "value".into(),
+                    crate::agency::ValueBinding::Literal {
+                        value: crate::agency::ProcedureValue::Number(0.7),
+                        port: assessment.descriptor.input_ports[0].clone(),
+                    },
+                )]),
+                depends_on: BTreeSet::new(),
+                outputs: assessment
+                    .descriptor
+                    .output_ports
+                    .iter()
+                    .cloned()
+                    .map(|port| (port.name.clone(), port))
+                    .collect(),
+                preconditions: Vec::new(),
+                expected_effect: "Set Volume".into(),
+                verification: "Read back Volume".into(),
+                restoration: Some("Restore the previous value".into()),
+                evidence_ids: assessment.descriptor.evidence_ids.clone(),
+            }],
+        };
+        let rebind = crate::agency::ControllerRebinding {
+            observed_interface_fingerprint: prepared.interface_fingerprint,
+            interface_changed: true,
+            control_ids_by_step: BTreeMap::from([("set-volume".into(), fresh_control_id)]),
+        };
+        let result = prepare_reviewed_controller_run(
+            ReviewedControllerRunContext {
+                controller_id: &"e".repeat(64),
+                controller_revision: 2,
+                controller: &controller,
+                rebinding: &rebind,
+                observation: &observation,
+                assessments: std::slice::from_ref(&assessment),
+            },
+            Uuid::new_v4(),
+            now,
+        );
+        assert!(result.is_err());
     }
 
     #[test]
@@ -7868,6 +10807,132 @@ mod tests {
         assert!(serde_json::to_vec(&observation).unwrap().len() < 32 * 1024);
     }
 
+    #[tokio::test]
+    async fn renderer_observations_require_a_typed_identity_before_lan_access() {
+        use sage_protocol::sage::ipc::v2 as wire;
+
+        let data = tempdir().unwrap();
+        let core = SageCore::new(
+            CoreConfig::for_test(data.path()),
+            Arc::new(UnconfiguredModelProvider),
+        )
+        .unwrap();
+        let missing_identity = core
+            .world_model_command(wire::WorldModelCommand {
+                operation: "observe_upnp_transport".into(),
+                ..Default::default()
+            })
+            .await;
+        assert!(matches!(missing_identity, Err(CoreError::InvalidAction(_))));
+
+        let malformed_identity = core
+            .world_model_command(wire::WorldModelCommand {
+                operation: "observe_upnp_transport".into(),
+                upnp_renderer_observation_target: Some(wire::UpnpRendererObservationTarget {
+                    unique_device_name: "uuid:renderer".into(),
+                    description_sha256: "caller-controlled-endpoint".into(),
+                }),
+                ..Default::default()
+            })
+            .await;
+        assert!(matches!(
+            malformed_identity,
+            Err(CoreError::InvalidAction(_))
+        ));
+
+        let missing_protocol_identity = core
+            .world_model_command(wire::WorldModelCommand {
+                operation: "observe_upnp_protocol_info".into(),
+                ..Default::default()
+            })
+            .await;
+        assert!(matches!(
+            missing_protocol_identity,
+            Err(CoreError::InvalidAction(_))
+        ));
+
+        let malformed_protocol_identity = core
+            .world_model_command(wire::WorldModelCommand {
+                operation: "observe_upnp_protocol_info".into(),
+                json: "http://127.0.0.1/private-endpoint".into(),
+                upnp_renderer_observation_target: Some(wire::UpnpRendererObservationTarget {
+                    unique_device_name: "uuid:renderer".into(),
+                    description_sha256: "a".repeat(64),
+                }),
+                ..Default::default()
+            })
+            .await;
+        assert!(matches!(
+            malformed_protocol_identity,
+            Err(CoreError::InvalidAction(_))
+        ));
+    }
+
+    #[test]
+    fn renderer_sink_protocol_observation_is_persisted_as_untrusted_world_evidence() {
+        let data = tempdir().unwrap();
+        let core = SageCore::new(
+            CoreConfig::for_test(data.path()),
+            Arc::new(UnconfiguredModelProvider),
+        )
+        .unwrap();
+        let digest = "a".repeat(64);
+        let observation = sage_upnp_av::ProtocolInfoObservation {
+            unique_device_name: "uuid:renderer".into(),
+            description_sha256: digest.clone(),
+            source: Vec::new(),
+            sink: vec![sage_upnp_av::ProtocolInfo {
+                protocol: "http-get".into(),
+                network: "*".into(),
+                content_format: "video/mp4".into(),
+                additional_info: "DLNA.ORG_OP=01".into(),
+            }],
+            observed_at: Utc::now(),
+            evidence_scope: "private_lan_untrusted_protocol_info".into(),
+        };
+        let (system_id, observation_id) = persist_renderer_protocol_info(
+            &core.store,
+            "uuid:renderer",
+            "Living Room TV",
+            &digest,
+            &observation,
+        )
+        .unwrap();
+        let stored = core.store.observations_for_system(system_id, None).unwrap();
+        let system = core
+            .store
+            .observed_systems()
+            .unwrap()
+            .into_iter()
+            .find(|system| system.id == system_id)
+            .unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(system.label, "Living Room TV");
+        assert_eq!(stored[0].id, observation_id);
+        assert_eq!(
+            stored[0].origin,
+            crate::world_model::EvidenceOrigin::DeviceAdvertisement
+        );
+        assert_eq!(stored[0].system_fingerprint, observation.description_sha256);
+        assert!(stored[0].facts.iter().any(|fact| {
+            fact.name == "device.protocol_info.sink.content_format"
+                && fact.subject.as_deref() == Some("sink-00")
+                && fact.value == crate::world_model::FactValue::Text("video/mp4".into())
+        }));
+
+        let changed_identity = persist_renderer_protocol_info(
+            &core.store,
+            "uuid:other-renderer",
+            "Living Room TV",
+            &digest,
+            &observation,
+        );
+        assert!(matches!(
+            changed_identity,
+            Err(CoreError::VerificationFailed(_))
+        ));
+    }
+
     #[test]
     fn maximum_browser_discovery_observation_fits_world_model_storage() {
         let target = crate::browser_target::BrowserTarget {
@@ -8014,6 +11079,133 @@ mod tests {
         assert!(!serialized.contains("Password"));
         assert!(!serialized.contains("account/private"));
         assert!(!serialized.contains("never-store"));
+    }
+
+    #[tokio::test]
+    async fn native_file_stream_copy_registers_and_verifies_exact_file_transfer() {
+        use sage_protocol::sage::ipc::v2 as wire;
+
+        let data = tempdir().unwrap();
+        let workspace = tempdir().unwrap();
+        let source = workspace.path().join("source.bin");
+        let destination = workspace.path().join("destination.bin");
+        let payload = vec![0x5a; 192 * 1024 + 37];
+        std::fs::write(&source, &payload).unwrap();
+        let core = SageCore::new(
+            CoreConfig::for_test(data.path()),
+            Arc::new(UnconfiguredModelProvider),
+        )
+        .unwrap();
+        let mut events = core.events().subscribe();
+        let command_id = Uuid::new_v4();
+        let result = core
+            .world_model_command(wire::WorldModelCommand {
+                operation: "run_file_stream_copy".into(),
+                id: command_id.to_string(),
+                json: json!({
+                    "source_path": source,
+                    "destination_path": destination,
+                    "overwrite": false,
+                    "request": "Copy the selected local file"
+                })
+                .to_string(),
+                upnp_renderer_observation_target: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(result["task_submitted"], true);
+        assert_eq!(result["requires_fresh_authority_and_verification"], true);
+        assert_eq!(result["maximum_bytes"], crate::execution::files::MAX_BYTES);
+        let task_id = Uuid::parse_str(result["task_id"].as_str().unwrap()).unwrap();
+
+        timeout(Duration::from_secs(10), async {
+            loop {
+                let event = events.recv().await.unwrap();
+                match event.kind {
+                    CoreEventKind::ApprovalRequested {
+                        approval_id,
+                        action_id,
+                        digest,
+                        ..
+                    } => {
+                        core.resolve_approval(
+                            approval_id,
+                            task_id,
+                            action_id,
+                            &digest,
+                            ApprovalResolution::Approved {
+                                native_authentication_satisfied: false,
+                            },
+                        )
+                        .await
+                        .unwrap();
+                    }
+                    CoreEventKind::TaskCompleted { .. } => break,
+                    CoreEventKind::Error { message, .. } => {
+                        panic!("native file stream copy failed: {message}")
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("native file stream copy did not complete");
+
+        assert_eq!(std::fs::read(&destination).unwrap(), payload);
+        let task = core.get_task(task_id).await.unwrap();
+        assert_eq!(task.status, TaskStatus::Succeeded);
+        assert_eq!(task.completed_count(), 2);
+        assert_eq!(task.actions.len(), 2);
+        assert_eq!(
+            core.store
+                .capability_assessments(core.store.observed_systems().unwrap()[0].id)
+                .unwrap()
+                .iter()
+                .filter(|assessment| {
+                    assessment.evidence_state
+                        == crate::world_model::CapabilityEvidenceState::SageCodeRegistered
+                })
+                .count(),
+            2
+        );
+
+        let duplicate = core
+            .world_model_command(wire::WorldModelCommand {
+                operation: "run_file_stream_copy".into(),
+                id: command_id.to_string(),
+                json: json!({
+                    "source_path": source,
+                    "destination_path": destination,
+                    "overwrite": false,
+                    "request": "Copy the selected local file"
+                })
+                .to_string(),
+                upnp_renderer_observation_target: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(duplicate["deduplicated"], true);
+        assert_eq!(duplicate["task_id"], task_id.to_string());
+        assert_eq!(
+            duplicate["maximum_bytes"],
+            crate::execution::files::MAX_BYTES
+        );
+
+        let same_target = core
+            .world_model_command(wire::WorldModelCommand {
+                operation: "run_file_stream_copy".into(),
+                id: Uuid::new_v4().to_string(),
+                json: json!({
+                    "source_path": source,
+                    "destination_path": source,
+                    "overwrite": true,
+                    "request": "Copy the selected local file"
+                })
+                .to_string(),
+                upnp_renderer_observation_target: None,
+            })
+            .await;
+        assert!(matches!(same_target, Err(CoreError::PolicyDenied(_))));
     }
 
     #[tokio::test]
@@ -8166,6 +11358,7 @@ mod tests {
                     operation: "review_controller_draft".into(),
                     id: draft.id,
                     json: json!({ "expected_revision": 1 }).to_string(),
+                    upnp_renderer_observation_target: None,
                 })
                 .await
         });
@@ -9989,6 +13182,58 @@ mod tests {
             core.control_task(task_id, TaskStatus::Running).await,
             Err(CoreError::PermissionRequired(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn checkpointed_paused_task_stays_paused_until_resume_authority_is_reestablished() {
+        let data = tempdir().unwrap();
+        let core = SageCore::new(
+            CoreConfig::for_test(data.path()),
+            Arc::new(UnconfiguredModelProvider),
+        )
+        .unwrap();
+        let mut task = Task::new("resume a transferred checkpoint");
+        task.status = TaskStatus::Paused;
+        let task_id = task.id;
+        core.store.save_task(&mut task).unwrap();
+        let checkpoint = crate::agency::TaskCheckpoint {
+            schema_version: 1,
+            task_id,
+            intent: task.request.clone(),
+            procedure: None,
+            goal_coordination: None,
+            procedure_state: BTreeMap::new(),
+            artifacts: Vec::new(),
+            verified_results: Vec::new(),
+            receipt_ids: Vec::new(),
+            pending_obligations: Vec::new(),
+            state: crate::agency::CheckpointState::Paused,
+            execution_owner: crate::agency::ExecutionOwner {
+                device_id: Uuid::new_v4(),
+                generation: 1,
+            },
+            dispatched_effects_settled: true,
+        };
+        core.store.save_task_checkpoint(&checkpoint, 0).unwrap();
+        core.tasks.write().await.insert(task_id, task);
+
+        assert!(matches!(
+            core.control_task(task_id, TaskStatus::Running).await,
+            Err(CoreError::PermissionRequired(_))
+        ));
+        assert_eq!(
+            core.get_task(task_id).await.unwrap().status,
+            TaskStatus::Paused
+        );
+        assert_eq!(
+            core.store
+                .load_task_checkpoint(task_id)
+                .unwrap()
+                .unwrap()
+                .0
+                .state,
+            crate::agency::CheckpointState::Paused
+        );
     }
 
     #[derive(Default)]

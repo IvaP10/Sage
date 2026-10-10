@@ -18,7 +18,7 @@
       "id": "process_isolation",
       "proof_type": "security_review",
       "status": "pending",
-      "reason": "The inference-helper package and sandbox probe are foundations only; extract native/credential services and model networking from shared broker authority, integrate signed-peer attestation and model-package transfer, then qualify installed confinement and cross-platform denial tests."
+      "reason": "The ad-hoc-signed macOS helper passed a development probe denying host-file reads/writes and network while allowing one inherited read-only descriptor. Extract native/credential services and model networking from shared broker authority, integrate signed-peer attestation and model-package transfer, then qualify installed confinement and cross-platform denial tests."
     },
     {
       "id": "native_macos",
@@ -31,6 +31,12 @@
       "proof_type": "device_acceptance",
       "status": "pending",
       "reason": "A Windows host and SDK run are required; Mac compilation is not Windows evidence."
+    },
+    {
+      "id": "task_handoff_live",
+      "proof_type": "device_acceptance",
+      "status": "pending",
+      "reason": "Paired loopback and encrypted-store tests pass, but installed-device routing, artifact transfer, native identity storage, destination resource reauthorization, partition recovery and real Mac/Windows handoff acceptance remain unavailable."
     },
     {
       "id": "browser_live",

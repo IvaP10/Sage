@@ -3,7 +3,7 @@
 Date: 7 October 2026  
 Host: Apple M3, 8 GiB unified memory  
 Build: Rust release test binary, local first-party CPU NEON kernel  
-Command: `cargo test -p sage-core --features qwen35-evaluation qwen_hidden_q4_projection_latency_measurement --release -- --ignored --nocapture`
+Command: `cargo test --offline -p sage-inference-math --lib qwen_hidden_q4_projection_latency_measurement --release -- --ignored --nocapture`
 
 The fixture uses a 2,560 × 2,560 grouped-Q4 matrix with 128-element quantization groups and 101 samples per path. Allocating `project` and caller-owned `project_into` were alternated within each run. Every output was checked against the same f64 scalar reference before timing.
 

@@ -2,7 +2,7 @@
 
 Date: 2026-10-07  
 Hardware: Apple M3  
-Command: `cargo test -p sage-core --features qwen35-evaluation --lib --release grouped_query_attention_workspace_latency_measurement -- --ignored --nocapture --test-threads=1`
+Command: `cargo test --offline -p sage-inference-math --lib --release grouped_query_attention_workspace_latency_measurement -- --ignored --nocapture --test-threads=1`
 
 The release microbenchmark used a synthetic 2,048-position KV cache, 16 query heads, four KV heads, and 64 values per head. It compared allocating and zeroizing a fresh score/output workspace on each call with clearing and reusing one preallocated workspace. Both paths executed the same attention kernels; the test warmed each path ten times, alternated path order, and collected 101 samples.
 

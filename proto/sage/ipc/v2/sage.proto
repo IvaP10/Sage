@@ -352,9 +352,16 @@ message WorkflowState { string json = 1; }
 // Descriptive discovery data and explicitly approved, expiring learning
 // sessions. JSON payloads are decoded into closed Rust schemas by sage-core.
 message WorldModelCommand {
-  string operation = 1; // discover_current_application, discover_paired_browser, list, system, synthesize_goal, run_goal, compile_controller_draft, get_controller_draft, review_controller_draft, forget_system, approve_learning_session, run_learning_probe, stop_learning_session
+  string operation = 1; // discover_current_application, discover_paired_browser, discover_upnp_media_renderers, observe_upnp_transport, observe_upnp_protocol_info, list, system, synthesize_goal, run_goal, run_stream_procedure, run_file_stream_copy, compile_controller_draft, get_controller_draft, review_controller_draft, forget_system, approve_learning_session, run_learning_probe, stop_learning_session
   string id = 2;
   string json = 3;
+  UpnpRendererObservationTarget upnp_renderer_observation_target = 4;
+}
+// Exact passive-discovery identity used to request fresh, read-only device
+// observations. It carries no network endpoint, pairing state or grant.
+message UpnpRendererObservationTarget {
+  string unique_device_name = 1;
+  string description_sha256 = 2;
 }
 message WorldModelState { string json = 1; }
 message ActionProgress { string action_id = 1; string summary = 2; string status = 3; }

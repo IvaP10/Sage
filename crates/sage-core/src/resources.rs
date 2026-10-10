@@ -221,6 +221,21 @@ impl ResourceResolver {
                 producer_node: producer_node.clone(),
                 maximum_bytes: *maximum_bytes,
             },
+            ExpectedOutcome::FileReadMatchesStream {
+                path,
+                channel_id,
+                producer_node,
+                output_port,
+                consumer_node,
+                maximum_bytes,
+            } => ExpectedOutcome::FileReadMatchesStream {
+                path: self.resolve(path, true)?,
+                channel_id: channel_id.clone(),
+                producer_node: producer_node.clone(),
+                output_port: output_port.clone(),
+                consumer_node: consumer_node.clone(),
+                maximum_bytes: *maximum_bytes,
+            },
             ExpectedOutcome::DirectoryPage {
                 path,
                 page_size,

@@ -9,7 +9,8 @@ use crate::error::{CoreError, CoreResult};
 pub(crate) const MAX_TURN_BYTES: usize = 256 * 1024;
 const MAX_ANSWER_BYTES: usize = 64 * 1024;
 pub(crate) const MAX_READ_BATCH: usize = 8;
-pub(crate) const INDEPENDENT_READ_TOOLS: &[&str] = &["read_file", "list_directory", "fetch_public"];
+pub(crate) const INDEPENDENT_READ_TOOLS: &[&str] =
+    sage_inference_protocol::QWEN35_INDEPENDENT_READ_TOOL_KINDS;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

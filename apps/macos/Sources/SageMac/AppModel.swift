@@ -1,5 +1,6 @@
 import AppKit
 import AVFoundation
+import CoreFoundation
 import Foundation
 import Observation
 import Speech
@@ -92,7 +93,21 @@ final class AppModel {
     var routineFamilies: [RoutineFamilyRecord] = []
     var worldModelSnapshotJSON = ""
     var worldModelStatus = ""
+    var upnpRendererCandidates: [RendererCandidateRecord] = []
+    var upnpRendererTransportStates: [String: String] = [:]
+    var upnpRendererProtocolSummaries: [String: String] = [:]
     private(set) var worldModelBusy = false
+    var goalBuilderPresented = false
+    var fileStreamCopyPresented = false
+    private(set) var fileStreamCopyStatus = ""
+    private(set) var fileStreamCopyNeedsRetry = false
+    private(set) var goalSystems: [GoalSystemOption] = []
+    var selectedGoalSystemID = ""
+    private(set) var goalCapabilities: [GoalCapabilityOption] = []
+    var selectedGoalCapabilityID = ""
+    var goalStatus = ""
+    private(set) var goalPlanPreview: GoalPlanPreview?
+    private(set) var goalSubmissionNeedsRetry = false
     var controllerDraftTaskID: String?
     var controllerDraftStatus = ""
     var controllerDrafts: [ControllerDraftRecord] = []
@@ -100,8 +115,22 @@ final class AppModel {
         case compile(taskID: String)
         case inspect(id: String)
         case review(id: String)
+        case run(id: String)
     }
     private var controllerRequest: ControllerRequest?
+    private enum GoalRequest {
+        case list
+        case system
+        case preview
+        case run
+        case fileStreamCopy
+    }
+    @ObservationIgnored private var goalRequest: GoalRequest?
+    @ObservationIgnored private var preparedGoalSynthesisPayload: Data?
+    @ObservationIgnored private var goalRunSubmissionID: String?
+    @ObservationIgnored private var goalRunSubmissionPayload: Data?
+    @ObservationIgnored private var fileStreamCopySubmissionID: String?
+    @ObservationIgnored private var fileStreamCopySubmissionPayload: Data?
     private(set) var learningCandidates: [LearningCandidate] = []
     private(set) var learningSessionID: String?
     private(set) var learningApprovedCandidate: LearningCandidate?
@@ -316,6 +345,10 @@ final class AppModel {
                 self.snapshotRefresh?.reset()
                 self.historyRefresh?.reset()
                 self.resolvingDecision = false
+                if let goalRequest = self.goalRequest {
+                    self.worldModelBusy = false
+                    self.goalRequestFailed(goalRequest, message: "The Core connection closed before Sage confirmed this goal operation.")
+                }
                 if self.learningSessionID != nil {
                     self.learningSessionID = nil
                     self.learningApprovedCandidate = nil
@@ -788,6 +821,189 @@ final class AppModel {
         Task { do { try await client.workflow(request) } catch { errorMessage = error.localizedDescription } }
     }
 
+    func openGoalBuilder() {
+        guard !worldModelBusy, learningSessionID == nil, pendingDecision == nil else { return }
+        goalBuilderPresented = true
+        if goalRunSubmissionPayload != nil {
+            goalStatus = "The previous submission has no confirmed response. Retry it with its original submission identity."
+            return
+        }
+        refreshGoalSystems()
+    }
+
+    func refreshGoalSystems() {
+        guard !worldModelBusy, goalRunSubmissionPayload == nil else { return }
+        goalCapabilities = []
+        selectedGoalCapabilityID = ""
+        invalidateGoalPreview()
+        goalRequest = .list
+        worldModelBusy = true
+        goalStatus = "Refreshing discovered application systems…"
+        worldModel("list", id: UUID().uuidString.lowercased())
+    }
+
+    func goalSystemSelectionChanged() {
+        guard goalRunSubmissionPayload == nil else { return }
+        goalCapabilities = []
+        selectedGoalCapabilityID = ""
+        invalidateGoalPreview()
+        if !selectedGoalSystemID.isEmpty {
+            goalStatus = "Load the selected application's current verified controls."
+        }
+    }
+
+    func loadGoalCapabilities() {
+        guard !worldModelBusy, goalRunSubmissionPayload == nil,
+              goalSystems.contains(where: { $0.id == selectedGoalSystemID }) else { return }
+        goalCapabilities = []
+        selectedGoalCapabilityID = ""
+        invalidateGoalPreview()
+        goalRequest = .system
+        worldModelBusy = true
+        goalStatus = "Checking current evidence for the selected application…"
+        worldModel("system", id: selectedGoalSystemID)
+    }
+
+    func invalidateGoalPreview() {
+        guard goalRunSubmissionPayload == nil else { return }
+        goalPlanPreview = nil
+        preparedGoalSynthesisPayload = nil
+    }
+
+    func previewGoal(capability: GoalCapabilityOption, value: GoalLiteralValue) {
+        guard !worldModelBusy, goalRunSubmissionPayload == nil,
+              capability.systemID == selectedGoalSystemID,
+              let system = goalSystems.first(where: { $0.id == capability.systemID }),
+              system.fingerprint == capability.systemFingerprint else { return }
+        let valueType: String
+        let encodedValue: Any
+        switch value {
+        case .number(let number):
+            guard capability.input.valueType == "number", number.isFinite else {
+                goalStatus = "Enter a finite number for this control."
+                return
+            }
+            valueType = "number"
+            encodedValue = number
+        case .boolean(let boolean):
+            guard capability.input.valueType == "boolean" else {
+                goalStatus = "Choose a state that matches this control's typed input."
+                return
+            }
+            valueType = "boolean"
+            encodedValue = boolean
+        }
+        let seed: [String: Any] = [
+            "capability_id": capability.id,
+            "input_name": capability.input.name,
+            "binding": [
+                "source": "literal",
+                "value": ["type": valueType, "value": encodedValue],
+                "port": capability.input.wireObject,
+            ],
+        ]
+        let payload: [String: Any] = [
+            "system_id": capability.systemID,
+            "goal_capability_id": capability.id,
+            "goal_output": capability.output.name,
+            "seeds": [seed],
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]),
+              let json = String(data: data, encoding: .utf8) else {
+            goalStatus = "Sage could not encode this bounded typed goal."
+            return
+        }
+        preparedGoalSynthesisPayload = data
+        goalPlanPreview = nil
+        goalRequest = .preview
+        worldModelBusy = true
+        goalStatus = "Synthesizing a proposal from current restored evidence…"
+        worldModel("synthesize_goal", id: UUID().uuidString.lowercased(), json: json)
+    }
+
+    func runPreparedGoal(taskDescription: String) {
+        guard !worldModelBusy, goalSubmissionNeedsRetry == false,
+              goalPlanPreview != nil,
+              let synthesisData = preparedGoalSynthesisPayload,
+              var payload = try? JSONSerialization.jsonObject(with: synthesisData) as? [String: Any] else { return }
+        let request = taskDescription.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !request.isEmpty, request.utf8.count <= 512 else {
+            goalStatus = "Add a task description under 512 bytes before starting."
+            return
+        }
+        payload["request"] = request
+        guard let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]) else {
+            goalStatus = "Sage could not encode this reviewed goal submission."
+            return
+        }
+        goalRunSubmissionID = UUID().uuidString.lowercased()
+        goalRunSubmissionPayload = data
+        dispatchGoalSubmission()
+    }
+
+    func retryGoalSubmission() {
+        guard goalSubmissionNeedsRetry, goalRunSubmissionPayload != nil else { return }
+        dispatchGoalSubmission()
+    }
+
+    private func dispatchGoalSubmission() {
+        guard !worldModelBusy, let id = goalRunSubmissionID,
+              let data = goalRunSubmissionPayload,
+              let json = String(data: data, encoding: .utf8) else { return }
+        goalSubmissionNeedsRetry = false
+        goalRequest = .run
+        worldModelBusy = true
+        goalStatus = "Submitting the same declared goal. Sage will recheck the target and ask approval before each action…"
+        worldModel("run_goal", id: id, json: json)
+    }
+
+    func openFileStreamCopy() {
+        guard connectionState == .connected,
+              !worldModelBusy,
+              learningSessionID == nil,
+              pendingDecision == nil else { return }
+        fileStreamCopyStatus = "Choose one source file and an exact destination."
+        fileStreamCopyPresented = true
+    }
+
+    func submitFileStreamCopy(sourcePath: String, destinationPath: String, overwrite: Bool) {
+        guard !worldModelBusy,
+              fileStreamCopySubmissionPayload == nil,
+              !sourcePath.isEmpty,
+              !destinationPath.isEmpty else { return }
+        let payload: [String: Any] = [
+            "source_path": sourcePath,
+            "destination_path": destinationPath,
+            "overwrite": overwrite,
+            "request": "Copy the selected local file to the selected destination",
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]) else {
+            fileStreamCopyStatus = "Sage could not encode this bounded file-copy request."
+            return
+        }
+        fileStreamCopySubmissionID = UUID().uuidString.lowercased()
+        fileStreamCopySubmissionPayload = data
+        fileStreamCopyNeedsRetry = false
+        dispatchFileStreamCopy()
+    }
+
+    func retryFileStreamCopy() {
+        guard fileStreamCopyNeedsRetry, fileStreamCopySubmissionPayload != nil else { return }
+        dispatchFileStreamCopy()
+    }
+
+    private func dispatchFileStreamCopy() {
+        guard !worldModelBusy,
+              let id = fileStreamCopySubmissionID,
+              let data = fileStreamCopySubmissionPayload,
+              let json = String(data: data, encoding: .utf8) else { return }
+        fileStreamCopyNeedsRetry = false
+        goalRequest = .fileStreamCopy
+        worldModelBusy = true
+        fileStreamCopyStatus = "Submitting the exact paths. Sage will resolve them again and request approval before reading or writing."
+        worldModel("run_file_stream_copy", id: id, json: json)
+    }
+
     func worldModel(_ operation: String, id: String = "", json: String = "") {
         var request = Sage_Ipc_V2_WorldModelCommand()
         request.operation = operation
@@ -798,12 +1014,229 @@ final class AppModel {
             catch {
                 worldModelBusy = false
                 worldModelStatus = error.localizedDescription
+                if let goalRequest {
+                    goalRequestFailed(goalRequest, message: error.localizedDescription)
+                }
                 if controllerRequest != nil {
                     controllerDraftStatus = error.localizedDescription
                     controllerRequest = nil
                 }
                 errorMessage = error.localizedDescription
             }
+        }
+    }
+
+    private func goalRequestFailed(_ request: GoalRequest, message: String) {
+        switch request {
+        case .run:
+            // The command identity and exact payload remain stable so retry is idempotent
+            // even when Core committed the task but its receipt was lost.
+            goalRequest = nil
+            goalSubmissionNeedsRetry = true
+            goalStatus = "Sage could not confirm the result. Retry the same submission to safely recover its task: \(message)"
+        case .list:
+            goalRequest = nil
+            goalSystems = []
+            goalStatus = "Could not load discovered applications: \(message)"
+        case .system:
+            goalRequest = nil
+            goalCapabilities = []
+            selectedGoalCapabilityID = ""
+            goalStatus = "Could not verify current application controls: \(message)"
+        case .preview:
+            goalRequest = nil
+            goalPlanPreview = nil
+            preparedGoalSynthesisPayload = nil
+            goalStatus = "Could not prepare a current procedure preview: \(message)"
+        case .fileStreamCopy:
+            goalRequest = nil
+            fileStreamCopyNeedsRetry = true
+            fileStreamCopyStatus = "Sage could not confirm the submission. Retry the same request to recover safely: \(message)"
+        }
+    }
+
+    private func applyGoalResult(_ result: [String: Any]) {
+        guard let request = goalRequest else { return }
+        switch request {
+        case .list:
+            guard let values = result["systems"] as? [Any] else {
+                goalRequestFailed(request, message: "Core returned no valid system list.")
+                return
+            }
+            let systems = values.compactMap(GoalSystemOption.init)
+                .filter { $0.kind == "application" }
+                .sorted { $0.label.localizedCaseInsensitiveCompare($1.label) == .orderedAscending }
+            goalSystems = systems
+            if !systems.contains(where: { $0.id == selectedGoalSystemID }) {
+                selectedGoalSystemID = systems.first?.id ?? ""
+            }
+            goalCapabilities = []
+            selectedGoalCapabilityID = ""
+            goalPlanPreview = nil
+            preparedGoalSynthesisPayload = nil
+            goalRequest = nil
+            goalStatus = systems.isEmpty
+                ? "No discovered application systems are available yet. Passively inspect an app and review a reversible control first."
+                : "Choose an application, then load its current verified controls."
+        case .system:
+            guard let value = result["system"],
+                  let system = GoalSystemOption(value),
+                  system.id == selectedGoalSystemID,
+                  goalSystems.contains(where: { $0.id == system.id && $0.fingerprint == system.fingerprint }),
+                  let values = result["capabilities"] as? [Any] else {
+                goalRequestFailed(request, message: "The selected system changed or returned an incomplete response. Refresh it before previewing.")
+                return
+            }
+            let capabilities = values.compactMap { GoalCapabilityOption($0, for: system) }
+                .sorted { $0.label.localizedCaseInsensitiveCompare($1.label) == .orderedAscending }
+            goalCapabilities = capabilities
+            selectedGoalCapabilityID = capabilities.first?.id ?? ""
+            goalPlanPreview = nil
+            preparedGoalSynthesisPayload = nil
+            goalRequest = nil
+            goalStatus = capabilities.isEmpty
+                ? "No current, reversibly tested application controls meet the bounded goal-builder contract."
+                : "Select a tested control and typed value to preview a procedure."
+        case .preview:
+            guard result["requires_fresh_authority_and_runtime_review"] as? Bool == true,
+                  let proposal = result["proposal"] as? [String: Any],
+                  let nodes = proposal["nodes"] as? [[String: Any]],
+                  !nodes.isEmpty, nodes.count <= 128,
+                  let schedule = result["schedule"] as? [String: Any],
+                  let waveValues = schedule["waves"] as? [[String]],
+                  !waveValues.isEmpty, waveValues.count <= 128,
+                  let initialAdvance = result["initial_runtime_advance"] as? [String: Any],
+                  let firstWave = initialAdvance["proposal_wave"] as? [[String: Any]],
+                  !firstWave.isEmpty,
+                  let timeNumber = schedule["estimated_elapsed_micros"] as? NSNumber else {
+                goalRequestFailed(request, message: "The proposal did not satisfy Sage's bounded preview contract.")
+                return
+            }
+            let capabilityByID = Dictionary(goalCapabilities.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+            let nodeIDs = nodes.compactMap { $0["id"] as? String }
+            let firstWaveNodeIDs = firstWave.compactMap { $0["node_id"] as? String }
+            guard nodeIDs.count == nodes.count,
+                  Set(nodeIDs).count == nodeIDs.count,
+                  firstWaveNodeIDs.count == firstWave.count,
+                  Set(firstWaveNodeIDs).count == firstWaveNodeIDs.count,
+                  waveValues.flatMap({ $0 }).sorted() == nodeIDs.sorted(),
+                  Set(firstWaveNodeIDs).isSubset(of: Set(nodeIDs)) else {
+                goalRequestFailed(request, message: "The procedure schedule did not cover its exact bounded node set.")
+                return
+            }
+            var capabilityByNodeID: [String: GoalCapabilityOption] = [:]
+            for node in nodes {
+                guard let id = node["id"] as? String,
+                      let kind = node["kind"] as? [String: Any],
+                      let capabilityID = kind["capability_id"] as? String,
+                      let capability = capabilityByID[capabilityID] else { continue }
+                capabilityByNodeID[id] = capability
+            }
+            let steps = nodes.compactMap { node -> GoalPlanStep? in
+                guard let id = node["id"] as? String,
+                      let kind = node["kind"] as? [String: Any],
+                      kind["kind"] as? String == "capability_call",
+                      let capabilityID = kind["capability_id"] as? String,
+                      let capability = capabilityByID[capabilityID],
+                      capabilityByNodeID[id] != nil,
+                      let systemID = kind["system_id"] as? String,
+                      systemID == capability.systemID,
+                      let fingerprint = kind["system_fingerprint"] as? String,
+                      fingerprint == capability.systemFingerprint,
+                      let outputs = node["outputs"] as? [String: Any],
+                      outputs.count == 1,
+                      let outputValue = outputs[capability.output.name],
+                      let declaredOutput = GoalPortOption(outputValue),
+                      declaredOutput == capability.output,
+                      let bindings = kind["input_bindings"] as? [String: Any],
+                      bindings.count == 1,
+                      let binding = bindings[capability.input.name] as? [String: Any],
+                      let source = binding["source"] as? String else { return nil }
+                let inputSummary: String
+                if source == "literal" {
+                    guard let portValue = binding["port"],
+                          let port = GoalPortOption(portValue),
+                          port == capability.input,
+                          let typedValue = binding["value"] as? [String: Any],
+                          typedValue["type"] as? String == capability.input.valueType,
+                          let rawValue = typedValue["value"] else { return nil }
+                    if capability.input.valueType == "number",
+                       let number = rawValue as? NSNumber,
+                       CFGetTypeID(number) != CFBooleanGetTypeID(),
+                       number.doubleValue.isFinite {
+                        inputSummary = "\(capability.input.name) = \(number.stringValue)"
+                    } else if capability.input.valueType == "boolean",
+                              let number = rawValue as? NSNumber,
+                              CFGetTypeID(number) == CFBooleanGetTypeID() {
+                        inputSummary = "\(capability.input.name) = \(number.boolValue ? "on" : "off")"
+                    } else {
+                        return nil
+                    }
+                } else if source == "result" {
+                    guard let producer = binding["producer"] as? String,
+                          let output = binding["output"] as? String,
+                          let producerCapability = capabilityByNodeID[producer],
+                          producerCapability.output.name == output,
+                          producerCapability.output.valueType == capability.input.valueType,
+                          producerCapability.output.privacy == capability.input.privacy,
+                          producerCapability.output.maximumBytes == capability.input.maximumBytes,
+                          let producerIndex = nodeIDs.firstIndex(of: producer) else { return nil }
+                    inputSummary = "\(capability.input.name) from verified output of step \(producerIndex + 1)"
+                } else {
+                    return nil
+                }
+                return GoalPlanStep(
+                    id: id,
+                    capabilityID: capabilityID,
+                    capabilityLabel: capability.label,
+                    inputSummary: inputSummary,
+                    effects: capability.effects,
+                    verification: capability.verification,
+                    restoration: capability.restoration
+                )
+            }
+            guard steps.count == nodes.count,
+                  capabilityByID[selectedGoalCapabilityID] != nil,
+                  steps.contains(where: { $0.capabilityID == selectedGoalCapabilityID }) else {
+                goalRequestFailed(request, message: "The synthesized procedure contains an unsupported or stale capability.")
+                return
+            }
+            goalPlanPreview = GoalPlanPreview(
+                steps: steps,
+                waves: waveValues,
+                estimatedElapsedMicros: timeNumber.uint64Value
+            )
+            goalRequest = nil
+            goalStatus = "Preview prepared from current evidence. No action has run and no authority has been granted."
+        case .run:
+            guard let taskID = result["task_id"] as? String,
+                  UUID(uuidString: taskID) != nil,
+                  result["task_submitted"] as? Bool == true || result["deduplicated"] as? Bool == true else {
+                goalRequestFailed(request, message: "Core returned no confirmed task identity.")
+                return
+            }
+            goalRequest = nil
+            goalRunSubmissionID = nil
+            goalRunSubmissionPayload = nil
+            goalSubmissionNeedsRetry = false
+            goalStatus = "Started task \(taskID). Sage will request fresh approval before each action and verify every result."
+            goalBuilderPresented = false
+            requestSnapshot(immediate: true)
+        case .fileStreamCopy:
+            guard let taskID = result["task_id"] as? String,
+                  UUID(uuidString: taskID) != nil,
+                  result["task_submitted"] as? Bool == true || result["deduplicated"] as? Bool == true,
+                  let maximumBytes = result["maximum_bytes"] as? NSNumber,
+                  maximumBytes.intValue == 16 * 1024 * 1024 else {
+                goalRequestFailed(request, message: "Core returned no confirmed bounded file-copy task identity.")
+                return
+            }
+            goalRequest = nil
+            fileStreamCopySubmissionID = nil
+            fileStreamCopySubmissionPayload = nil
+            fileStreamCopyNeedsRetry = false
+            fileStreamCopyStatus = "Started task \(taskID). Review Sage's exact read and write approvals in the decision inbox."
+            requestSnapshot(immediate: true)
         }
     }
 
@@ -839,6 +1272,27 @@ final class AppModel {
         worldModel("review_controller_draft", id: draft.id, json: String(decoding: data, as: UTF8.self))
     }
 
+    func runReviewedController(_ draft: ControllerDraftRecord) {
+        guard !worldModelBusy,
+              draft.status == "reviewed",
+              case .controllerDraft(let current)? = pendingDecision,
+              current.id == draft.id,
+              current.revision == draft.revision else { return }
+        let payload: [String: Any] = [
+            "controller_id": draft.id,
+            "expected_revision": draft.revision,
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: payload) else {
+            controllerDraftStatus = "Sage could not prepare the controller run request."
+            return
+        }
+        deferDecision()
+        controllerRequest = .run(id: draft.id)
+        controllerDraftStatus = "Checking the exact foreground app. Every action will still require fresh approval."
+        worldModelBusy = true
+        worldModel("run_controller", id: UUID().uuidString.lowercased(), json: String(decoding: data, as: UTF8.self))
+    }
+
     private func decodeControllerDraft(_ value: Any?) -> ControllerDraftRecord? {
         guard let value,
               let data = try? JSONSerialization.data(withJSONObject: value),
@@ -851,6 +1305,31 @@ final class AppModel {
               let data = try? JSONSerialization.data(withJSONObject: value),
               let json = String(data: data, encoding: .utf8) else { return nil }
         return try? decodeKnowledge([ControllerDraftRecord].self, json)
+    }
+
+    private func decodeRendererCandidates(_ value: Any?) -> [RendererCandidateRecord]? {
+        guard let value,
+              let data = try? JSONSerialization.data(withJSONObject: value),
+              let json = String(data: data, encoding: .utf8) else { return nil }
+        return try? decodeKnowledge([RendererCandidateRecord].self, json)
+    }
+
+    private func decodeRendererTransportObservation(
+        _ value: Any?
+    ) -> RendererTransportObservationRecord? {
+        guard let value,
+              let data = try? JSONSerialization.data(withJSONObject: value),
+              let json = String(data: data, encoding: .utf8) else { return nil }
+        return try? decodeKnowledge(RendererTransportObservationRecord.self, json)
+    }
+
+    private func decodeRendererProtocolInfoObservation(
+        _ value: Any?
+    ) -> RendererProtocolInfoObservationRecord? {
+        guard let value,
+              let data = try? JSONSerialization.data(withJSONObject: value),
+              let json = String(data: data, encoding: .utf8) else { return nil }
+        return try? decodeKnowledge(RendererProtocolInfoObservationRecord.self, json)
     }
 
     private func upsertControllerDraft(_ record: ControllerDraftRecord) {
@@ -937,6 +1416,83 @@ final class AppModel {
             }
             var request = Sage_Ipc_V2_WorldModelCommand()
             request.operation = "discover_paired_browser"
+            do {
+                try await client.worldModel(request)
+            } catch {
+                worldModelBusy = false
+                worldModelStatus = error.localizedDescription
+            }
+        }
+    }
+
+    func discoverLocalMediaRenderers() {
+        guard !worldModelBusy else { return }
+        upnpRendererCandidates = []
+        upnpRendererTransportStates = [:]
+        upnpRendererProtocolSummaries = [:]
+        worldModelBusy = true
+        worldModelStatus = "Searching the private local network for UPnP media renderers. Results are untrusted and cannot control devices."
+        Task {
+            await start()
+            guard connectionState == .connected else {
+                worldModelBusy = false
+                worldModelStatus = errorMessage ?? "Sage Core is unavailable."
+                return
+            }
+            var request = Sage_Ipc_V2_WorldModelCommand()
+            request.operation = "discover_upnp_media_renderers"
+            do {
+                try await client.worldModel(request)
+            } catch {
+                worldModelBusy = false
+                worldModelStatus = error.localizedDescription
+            }
+        }
+    }
+
+    func observeRendererTransport(_ candidate: RendererCandidateRecord) {
+        guard !worldModelBusy else { return }
+        worldModelBusy = true
+        worldModelStatus = "Rechecking this renderer, then reading its reported transport state…"
+        Task {
+            await start()
+            guard connectionState == .connected else {
+                worldModelBusy = false
+                worldModelStatus = errorMessage ?? "Sage Core is unavailable."
+                return
+            }
+            var request = Sage_Ipc_V2_WorldModelCommand()
+            request.operation = "observe_upnp_transport"
+            var identity = Sage_Ipc_V2_UpnpRendererObservationTarget()
+            identity.uniqueDeviceName = candidate.uniqueDeviceName
+            identity.descriptionSha256 = candidate.descriptionSha256
+            request.upnpRendererObservationTarget = identity
+            do {
+                try await client.worldModel(request)
+            } catch {
+                worldModelBusy = false
+                worldModelStatus = error.localizedDescription
+            }
+        }
+    }
+
+    func observeRendererProtocolInfo(_ candidate: RendererCandidateRecord) {
+        guard !worldModelBusy, candidate.connectionManagerServiceType != nil else { return }
+        worldModelBusy = true
+        worldModelStatus = "Rechecking this renderer, then reading its advertised receiver formats…"
+        Task {
+            await start()
+            guard connectionState == .connected else {
+                worldModelBusy = false
+                worldModelStatus = errorMessage ?? "Sage Core is unavailable."
+                return
+            }
+            var request = Sage_Ipc_V2_WorldModelCommand()
+            request.operation = "observe_upnp_protocol_info"
+            var identity = Sage_Ipc_V2_UpnpRendererObservationTarget()
+            identity.uniqueDeviceName = candidate.uniqueDeviceName
+            identity.descriptionSha256 = candidate.descriptionSha256
+            request.upnpRendererObservationTarget = identity
             do {
                 try await client.worldModel(request)
             } catch {
@@ -1210,6 +1766,9 @@ final class AppModel {
                 worldModelBusy = false
                 worldModelStatus = error.message
             }
+            if let goalRequest {
+                goalRequestFailed(goalRequest, message: error.message)
+            }
             if controllerRequest != nil {
                 controllerDraftStatus = error.message
                 controllerRequest = nil
@@ -1253,6 +1812,38 @@ final class AppModel {
             worldModelSnapshotJSON = state.json
             if let data = state.json.data(using: .utf8),
                let result = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                applyGoalResult(result)
+                if let candidates = decodeRendererCandidates(result["renderer_candidates"]) {
+                    upnpRendererCandidates = candidates
+                    upnpRendererTransportStates = [:]
+                    upnpRendererProtocolSummaries = [:]
+                    worldModelStatus = candidates.isEmpty
+                        ? "No compatible UPnP media renderers answered the bounded private-LAN scan. No device was paired or controlled."
+                        : "Found \(candidates.count) UPnP media renderer candidate\(candidates.count == 1 ? "" : "s"). They remain untrusted and cannot be controlled until pairing and policy support are implemented."
+                }
+                if let observation = decodeRendererTransportObservation(
+                    result["transport_observation"]
+                ) {
+                    let state = observation.state.replacingOccurrences(of: "_", with: " ")
+                    let status = observation.status.replacingOccurrences(of: "_", with: " ")
+                    upnpRendererTransportStates[observation.uniqueDeviceName] =
+                        "\(state) · \(status) · speed \(observation.currentSpeed)"
+                    worldModelStatus = "Renderer reports \(state) (\(status), speed \(observation.currentSpeed)). This is an untrusted read-only observation; no playback command was sent."
+                }
+                if let observation = decodeRendererProtocolInfoObservation(
+                    result["protocol_info_observation"]
+                ) {
+                    let formats = observation.sink
+                        .map(\.contentFormat)
+                        .reduce(into: [String]()) { values, format in
+                            if !values.contains(format) { values.append(format) }
+                        }
+                    let summary = formats.isEmpty
+                        ? "No receiver formats advertised"
+                        : formats.prefix(8).joined(separator: ", ")
+                    upnpRendererProtocolSummaries[observation.uniqueDeviceName] = summary
+                    worldModelStatus = "Renderer advertises receiver formats: \(summary). This is untrusted compatibility evidence; no media was sent and a working path is not yet proven."
+                }
                 if let summaries = decodeControllerDrafts(result["controller_drafts"]) {
                     controllerDrafts = summaries
                 }
@@ -1273,12 +1864,22 @@ final class AppModel {
                         decisionInbox[decision.id] = decision
                         pendingDecision = decision
                         controllerDraftStatus = result["fresh_rebind_verified"] as? Bool == true
-                            ? "Every stored control matched the fresh interface. No action ran or permission was granted; controller execution remains unavailable."
+                            ? "Every stored control matched the fresh interface. No action ran and no permission was granted."
                             : "Controller draft updated. No access was granted."
+                    case .run:
+                        break
                     case nil:
                         break
                     }
                     controllerRequest = nil
+                }
+                if case .run(let controllerID) = controllerRequest,
+                   result["controller_id"] as? String == controllerID,
+                   result["task_submitted"] as? Bool == true,
+                   let taskID = result["task_id"] as? String {
+                    controllerDraftStatus = "Started task \(taskID). Sage will request fresh approval before each controller action."
+                    controllerRequest = nil
+                    requestSnapshot(immediate: true)
                 }
                 if let details = result["safe_learning_candidate_details"] as? [[String: Any]],
                    let system = result["system"] as? [String: Any],
@@ -1366,6 +1967,9 @@ final class AppModel {
                     showNextDecision()
                 }
                 if worldModelBusy { worldModelBusy = false }
+            } else if let goalRequest {
+                worldModelBusy = false
+                goalRequestFailed(goalRequest, message: "Core returned an unreadable goal operation response.")
             }
         case .notification:
             isSubmitting = false

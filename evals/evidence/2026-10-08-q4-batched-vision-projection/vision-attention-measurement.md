@@ -19,7 +19,7 @@ The scalar baseline reproduces the former vision path: f64 query-key dot product
 ## Reproduction
 
 ```sh
-cargo test --offline -p sage-core --release --features qwen35-evaluation --lib vision_attention_kernel_latency_measurement -- --ignored --nocapture --test-threads=1
+cargo test --offline -p sage-qwen35-runtime --release --lib qwen35_vision::tests::vision_attention_kernel_latency_measurement -- --ignored --nocapture --test-threads=1
 ```
 
 Each invocation alternates the two paths for 101 samples, reports p50 and nearest-rank p95, and checks maximum absolute difference below `1e-7`.

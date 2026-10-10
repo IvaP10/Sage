@@ -20,49 +20,37 @@ pub mod events;
 pub mod execution;
 pub mod features;
 mod finalization;
-#[cfg(feature = "qwen35-evaluation")]
-pub mod inference_cpu;
+pub mod goal_coordinator;
 #[cfg(feature = "qwen35-evaluation")]
 pub mod inference_lane;
-#[cfg(feature = "qwen35-evaluation")]
-pub mod inference_resources;
+pub mod inference_worker_process;
+#[cfg(feature = "qwen35-worker-generate")]
+pub mod inference_worker_provider;
 pub mod intent;
 pub mod ipc;
 pub mod journal;
 pub mod knowledge;
 mod learning;
 pub mod model;
-#[cfg(feature = "qwen35-evaluation")]
-pub mod model_package;
 pub mod network;
 pub mod observation;
-#[cfg(feature = "qwen35-evaluation")]
-mod planner_schema;
+pub mod peer_compute;
 pub mod policy;
 mod preparation;
 pub mod procedure_stream;
 #[cfg(feature = "qwen35-evaluation")]
-pub mod qwen35;
-#[cfg(feature = "qwen35-evaluation")]
-pub mod qwen35_vision;
-#[cfg(feature = "qwen35-evaluation")]
+pub mod qwen35_loader;
+#[cfg(any(feature = "qwen35-evaluation", feature = "qwen35-worker-generate"))]
 pub mod qwen_prompt;
-#[cfg(feature = "qwen35-evaluation")]
-pub mod qwen_tokenizer;
 mod receipts;
 mod reconciliation;
 pub mod redaction;
 pub mod resources;
 mod runtime;
-#[cfg(feature = "qwen35-evaluation")]
-pub mod safetensors;
 mod scheduling;
 pub mod secrets;
 pub mod storage;
-#[cfg(feature = "qwen35-evaluation")]
-pub mod streaming;
-#[cfg(feature = "qwen35-evaluation")]
-pub mod structured_decode;
+pub mod task_handoff;
 mod transitions;
 mod undo;
 pub mod vault;

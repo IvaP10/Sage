@@ -92,6 +92,7 @@ struct MainView: View {
                     busy: model.worldModelBusy,
                     status: model.controllerDraftStatus,
                     review: { model.reviewControllerDraft(draft) },
+                    run: { model.runReviewedController(draft) },
                     later: { model.deferDecision() }
                 )
                 .interactiveDismissDisabled()
@@ -119,6 +120,59 @@ struct MainView: View {
             .focusEffectDisabled()
             .padding(.horizontal, 10)
             .padding(.top, 10)
+
+            Button(action: model.openGoalBuilder) {
+                HStack(spacing: 10) {
+                    Image(systemName: "target")
+                        .font(.system(size: 13, weight: .medium))
+                    Text("Goal builder")
+                        .font(.system(size: 13, weight: .medium))
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, 12)
+                .frame(height: 36)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(SageSidebarButtonStyle())
+            .focusEffectDisabled()
+            .padding(.horizontal, 10)
+            .sheet(isPresented: $model.goalBuilderPresented) {
+                GoalBuilderView(model: model)
+            }
+            .disabled(model.connectionState != .connected
+                      || model.worldModelBusy
+                      || model.learningSessionID != nil
+                      || model.pendingDecision != nil)
+            .help("Compose a goal from current, reversibly tested application controls")
+            .accessibilityLabel("Goal builder")
+            .accessibilityHint("Preview a typed procedure. Starting it still requires fresh approval.")
+
+            Button(action: model.openFileStreamCopy) {
+                HStack(spacing: 10) {
+                    Image(systemName: "doc.on.doc")
+                        .font(.system(size: 13, weight: .medium))
+                    Text("Copy a file")
+                        .font(.system(size: 13, weight: .medium))
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, 12)
+                .frame(height: 36)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(SageSidebarButtonStyle())
+            .focusEffectDisabled()
+            .padding(.horizontal, 10)
+            .sheet(isPresented: $model.fileStreamCopyPresented) {
+                FileStreamCopyView(model: model)
+            }
+            .disabled(model.connectionState != .connected
+                      || model.worldModelBusy
+                      || model.learningSessionID != nil
+                      || model.pendingDecision != nil)
+            .help("Stream one local file through Sage's bounded, approved native file path")
+            .accessibilityLabel("Copy a file")
+            .accessibilityHint("Choose a source and destination. Sage asks before reading or writing.")
+
             HStack(spacing: 7) {
                 Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
                 TextField("Search chats", text: $searchText)

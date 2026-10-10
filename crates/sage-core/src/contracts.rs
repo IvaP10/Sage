@@ -291,6 +291,27 @@ impl PreparedAction {
             prepared_at: Utc::now(),
         })
     }
+
+    /// Rebuild every broker-owned authority field from the proposal before a
+    /// grant may be issued. `prepared_at` is observation metadata and is not
+    /// reused to authorize a new action.
+    pub fn validate(&self) -> CoreResult<()> {
+        let expected = Self::new(&self.intent.proposal, self.intent.input_refs.clone())?;
+        if self.intent.schema_version != expected.intent.schema_version
+            || self.intent.tool_version != expected.intent.tool_version
+            || self.intent.input_refs != expected.intent.input_refs
+            || self.action_digest != expected.action_digest
+            || self.policy_version != expected.policy_version
+            || serde_json::to_value(&self.target)? != serde_json::to_value(&expected.target)?
+            || self.effects != expected.effects
+            || self.preview != expected.preview
+        {
+            return Err(CoreError::CapabilityRejected(
+                "Prepared action contract differs from its exact proposal".into(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

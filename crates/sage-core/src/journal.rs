@@ -144,6 +144,7 @@ pub(crate) fn write_dispatch(
     grant: Option<&CapabilityGrant>,
 ) -> CoreResult<()> {
     let proposal = &prepared.intent.proposal;
+    LocalStore::validate_task_checkpoint_dispatch_owner(db, proposal.task_id)?;
     if prepared.policy_version != POLICY_VERSION
         || prepared.action_digest != crate::policy::approval_digest(proposal)?
     {
@@ -173,7 +174,23 @@ pub(crate) fn write_dispatch(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agency::{CheckpointState, ExecutionOwner, TaskCheckpoint};
     use crate::domain::{Action, ActionProposal, ExpectedOutcome, Provenance};
+
+    fn ask_user_proposal(task_id: Uuid) -> ActionProposal {
+        ActionProposal {
+            id: Uuid::new_v4(),
+            task_id,
+            action: Action::AskUser {
+                question: "Choose the prepared result".into(),
+            },
+            expected_outcome: ExpectedOutcome::UserAnswered,
+            target_resource: "user".into(),
+            provenance: Provenance::model(vec![]),
+            metadata: Default::default(),
+        }
+    }
+
     #[test]
     fn journal_rejects_replayed_dispatch_and_repreparation_after_uncertain_effects() {
         let directory = tempfile::tempdir().unwrap();
@@ -282,5 +299,81 @@ mod tests {
         };
         store.journal_verification(&record).unwrap();
         assert!(store.journal_dispatch(&prepared, None).is_err());
+    }
+
+    #[test]
+    fn task_handoff_checkpoint_fences_source_dispatch_at_the_journal_boundary() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = LocalStore::open_encrypted(
+            &directory.path().join("task-owner-fence.db"),
+            &crate::secrets::SecretBytes::new(vec![63; 32]),
+        )
+        .unwrap();
+
+        let mut task = crate::domain::Task::new("fence dispatch after task handoff");
+        store.save_task(&mut task).unwrap();
+        let mut checkpoint = TaskCheckpoint {
+            schema_version: 1,
+            task_id: task.id,
+            intent: task.request.clone(),
+            procedure: None,
+            goal_coordination: None,
+            procedure_state: Default::default(),
+            artifacts: Vec::new(),
+            verified_results: Vec::new(),
+            receipt_ids: Vec::new(),
+            pending_obligations: Vec::new(),
+            state: CheckpointState::Settled,
+            execution_owner: ExecutionOwner {
+                device_id: Uuid::new_v4(),
+                generation: 1,
+            },
+            dispatched_effects_settled: true,
+        };
+        store.save_task_checkpoint(&checkpoint, 0).unwrap();
+        checkpoint.transfer_ownership(Uuid::new_v4()).unwrap();
+        store.save_task_checkpoint(&checkpoint, 1).unwrap();
+
+        let proposal = ask_user_proposal(task.id);
+        let prepared = PreparedAction::new(&proposal, Default::default()).unwrap();
+        store.journal_prepared(&prepared).unwrap();
+        assert!(store.journal_dispatch(&prepared, None).is_err());
+        store
+            .with_connection(|db| {
+                let state: String = db.query_row(
+                    "SELECT state FROM action_journal WHERE action_id=?1",
+                    [proposal.id.to_string()],
+                    |row| row.get(0),
+                )?;
+                assert_eq!(state, "prepared");
+                Ok(())
+            })
+            .unwrap();
+
+        let mut local_task = crate::domain::Task::new("allow initial owner dispatch");
+        store.save_task(&mut local_task).unwrap();
+        let local_checkpoint = TaskCheckpoint {
+            schema_version: 1,
+            task_id: local_task.id,
+            intent: local_task.request.clone(),
+            procedure: None,
+            goal_coordination: None,
+            procedure_state: Default::default(),
+            artifacts: Vec::new(),
+            verified_results: Vec::new(),
+            receipt_ids: Vec::new(),
+            pending_obligations: Vec::new(),
+            state: CheckpointState::Settled,
+            execution_owner: ExecutionOwner {
+                device_id: Uuid::new_v4(),
+                generation: 1,
+            },
+            dispatched_effects_settled: true,
+        };
+        store.save_task_checkpoint(&local_checkpoint, 0).unwrap();
+        let local_proposal = ask_user_proposal(local_task.id);
+        let local_prepared = PreparedAction::new(&local_proposal, Default::default()).unwrap();
+        store.journal_prepared(&local_prepared).unwrap();
+        store.journal_dispatch(&local_prepared, None).unwrap();
     }
 }

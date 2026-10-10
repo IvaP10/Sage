@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
+use crate::contracts::PreparedAction;
 use crate::domain::{Action, ActionProposal, ExecutionDomain};
 use crate::error::{CoreError, CoreResult};
 
@@ -92,6 +93,24 @@ impl CapabilityBroker {
         }
     }
     pub async fn issue(
+        &self,
+        prepared: &PreparedAction,
+        domain: ExecutionDomain,
+    ) -> CoreResult<CapabilityGrant> {
+        prepared.validate()?;
+        self.issue_proposal(&prepared.intent.proposal, domain).await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn issue_unprepared_for_test(
+        &self,
+        proposal: &ActionProposal,
+        domain: ExecutionDomain,
+    ) -> CoreResult<CapabilityGrant> {
+        self.issue_proposal(proposal, domain).await
+    }
+
+    async fn issue_proposal(
         &self,
         proposal: &ActionProposal,
         domain: ExecutionDomain,
@@ -305,9 +324,17 @@ fn requirements(
                 BTreeSet::from([Op::Observe, Op::Control]),
             )
         }
+        // Keep CloseApplication in the persisted action schema for replay and
+        // migration compatibility, but do not issue it authority until Sage
+        // can bind closure to its own launch receipt and verified restoration.
+        Action::CloseApplication { .. } => {
+            return Err(CoreError::ExecutorUnavailable(
+                "Application closure requires verified Sage launch ownership and restoration"
+                    .into(),
+            ));
+        }
         Action::OpenApplication { application }
         | Action::SetApplicationControl { application, .. }
-        | Action::CloseApplication { application }
         | Action::ClickElement { application, .. }
         | Action::TypeText { application, .. }
         | Action::PressShortcut { application, .. }
@@ -500,16 +527,60 @@ mod v2_tests {
             expected_outcome: crate::domain::ExpectedOutcome::UserAnswered,
             target_resource: "/work/a".into(),
             provenance: crate::domain::Provenance::model(vec![]),
-            metadata: Default::default(),
+            metadata: std::collections::BTreeMap::from([(
+                "file_precondition".into(),
+                "null".into(),
+            )]),
         }
     }
+
+    #[test]
+    fn application_close_is_not_authorized_without_a_verified_launch_receipt() {
+        let action = Action::CloseApplication {
+            application: "com.example.browser".into(),
+        };
+        assert!(matches!(
+            requirements(&action),
+            Err(CoreError::ExecutorUnavailable(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn production_grant_issue_revalidates_the_prepared_action_contract() {
+        let broker = CapabilityBroker::default();
+        let proposal = proposal();
+        let prepared = PreparedAction::new(&proposal, BTreeSet::new()).unwrap();
+        let grant = broker
+            .issue(&prepared, ExecutionDomain::Native)
+            .await
+            .expect("exact prepared action grant");
+        assert_eq!(grant.action_digest, prepared.action_digest);
+
+        let mut forged = prepared.clone();
+        forged.effects.clear();
+        assert!(matches!(
+            broker.issue(&forged, ExecutionDomain::Native).await,
+            Err(CoreError::CapabilityRejected(_))
+        ));
+
+        let mut wrong_target = prepared;
+        wrong_target.target = crate::contracts::PreparedTarget::User;
+        assert!(matches!(
+            broker.issue(&wrong_target, ExecutionDomain::Native).await,
+            Err(CoreError::CapabilityRejected(_))
+        ));
+    }
+
     #[tokio::test]
     async fn interrupt_hold_prevents_grant_consumption_until_resume_and_stop_wins() {
         let registry = crate::runtime::RunRegistry::default();
         let broker = CapabilityBroker::with_runtime(registry.clone());
         let p = proposal();
         let _lease = registry.begin(p.task_id).unwrap();
-        let grant = broker.issue(&p, ExecutionDomain::Native).await.unwrap();
+        let grant = broker
+            .issue_unprepared_for_test(&p, ExecutionDomain::Native)
+            .await
+            .unwrap();
         registry.hold(p.task_id, true);
         assert!(
             tokio::time::timeout(
@@ -524,7 +595,10 @@ mod v2_tests {
             .consume(grant.id, p.task_id, p.id, ExecutionDomain::Native)
             .await
             .unwrap();
-        let second = broker.issue(&p, ExecutionDomain::Native).await.unwrap();
+        let second = broker
+            .issue_unprepared_for_test(&p, ExecutionDomain::Native)
+            .await
+            .unwrap();
         registry.hold(p.task_id, true);
         registry.stop(p.task_id);
         assert!(matches!(
@@ -538,7 +612,10 @@ mod v2_tests {
     async fn capabilities_are_single_use_worker_bound_and_revoked_with_the_run() {
         let broker = CapabilityBroker::default();
         let p = proposal();
-        let grant = broker.issue(&p, ExecutionDomain::Native).await.unwrap();
+        let grant = broker
+            .issue_unprepared_for_test(&p, ExecutionDomain::Native)
+            .await
+            .unwrap();
         broker.bind_worker(grant.id, "one".into()).await.unwrap();
         assert!(broker.bind_worker(grant.id, "two".into()).await.is_err());
         assert!(
@@ -566,7 +643,12 @@ mod v2_tests {
                 .is_err()
         );
         broker.revoke_task(p.task_id).await;
-        assert!(broker.issue(&p, ExecutionDomain::Native).await.is_err());
+        assert!(
+            broker
+                .issue_unprepared_for_test(&p, ExecutionDomain::Native)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -575,9 +657,12 @@ mod v2_tests {
         let first = proposal();
         let mut second = first.clone();
         second.id = Uuid::new_v4();
-        let first_grant = broker.issue(&first, ExecutionDomain::Native).await.unwrap();
+        let first_grant = broker
+            .issue_unprepared_for_test(&first, ExecutionDomain::Native)
+            .await
+            .unwrap();
         let second_grant = broker
-            .issue(&second, ExecutionDomain::Native)
+            .issue_unprepared_for_test(&second, ExecutionDomain::Native)
             .await
             .unwrap();
 
@@ -611,8 +696,14 @@ mod v2_tests {
     async fn revoking_one_duplicate_grant_preserves_the_original_action_grant() {
         let broker = CapabilityBroker::default();
         let p = proposal();
-        let original = broker.issue(&p, ExecutionDomain::Native).await.unwrap();
-        let duplicate = broker.issue(&p, ExecutionDomain::Native).await.unwrap();
+        let original = broker
+            .issue_unprepared_for_test(&p, ExecutionDomain::Native)
+            .await
+            .unwrap();
+        let duplicate = broker
+            .issue_unprepared_for_test(&p, ExecutionDomain::Native)
+            .await
+            .unwrap();
 
         broker.revoke_grant(duplicate.id).await;
 
@@ -639,10 +730,13 @@ mod v2_tests {
         kept.id = Uuid::new_v4();
         let _lease = registry.begin(retired.task_id).unwrap();
         let first = broker
-            .issue(&retired, ExecutionDomain::Native)
+            .issue_unprepared_for_test(&retired, ExecutionDomain::Native)
             .await
             .unwrap();
-        let second = broker.issue(&kept, ExecutionDomain::Native).await.unwrap();
+        let second = broker
+            .issue_unprepared_for_test(&kept, ExecutionDomain::Native)
+            .await
+            .unwrap();
         registry.hold(retired.task_id, true);
         registry.retire_actions(retired.task_id, &BTreeSet::from([retired.id]));
         registry.hold(retired.task_id, false);
@@ -662,7 +756,9 @@ mod v2_tests {
             Err(CoreError::Cancelled)
         ));
         assert!(matches!(
-            broker.issue(&retired, ExecutionDomain::Native).await,
+            broker
+                .issue_unprepared_for_test(&retired, ExecutionDomain::Native)
+                .await,
             Err(CoreError::Cancelled)
         ));
         broker
@@ -676,7 +772,10 @@ mod v2_tests {
         let broker = CapabilityBroker::with_runtime(registry.clone());
         let p = proposal();
         let lease = registry.begin(p.task_id).unwrap();
-        let old = broker.issue(&p, ExecutionDomain::Native).await.unwrap();
+        let old = broker
+            .issue_unprepared_for_test(&p, ExecutionDomain::Native)
+            .await
+            .unwrap();
 
         // No asynchronous capability revocation has run. The root signal alone
         // must prevent a grant from being bound, consumed or reissued.
@@ -692,7 +791,9 @@ mod v2_tests {
             Err(CoreError::Cancelled)
         ));
         assert!(matches!(
-            broker.issue(&p, ExecutionDomain::Native).await,
+            broker
+                .issue_unprepared_for_test(&p, ExecutionDomain::Native)
+                .await,
             Err(CoreError::Cancelled)
         ));
         assert!(matches!(
@@ -711,7 +812,10 @@ mod v2_tests {
                 .await,
             Err(CoreError::Cancelled)
         ));
-        let fresh = broker.issue(&p, ExecutionDomain::Native).await.unwrap();
+        let fresh = broker
+            .issue_unprepared_for_test(&p, ExecutionDomain::Native)
+            .await
+            .unwrap();
         broker
             .consume(fresh.id, p.task_id, p.id, ExecutionDomain::Native)
             .await
@@ -722,7 +826,10 @@ mod v2_tests {
                 .await
                 .is_err()
         );
-        let unused = broker.issue(&p, ExecutionDomain::Native).await.unwrap();
+        let unused = broker
+            .issue_unprepared_for_test(&p, ExecutionDomain::Native)
+            .await
+            .unwrap();
         drop(next);
         assert!(!registry.is_active(p.task_id));
         assert!(
@@ -742,7 +849,7 @@ mod v2_tests {
             let broker = CapabilityBroker::default();
             let p = proposal();
             let (grant, _) = tokio::join!(
-                broker.issue(&p, ExecutionDomain::Native),
+                broker.issue_unprepared_for_test(&p, ExecutionDomain::Native),
                 broker.revoke_task(p.task_id)
             );
             if let Ok(grant) = grant {
@@ -753,7 +860,12 @@ mod v2_tests {
                         .is_err()
                 );
             }
-            assert!(broker.issue(&p, ExecutionDomain::Native).await.is_err());
+            assert!(
+                broker
+                    .issue_unprepared_for_test(&p, ExecutionDomain::Native)
+                    .await
+                    .is_err()
+            );
         }
     }
     #[test]

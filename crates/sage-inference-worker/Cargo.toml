@@ -9,11 +9,26 @@ publish.workspace = true
 [features]
 default = []
 sandbox-probe = []
+qwen35-model-load = ["dep:sage-qwen35-runtime"]
+qwen35-model-generate = [
+    "qwen35-model-load",
+    "dep:sage-constrained-generation",
+    "dep:sage-qwen-tokenizer",
+]
 
 [[bin]]
 name = "sage-inference-worker"
 path = "src/main.rs"
 
 [dependencies]
-serde.workspace = true
+ed25519-dalek.workspace = true
+sage-inference-protocol = { path = "../sage-inference-protocol" }
+sage-constrained-generation = { path = "../sage-constrained-generation", optional = true }
+sage-model-package = { path = "../sage-model-package" }
+sage-qwen-tokenizer = { path = "../sage-qwen-tokenizer", optional = true }
+sage-qwen35-runtime = { path = "../sage-qwen35-runtime", optional = true }
 serde_json.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

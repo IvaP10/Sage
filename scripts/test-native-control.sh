@@ -4,6 +4,10 @@ repository_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 scratch=$(mktemp -d "${TMPDIR:-/tmp}/sage-native-control.XXXXXX")
 trap 'rm -rf "$scratch"' EXIT HUP INT TERM
 swiftc -swift-version 6 -parse-as-library \
+  "$repository_root/apps/macos/Sources/SageMac/GoalBuilderModels.swift" \
+  "$repository_root/scripts/goal-builder-model-smoke.swift" -o "$scratch/goal-builder-model"
+"$scratch/goal-builder-model"
+swiftc -swift-version 6 -parse-as-library \
   "$repository_root/apps/macos/Sources/SageMac/OrderedFrameWriter.swift" \
   "$repository_root/apps/macos/Sources/SageMac/PendingSubmissions.swift" \
   "$repository_root/scripts/ipc-writer-smoke.swift" -o "$scratch/writer"

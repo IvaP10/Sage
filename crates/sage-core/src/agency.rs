@@ -20,6 +20,9 @@ use crate::world_model::{
 };
 
 const MAX_PROCEDURE_NODES: usize = 128;
+const MAX_GOAL_PROCEDURE_CANDIDATES: usize = 8;
+const MAX_GOAL_SYNTHESIS_ATTEMPTS: usize = 256;
+const MAX_GOAL_SYNTHESIS_FRONTIER: usize = 64;
 const MAX_PROCEDURE_EDGES: usize = 512;
 const MAX_STREAMS: usize = 32;
 pub const MAX_PROCEDURE_STREAM_ITEM_BYTES: u64 = 16 * 1024 * 1024;
@@ -255,11 +258,27 @@ pub enum ProcedureNodeKind {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct ControllerStepExecutionBinding {
+    /// Digest identity of the reviewed, authority-free controller source.
+    pub controller_id: String,
+    pub controller_revision: u64,
+    /// Semantic control identity rebound from the invocation's fresh passive
+    /// observation. This is descriptive target data, never authority.
+    pub control_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProcedureNode {
     pub id: String,
     pub depends_on: BTreeSet<String>,
     pub outputs: BTreeMap<String, DataPort>,
     pub kind: ProcedureNodeKind,
+    /// Present only for procedures compiled from one reviewed ControllerIR.
+    /// Every step keeps the revision and fresh target through later ready
+    /// waves so each action can revalidate the same source controller.
+    #[serde(default)]
+    pub controller_binding: Option<ControllerStepExecutionBinding>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -357,7 +376,7 @@ impl ProcedureIr {
 
     fn validate_at_depth(&self, depth: usize) -> CoreResult<Vec<String>> {
         bounded(&self.id, 128, "procedure identifier")?;
-        if !matches!(self.schema_version, 1 | 2)
+        if !matches!(self.schema_version, 1..=3)
             || self.nodes.is_empty()
             || self.nodes.len() > MAX_PROCEDURE_NODES
             || self.streams.len() > MAX_STREAMS
@@ -372,6 +391,47 @@ impl ProcedureIr {
             return Err(CoreError::InvalidAction(
                 "Procedure streams require ProcedureIR schema version 2".into(),
             ));
+        }
+        let controller_bound_nodes = self
+            .nodes
+            .iter()
+            .filter(|node| node.controller_binding.is_some())
+            .count();
+        if controller_bound_nodes != 0 {
+            let mut source = None::<(String, u64)>;
+            if self.schema_version < 3 || controller_bound_nodes != self.nodes.len() {
+                return Err(CoreError::InvalidAction(
+                    "Reviewed controller bindings require ProcedureIR schema 3 on every node"
+                        .into(),
+                ));
+            }
+            for node in &self.nodes {
+                let binding = node.controller_binding.as_ref().expect("counted above");
+                bounded(&binding.controller_id, 64, "controller source identity")?;
+                if !valid_digest(&binding.controller_id)
+                    || binding.controller_revision == 0
+                    || !valid_digest(&binding.control_id)
+                    || !matches!(&node.kind, ProcedureNodeKind::CapabilityCall { .. })
+                {
+                    return Err(CoreError::InvalidAction(
+                        "Reviewed controller execution binding is malformed".into(),
+                    ));
+                }
+                match &source {
+                    Some((controller_id, revision))
+                        if controller_id != &binding.controller_id
+                            || *revision != binding.controller_revision =>
+                    {
+                        return Err(CoreError::InvalidAction(
+                            "One ProcedureIR cannot mix reviewed controller sources".into(),
+                        ));
+                    }
+                    None => {
+                        source = Some((binding.controller_id.clone(), binding.controller_revision));
+                    }
+                    _ => {}
+                }
+            }
         }
         let mut index = BTreeMap::new();
         for (position, node) in self.nodes.iter().enumerate() {
@@ -1141,7 +1201,7 @@ impl ProcedureRuntimeState {
                         .into(),
                 ));
             }
-            selected_capabilities.push(descriptors[capability_id.as_str()]);
+            selected_capabilities.push((node, descriptors[capability_id.as_str()]));
         }
         let running_capabilities = procedure
             .nodes
@@ -1149,21 +1209,22 @@ impl ProcedureRuntimeState {
             .filter_map(|node| {
                 (self.nodes.get(&node.id) == Some(&ProcedureNodeState::Running))
                     .then(|| match &node.kind {
-                        ProcedureNodeKind::CapabilityCall { capability_id, .. } => {
-                            descriptors.get(capability_id.as_str()).copied()
-                        }
+                        ProcedureNodeKind::CapabilityCall { capability_id, .. } => descriptors
+                            .get(capability_id.as_str())
+                            .map(|descriptor| (node, *descriptor)),
                         _ => None,
                     })
                     .flatten()
             })
             .collect::<Vec<_>>();
-        for (position, capability) in selected_capabilities.iter().enumerate() {
-            if running_capabilities
+        for (position, (node, capability)) in selected_capabilities.iter().enumerate() {
+            if running_capabilities.iter().any(|(active_node, active)| {
+                procedure_nodes_conflict(node, capability, active_node, active)
+            }) || selected_capabilities[..position]
                 .iter()
-                .any(|active| capabilities_conflict(capability, active))
-                || selected_capabilities[..position]
-                    .iter()
-                    .any(|active| capabilities_conflict(capability, active))
+                .any(|(active_node, active)| {
+                    procedure_nodes_conflict(node, capability, active_node, active)
+                })
             {
                 return Err(CoreError::PermissionRequired(
                     "Procedure dispatch wave contains conflicting active effects".into(),
@@ -1681,15 +1742,15 @@ pub fn advance_procedure(
         .filter_map(|node| {
             (state.nodes.get(&node.id) == Some(&ProcedureNodeState::Running))
                 .then(|| match &node.kind {
-                    ProcedureNodeKind::CapabilityCall { capability_id, .. } => {
-                        capability_by_id.get(capability_id.as_str()).copied()
-                    }
+                    ProcedureNodeKind::CapabilityCall { capability_id, .. } => capability_by_id
+                        .get(capability_id.as_str())
+                        .map(|descriptor| (node, *descriptor)),
                     _ => None,
                 })
                 .flatten()
         })
         .collect::<Vec<_>>();
-    let mut selected_capabilities = Vec::<&CapabilityDescriptor>::new();
+    let mut selected_capabilities = Vec::<(&ProcedureNode, &CapabilityDescriptor)>::new();
     let mut proposal_wave = Vec::new();
     let mut cohorts_by_node = BTreeMap::<String, BTreeSet<String>>::new();
     let mut groups = Vec::<(u64, String, Vec<ProcedureCallProposal>)>::new();
@@ -1750,9 +1811,25 @@ pub fn advance_procedure(
             .iter()
             .enumerate()
             .any(|(position, capability)| {
-                group_capabilities[..position]
-                    .iter()
-                    .any(|active| capabilities_conflict(capability, active))
+                let ProcedureCallProposal { node_id, .. } = &group[position];
+                let Some(node) = procedure.nodes.iter().find(|node| node.id == *node_id) else {
+                    return true;
+                };
+                group_capabilities[..position].iter().enumerate().any(
+                    |(active_position, active)| {
+                        let ProcedureCallProposal {
+                            node_id: active_node_id,
+                            ..
+                        } = &group[active_position];
+                        procedure
+                            .nodes
+                            .iter()
+                            .find(|candidate| candidate.id == *active_node_id)
+                            .is_none_or(|active_node| {
+                                procedure_nodes_conflict(node, capability, active_node, active)
+                            })
+                    },
+                )
             })
         {
             if group.len() > 1 {
@@ -1763,14 +1840,34 @@ pub fn advance_procedure(
             }
             continue;
         }
-        let can_run = group_capabilities.iter().all(|descriptor| {
-            running_capabilities
-                .iter()
-                .chain(selected_capabilities.iter())
-                .all(|active| !capabilities_conflict(descriptor, active))
-        });
+        let can_run = group
+            .iter()
+            .zip(&group_capabilities)
+            .all(|(proposal, descriptor)| {
+                let Some(node) = procedure
+                    .nodes
+                    .iter()
+                    .find(|node| node.id == proposal.node_id)
+                else {
+                    return false;
+                };
+                running_capabilities
+                    .iter()
+                    .chain(selected_capabilities.iter())
+                    .all(|(active_node, active)| {
+                        !procedure_nodes_conflict(node, descriptor, active_node, active)
+                    })
+            });
         if can_run {
-            selected_capabilities.extend(group_capabilities);
+            selected_capabilities.extend(group.iter().zip(group_capabilities).filter_map(
+                |(proposal, descriptor)| {
+                    procedure
+                        .nodes
+                        .iter()
+                        .find(|node| node.id == proposal.node_id)
+                        .map(|node| (node, descriptor))
+                },
+            ));
             proposal_wave.extend(group);
         }
     }
@@ -1840,7 +1937,14 @@ fn validate_procedure_assessments(
             continue;
         };
         let assessment = by_id[capability_id.as_str()];
-        if assessment.evidence_state != CapabilityEvidenceState::ReversiblyExperimented
+        let first_party_native_file = assessment.evidence_state
+            == CapabilityEvidenceState::SageCodeRegistered
+            && matches!(
+                assessment.descriptor.executor_id.as_deref(),
+                Some("read_file" | "write_file")
+            );
+        if (assessment.evidence_state != CapabilityEvidenceState::ReversiblyExperimented
+            && !first_party_native_file)
             || assessment
                 .descriptor
                 .preconditions
@@ -2244,7 +2348,12 @@ pub fn schedule_procedure(
                     else {
                         unreachable!("validated stream endpoints are capability calls")
                     };
-                    capabilities_conflict(capability, by_id[scheduled_id.as_str()])
+                    procedure_nodes_conflict(
+                        candidate,
+                        capability,
+                        scheduled,
+                        by_id[scheduled_id.as_str()],
+                    )
                 }) {
                     return Err(CoreError::ExecutorUnavailable(
                         "Live-stream endpoints have conflicting effects and cannot share a dispatch wave".into(),
@@ -2289,7 +2398,12 @@ pub fn schedule_procedure(
                     else {
                         unreachable!("control-flow nodes were rejected above")
                     };
-                    !capabilities_conflict(candidate_capability, by_id[scheduled_id.as_str()])
+                    !procedure_nodes_conflict(
+                        candidate,
+                        candidate_capability,
+                        scheduled,
+                        by_id[scheduled_id.as_str()],
+                    )
                 })
             });
             if can_run {
@@ -2335,6 +2449,110 @@ fn capabilities_conflict(left: &CapabilityDescriptor, right: &CapabilityDescript
             || right.effects.iter().any(|effect| *effect != Effect::Read))
 }
 
+fn procedure_nodes_conflict(
+    left_node: &ProcedureNode,
+    left: &CapabilityDescriptor,
+    right_node: &ProcedureNode,
+    right: &CapabilityDescriptor,
+) -> bool {
+    if !capabilities_conflict(left, right) {
+        return false;
+    }
+
+    let native_path = |node: &ProcedureNode,
+                       descriptor: &CapabilityDescriptor,
+                       expected_id: &str,
+                       expected_executor: &str,
+                       expected_effects: BTreeSet<Effect>| {
+        let ProcedureNodeKind::CapabilityCall {
+            capability_id,
+            input_bindings,
+            ..
+        } = &node.kind
+        else {
+            return None;
+        };
+        if capability_id != expected_id
+            || descriptor.id != expected_id
+            || descriptor.executor_id.as_deref() != Some(expected_executor)
+            || descriptor.effects != expected_effects
+        {
+            return None;
+        }
+        let ValueBinding::Literal {
+            value: ProcedureValue::Text(path),
+            ..
+        } = input_bindings.get("path")?
+        else {
+            return None;
+        };
+        crate::resources::validate_file_path(std::path::Path::new(path)).ok()?;
+        // macOS and Windows filesystems commonly compare ASCII names without
+        // case. Non-ASCII paths stay serialized until filesystem-specific
+        // equivalence can be established from pinned handles at dispatch.
+        if (cfg!(target_os = "macos") || cfg!(windows)) && !path.is_ascii() {
+            return None;
+        }
+        let components = std::path::Path::new(path)
+            .components()
+            .map(|component| component.as_os_str().to_str())
+            .collect::<Option<Vec<_>>>()?;
+        let key = if cfg!(target_os = "macos") || cfg!(windows) {
+            components
+                .into_iter()
+                .map(str::to_ascii_lowercase)
+                .collect::<Vec<_>>()
+        } else {
+            components
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        };
+        Some(key)
+    };
+
+    let read_effects = BTreeSet::from([Effect::Read]);
+    let write_effects = BTreeSet::from([Effect::Create, Effect::Modify]);
+    let paths = match (
+        native_path(
+            left_node,
+            left,
+            "sage.local.read_file",
+            "read_file",
+            read_effects.clone(),
+        ),
+        native_path(
+            right_node,
+            right,
+            "sage.local.write_file",
+            "write_file",
+            write_effects.clone(),
+        ),
+    ) {
+        (Some(source), Some(destination)) => Some((source, destination)),
+        _ => match (
+            native_path(
+                left_node,
+                left,
+                "sage.local.write_file",
+                "write_file",
+                write_effects,
+            ),
+            native_path(
+                right_node,
+                right,
+                "sage.local.read_file",
+                "read_file",
+                read_effects,
+            ),
+        ) {
+            (Some(destination), Some(source)) => Some((source, destination)),
+            _ => None,
+        },
+    };
+    paths.is_none_or(|(source, destination)| source == destination)
+}
+
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GoalInputSeed {
@@ -2345,10 +2563,21 @@ pub struct GoalInputSeed {
     pub binding: ValueBinding,
 }
 
-/// Synthesize one deterministic, typed path backward from a requested
-/// capability output. Only current, reversibly experimented descriptors
-/// whose executor is in the caller's compiled registry are considered. A
-/// successful result is a proposal; it grants no authority or permission.
+/// A bounded set of alternative typed procedure proposals. `truncated` is
+/// true when either caller limits or the fixed search budget stopped the
+/// search before every compatible producer choice was explored.
+#[derive(Debug, Clone)]
+pub struct GoalProcedureCandidateSet {
+    pub procedures: Vec<ProcedureIr>,
+    pub truncated: bool,
+}
+
+/// Synthesize exactly one typed path backward from a requested capability
+/// output. Ambiguous but valid paths require explicit review through
+/// [`synthesize_goal_procedure_candidates`]. Only current, reversibly
+/// experimented descriptors whose executor is in the caller's compiled
+/// registry are considered. A successful result is a proposal; it grants no
+/// authority or permission.
 pub fn synthesize_goal_procedure(
     goal_capability_id: &str,
     goal_output: &str,
@@ -2357,11 +2586,51 @@ pub fn synthesize_goal_procedure(
     registered_executors: &BTreeSet<String>,
     current_evidence_ids: &BTreeSet<Uuid>,
 ) -> CoreResult<ProcedureIr> {
+    let mut candidates = synthesize_goal_procedure_candidates(
+        goal_capability_id,
+        goal_output,
+        seeds,
+        assessments,
+        registered_executors,
+        current_evidence_ids,
+        1,
+    )?;
+    if candidates.procedures.is_empty() {
+        return Err(CoreError::ExecutorUnavailable(
+            "Goal synthesis could not find a complete procedure within its search bound".into(),
+        ));
+    }
+    if candidates.truncated || candidates.procedures.len() != 1 {
+        return Err(CoreError::InvalidAction(
+            "Goal synthesis found multiple valid procedures; explicit review is required".into(),
+        ));
+    }
+    Ok(candidates.procedures.remove(0))
+}
+
+/// Synthesize a deterministic, bounded set of typed procedure alternatives.
+/// The returned procedures are proposals only. Callers must present them for
+/// review when there is more than one, and every execution still follows the
+/// ordinary target, policy, approval, dispatch and verification chain.
+pub fn synthesize_goal_procedure_candidates(
+    goal_capability_id: &str,
+    goal_output: &str,
+    seeds: Vec<GoalInputSeed>,
+    assessments: &[CapabilityAssessment],
+    registered_executors: &BTreeSet<String>,
+    current_evidence_ids: &BTreeSet<Uuid>,
+    max_candidates: usize,
+) -> CoreResult<GoalProcedureCandidateSet> {
     bounded(goal_capability_id, 128, "goal capability identifier")?;
     bounded(goal_output, 96, "goal output name")?;
-    if assessments.len() > 512 || seeds.len() > 512 {
+    if assessments.len() > 512 || seeds.len() > 512 || max_candidates == 0 {
         return Err(CoreError::InvalidAction(
             "Goal synthesis inputs exceed their bounded search size".into(),
+        ));
+    }
+    if max_candidates > MAX_GOAL_PROCEDURE_CANDIDATES {
+        return Err(CoreError::InvalidAction(
+            "Goal synthesis candidate limit exceeds its fixed bound".into(),
         ));
     }
 
@@ -2424,65 +2693,157 @@ pub fn synthesize_goal_procedure(
             ));
         }
     }
-
-    let mut builder = BackwardProcedureBuilder {
-        capabilities: available,
-        seeds: seed_map,
-        built: BTreeMap::new(),
-        active: BTreeSet::new(),
-        nodes: Vec::new(),
-    };
-    let goal_node = builder.build_node(goal_capability_id)?;
-    if !builder.seeds.is_empty() {
-        return Err(CoreError::InvalidAction(
-            "Goal input seed does not belong to a required procedure input".into(),
-        ));
+    for ((capability_id, input_name), binding) in &seed_map {
+        let capability = available.get(capability_id).ok_or_else(|| {
+            CoreError::InvalidAction(
+                "Goal input seed does not name a currently available capability".into(),
+            )
+        })?;
+        let input = capability
+            .input_ports
+            .iter()
+            .find(|port| port.name == *input_name)
+            .ok_or_else(|| {
+                CoreError::InvalidAction(
+                    "Goal input seed does not name a declared capability input".into(),
+                )
+            })?;
+        validate_synthesis_seed(binding, input)?;
     }
-    let procedure = ProcedureIr {
-        schema_version: 1,
-        id: Uuid::new_v4().to_string(),
-        nodes: builder.nodes,
-        streams: Vec::new(),
-        completion: vec![CompletionCondition::OutputAvailable {
-            reference: ValueReference {
-                node_id: goal_node,
-                output: goal_output.into(),
-            },
-        }],
-    };
-    let descriptors = builder.capabilities.into_values().collect::<Vec<_>>();
-    procedure.validate_against(&descriptors)?;
-    Ok(procedure)
+
+    let mut pending_choices = vec![BTreeMap::new()];
+    let mut procedures = Vec::new();
+    let available_descriptors = available.values().cloned().collect::<Vec<_>>();
+    let mut attempts = 0usize;
+    let mut truncated = false;
+    let mut first_error = None;
+
+    while let Some(producer_choices) = pending_choices.pop() {
+        if attempts == MAX_GOAL_SYNTHESIS_ATTEMPTS {
+            truncated = true;
+            break;
+        }
+        attempts += 1;
+        let mut builder = BackwardProcedureBuilder {
+            capabilities: &available,
+            seeds: seed_map.clone(),
+            producer_choices,
+            built: BTreeMap::new(),
+            active: BTreeSet::new(),
+            nodes: Vec::new(),
+        };
+        match builder.build_node(goal_capability_id) {
+            Ok(goal_node) => {
+                if !builder.seeds.is_empty() {
+                    continue;
+                }
+                let procedure = ProcedureIr {
+                    schema_version: 1,
+                    id: Uuid::new_v4().to_string(),
+                    nodes: builder.nodes,
+                    streams: Vec::new(),
+                    completion: vec![CompletionCondition::OutputAvailable {
+                        reference: ValueReference {
+                            node_id: goal_node,
+                            output: goal_output.into(),
+                        },
+                    }],
+                };
+                procedure.validate_against(&available_descriptors)?;
+                procedures.push(procedure);
+                if procedures.len() > max_candidates {
+                    procedures.pop();
+                    truncated = true;
+                    break;
+                }
+            }
+            Err(SynthesisBuildFailure::Ambiguous {
+                capability_id,
+                input_name,
+                mut producers,
+            }) => {
+                producers.sort_unstable();
+                let pending_key = (capability_id, input_name);
+                let room = MAX_GOAL_SYNTHESIS_FRONTIER.saturating_sub(pending_choices.len());
+                if producers.len() > room {
+                    truncated = true;
+                }
+                for producer in producers.into_iter().take(room).rev() {
+                    let mut choices = builder.producer_choices.clone();
+                    choices.insert(pending_key.clone(), producer);
+                    pending_choices.push(choices);
+                }
+            }
+            Err(SynthesisBuildFailure::Invalid(error)) => {
+                // A different producer choice may still provide a complete,
+                // evidence-valid path. Failed alternatives are discarded.
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
+        }
+    }
+
+    if procedures.is_empty() && !truncated {
+        return Err(first_error.unwrap_or_else(|| {
+            CoreError::ExecutorUnavailable(
+                "No complete goal procedure satisfies the current evidence and typed inputs".into(),
+            )
+        }));
+    }
+    Ok(GoalProcedureCandidateSet {
+        procedures,
+        truncated,
+    })
 }
 
-struct BackwardProcedureBuilder {
-    capabilities: BTreeMap<String, CapabilityDescriptor>,
+enum SynthesisBuildFailure {
+    Invalid(CoreError),
+    Ambiguous {
+        capability_id: String,
+        input_name: String,
+        producers: Vec<(String, String)>,
+    },
+}
+
+impl From<CoreError> for SynthesisBuildFailure {
+    fn from(error: CoreError) -> Self {
+        Self::Invalid(error)
+    }
+}
+
+struct BackwardProcedureBuilder<'a> {
+    capabilities: &'a BTreeMap<String, CapabilityDescriptor>,
     seeds: BTreeMap<(String, String), ValueBinding>,
+    producer_choices: BTreeMap<(String, String), (String, String)>,
     built: BTreeMap<String, String>,
     active: BTreeSet<String>,
     nodes: Vec<ProcedureNode>,
 }
 
-impl BackwardProcedureBuilder {
-    fn build_node(&mut self, capability_id: &str) -> CoreResult<String> {
+impl BackwardProcedureBuilder<'_> {
+    fn build_node(&mut self, capability_id: &str) -> Result<String, SynthesisBuildFailure> {
         if let Some(existing) = self.built.get(capability_id) {
             return Ok(existing.clone());
         }
         if !self.active.insert(capability_id.into()) {
             return Err(CoreError::InvalidAction(
                 "Goal synthesis found a cyclic capability dependency".into(),
-            ));
+            )
+            .into());
         }
         if self.nodes.len() + self.active.len() > MAX_PROCEDURE_NODES {
             return Err(CoreError::InvalidAction(
                 "Goal synthesis exceeded its procedure-node bound".into(),
-            ));
+            )
+            .into());
         }
         let Some(capability) = self.capabilities.get(capability_id).cloned() else {
             self.active.remove(capability_id);
             return Err(CoreError::ExecutorUnavailable(
                 "A required producer has no current experimented Sage executor".into(),
-            ));
+            )
+            .into());
         };
         let mut input_bindings = BTreeMap::new();
         let mut depends_on = BTreeSet::new();
@@ -2491,12 +2852,11 @@ impl BackwardProcedureBuilder {
                 .seeds
                 .remove(&(capability_id.to_string(), input.name.clone()))
             {
-                validate_synthesis_seed(&binding, input)?;
                 input_bindings.insert(input.name.clone(), binding);
                 continue;
             }
 
-            let producers = self
+            let mut producers = self
                 .capabilities
                 .iter()
                 .filter(|(producer_id, _)| producer_id.as_str() != capability_id)
@@ -2508,21 +2868,38 @@ impl BackwardProcedureBuilder {
                         .map(|output| (producer_id.clone(), output.name.clone()))
                 })
                 .collect::<Vec<_>>();
-            let [(producer_id, output_name)] = producers.as_slice() else {
-                self.active.remove(capability_id);
-                return Err(CoreError::ExecutorUnavailable(if producers.is_empty() {
-                    format!(
-                        "No compatible current capability produces input {}",
-                        input.name
-                    )
+            producers.sort_unstable();
+            let choice_key = (capability_id.to_string(), input.name.clone());
+            let selected = if let Some(choice) = self.producer_choices.get(&choice_key) {
+                if producers.contains(choice) {
+                    choice.clone()
                 } else {
-                    format!(
-                        "Input {} has multiple compatible producers; explicit review is required",
-                        input.name
+                    return Err(CoreError::InvalidAction(
+                        "Goal synthesis producer choice is no longer compatible".into(),
                     )
-                }));
+                    .into());
+                }
+            } else {
+                match producers.as_slice() {
+                    [only] => only.clone(),
+                    [] => {
+                        return Err(CoreError::ExecutorUnavailable(format!(
+                            "No compatible current capability produces input {}",
+                            input.name
+                        ))
+                        .into());
+                    }
+                    _ => {
+                        return Err(SynthesisBuildFailure::Ambiguous {
+                            capability_id: capability_id.to_string(),
+                            input_name: input.name.clone(),
+                            producers,
+                        });
+                    }
+                }
             };
-            let producer_node = self.build_node(producer_id)?;
+            let (producer_id, output_name) = selected;
+            let producer_node = self.build_node(&producer_id)?;
             depends_on.insert(producer_node.clone());
             input_bindings.insert(
                 input.name.clone(),
@@ -2540,6 +2917,7 @@ impl BackwardProcedureBuilder {
             .map(|port| (port.name.clone(), port.clone()))
             .collect();
         self.nodes.push(ProcedureNode {
+            controller_binding: None,
             id: node_id.clone(),
             depends_on,
             outputs,
@@ -2758,6 +3136,7 @@ pub struct StoredController {
 pub struct RevalidatedStoredController {
     pub record: StoredController,
     pub rebinding: ControllerRebinding,
+    pub observation: ObservationEnvelope,
 }
 
 pub fn controller_digest(controller: &ControllerIr) -> CoreResult<String> {
@@ -3787,6 +4166,8 @@ pub struct TaskCheckpoint {
     pub task_id: Uuid,
     pub intent: String,
     pub procedure: Option<ProcedureIr>,
+    #[serde(default)]
+    pub goal_coordination: Option<crate::goal_coordinator::GoalCoordinationCheckpoint>,
     pub procedure_state: BTreeMap<String, String>,
     pub artifacts: Vec<CheckpointArtifact>,
     pub verified_results: Vec<VerifiedCheckpointResult>,
@@ -3840,6 +4221,22 @@ impl TaskCheckpoint {
             ));
         }
         bounded_nonsecret(&self.intent, 16 * 1024, "checkpoint intent")?;
+        if let Some(coordination) = &self.goal_coordination {
+            coordination.validate()?;
+            if (coordination.has_unsettled_effects()
+                && (self.dispatched_effects_settled
+                    || self.state == CheckpointState::Settled
+                    || self.pending_obligations.is_empty()))
+                || (coordination.has_pending_obligations()
+                    && (self.state == CheckpointState::Settled
+                        || self.pending_obligations.is_empty()))
+            {
+                return Err(CoreError::VerificationFailed(
+                    "Task checkpoint cannot omit unsettled delegated effects or their pending obligations"
+                        .into(),
+                ));
+            }
+        }
         if let Some(procedure) = &self.procedure {
             procedure.validate()?;
         }
@@ -3920,6 +4317,7 @@ mod tests {
             task_id: Uuid::new_v4(),
             intent: "continue the verified task".into(),
             procedure: None,
+            goal_coordination: None,
             procedure_state: BTreeMap::new(),
             artifacts: Vec::new(),
             verified_results: Vec::new(),
@@ -4053,6 +4451,7 @@ mod tests {
                 updated_at: Utc::now(),
             },
             evidence_state: CapabilityEvidenceState::ReversiblyExperimented,
+            restoration_evidence: None,
         }
     }
 
@@ -4071,6 +4470,7 @@ mod tests {
         input_bindings: BTreeMap<String, ValueBinding>,
     ) -> ProcedureNode {
         ProcedureNode {
+            controller_binding: None,
             id: id.into(),
             depends_on,
             outputs: capability
@@ -4537,12 +4937,63 @@ mod tests {
                 "document.export",
                 "video",
                 Vec::new(),
-                &[permissive_source, second_public, ambiguous_goal],
-                &BTreeSet::from([executor]),
+                &[
+                    permissive_source.clone(),
+                    second_public.clone(),
+                    ambiguous_goal.clone(),
+                ],
+                &BTreeSet::from([executor.clone()]),
                 &BTreeSet::from([evidence[0], evidence[1], evidence[2]]),
             )
             .is_err()
         );
+
+        let alternatives = synthesize_goal_procedure_candidates(
+            "document.export",
+            "video",
+            Vec::new(),
+            &[
+                permissive_source.clone(),
+                second_public.clone(),
+                ambiguous_goal.clone(),
+            ],
+            &BTreeSet::from([executor.clone()]),
+            &BTreeSet::from([evidence[0], evidence[1], evidence[2]]),
+            4,
+        )
+        .unwrap();
+        assert_eq!(alternatives.procedures.len(), 2);
+        assert!(!alternatives.truncated);
+        let producers = alternatives
+            .procedures
+            .iter()
+            .flat_map(|procedure| procedure.nodes.iter())
+            .filter_map(|node| match &node.kind {
+                ProcedureNodeKind::CapabilityCall { capability_id, .. }
+                    if capability_id.starts_with("source.public") =>
+                {
+                    Some(capability_id.clone())
+                }
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            producers,
+            BTreeSet::from(["source.public".into(), "source.public_alt".into()])
+        );
+
+        let bounded_alternatives = synthesize_goal_procedure_candidates(
+            "document.export",
+            "video",
+            Vec::new(),
+            &[permissive_source, second_public, ambiguous_goal],
+            &BTreeSet::from([executor]),
+            &BTreeSet::from([evidence[0], evidence[1], evidence[2]]),
+            1,
+        )
+        .unwrap();
+        assert_eq!(bounded_alternatives.procedures.len(), 1);
+        assert!(bounded_alternatives.truncated);
     }
 
     #[test]
@@ -4575,6 +5026,7 @@ mod tests {
             evidence_b,
         );
         let node = |id: &str, capability: &CapabilityAssessment| ProcedureNode {
+            controller_binding: None,
             id: id.into(),
             depends_on: BTreeSet::new(),
             outputs: capability
@@ -4643,6 +5095,7 @@ mod tests {
         a.descriptor.effects = BTreeSet::from([Effect::ControlApplication]);
         b.descriptor.effects = BTreeSet::from([Effect::ControlApplication]);
         let node = |id: &str, capability: &CapabilityAssessment| ProcedureNode {
+            controller_binding: None,
             id: id.into(),
             depends_on: BTreeSet::new(),
             outputs: capability
@@ -4707,6 +5160,7 @@ mod tests {
             Uuid::new_v4(),
         );
         let branch = ProcedureNode {
+            controller_binding: None,
             id: "choose".into(),
             depends_on: BTreeSet::from(["probe".into()]),
             outputs: BTreeMap::new(),
@@ -5159,6 +5613,7 @@ mod tests {
             nodes: vec![
                 call_node("source", &source, BTreeSet::new(), BTreeMap::new()),
                 ProcedureNode {
+                    controller_binding: None,
                     id: "choose".into(),
                     depends_on: BTreeSet::from(["source".into()]),
                     outputs: BTreeMap::new(),
@@ -5315,12 +5770,14 @@ mod tests {
                 updated_at: now,
             },
             evidence_state: CapabilityEvidenceState::ReversiblyExperimented,
+            restoration_evidence: None,
         };
         let procedure = ProcedureIr {
             schema_version: 1,
             id: "set-brightness".into(),
             nodes: vec![
                 ProcedureNode {
+                    controller_binding: None,
                     id: "set-brightness".into(),
                     depends_on: BTreeSet::new(),
                     outputs: BTreeMap::from([("observed_value".into(), number_port.clone())]),
@@ -5338,6 +5795,7 @@ mod tests {
                     },
                 },
                 ProcedureNode {
+                    controller_binding: None,
                     id: "use-verified-result".into(),
                     depends_on: BTreeSet::from(["set-brightness".into()]),
                     outputs: BTreeMap::from([("observed_value".into(), number_port)]),
@@ -5436,6 +5894,7 @@ mod tests {
             schema_version: 1,
             id: "not-finished".into(),
             nodes: vec![ProcedureNode {
+                controller_binding: None,
                 id: "read".into(),
                 depends_on: BTreeSet::new(),
                 outputs: BTreeMap::new(),

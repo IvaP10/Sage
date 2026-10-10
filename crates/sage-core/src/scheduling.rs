@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::{Future, poll_fn};
 use std::pin::Pin;
+use std::sync::mpsc::{SyncSender, sync_channel};
 use std::task::Poll;
 use uuid::Uuid;
 
@@ -74,23 +75,83 @@ pub(crate) fn parallel_read(task: &Task, id: Uuid) -> bool {
 /// Cost is an estimate of local observed execution time, never an authority or
 /// success prediction. Fixed operation keys bound statistics independently of
 /// filenames, transcript count or conversation history.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct PersistedTiming {
+    pub operation: String,
+    pub ewma_micros: u64,
+    pub attempts: u64,
+    pub successes: u64,
+    pub failures: u64,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct TimingMeasurement {
+    pub operation: String,
+    pub elapsed_micros: u64,
+    pub succeeded: bool,
+}
+
+enum TimingWriteMessage {
+    Sample(TimingMeasurement),
+    #[cfg(test)]
+    Flush(std::sync::mpsc::SyncSender<()>),
+}
+
+const MAX_TIMING_OPERATIONS: usize = 64;
+const MAX_TIMING_SAMPLES: u64 = 1_000_000;
+
 #[derive(Debug, Default)]
 pub(crate) struct Timings {
-    micros: BTreeMap<&'static str, u64>,
+    operations: BTreeMap<String, PersistedTiming>,
 }
 
 impl Timings {
-    pub fn record(&mut self, operation: &'static str, elapsed: u64) {
-        let sample = elapsed.clamp(1, 60_000_000);
-        self.micros
-            .entry(operation)
-            .and_modify(|prior| *prior = (*prior * 7 + sample) / 8)
-            .or_insert(sample);
+    pub fn restore(&mut self, records: impl IntoIterator<Item = PersistedTiming>) {
+        self.operations.clear();
+        for record in records.into_iter().take(MAX_TIMING_OPERATIONS) {
+            if valid_operation(&record.operation)
+                && (1..=60_000_000).contains(&record.ewma_micros)
+                && record.attempts > 0
+                && record.attempts <= MAX_TIMING_SAMPLES
+                && record.successes.saturating_add(record.failures) == record.attempts
+            {
+                self.operations.insert(record.operation.clone(), record);
+            }
+        }
     }
+
+    pub fn record(&mut self, operation: &'static str, elapsed: u64, succeeded: bool) {
+        let sample = elapsed.clamp(1, 60_000_000);
+        self.operations
+            .entry(operation.to_owned())
+            .and_modify(|prior| {
+                prior.ewma_micros = (prior.ewma_micros * 7 + sample) / 8;
+                if prior.attempts < MAX_TIMING_SAMPLES {
+                    prior.attempts += 1;
+                    if succeeded {
+                        prior.successes += 1;
+                    } else {
+                        prior.failures += 1;
+                    }
+                } else {
+                    prior.attempts = (prior.attempts / 2) + 1;
+                    prior.successes = (prior.successes / 2) + u64::from(succeeded);
+                    prior.failures = (prior.failures / 2) + u64::from(!succeeded);
+                }
+            })
+            .or_insert_with(|| PersistedTiming {
+                operation: operation.to_owned(),
+                ewma_micros: sample,
+                attempts: 1,
+                successes: u64::from(succeeded),
+                failures: u64::from(!succeeded),
+            });
+    }
+
     fn estimate(&self, action: &Action) -> u64 {
-        self.micros
+        self.operations
             .get(action.kind())
-            .copied()
+            .map(|record| record.ewma_micros)
             .unwrap_or(match action {
                 Action::ReadFile { .. } => 2_000,
                 Action::ListDirectory { .. } => 8_000,
@@ -144,9 +205,137 @@ impl Timings {
     }
 }
 
+fn valid_operation(operation: &str) -> bool {
+    !operation.is_empty()
+        && operation.len() <= 64
+        && operation
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+}
+
+/// Persists low-cardinality executor timing samples away from the control
+/// future. Saturation only drops optimization data; it cannot delay execution
+/// or change the authority decision.
+pub(crate) struct TimingPersistence {
+    sender: Option<SyncSender<TimingWriteMessage>>,
+}
+
+impl std::fmt::Debug for TimingPersistence {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TimingPersistence")
+            .field("available", &self.sender.is_some())
+            .finish()
+    }
+}
+
+impl TimingPersistence {
+    pub fn new(store: crate::storage::LocalStore) -> Self {
+        let (sender, receiver) = sync_channel::<TimingWriteMessage>(128);
+        let worker = std::thread::Builder::new()
+            .name("sage-execution-timing-store".into())
+            .spawn(move || {
+                while let Ok(message) = receiver.recv() {
+                    match message {
+                        TimingWriteMessage::Sample(sample) => {
+                            let _ = store.record_execution_timing(
+                                &sample.operation,
+                                sample.elapsed_micros,
+                                sample.succeeded,
+                            );
+                        }
+                        #[cfg(test)]
+                        TimingWriteMessage::Flush(acknowledgement) => {
+                            let _ = acknowledgement.send(());
+                        }
+                    }
+                }
+            });
+        Self {
+            sender: worker.ok().map(|_| sender),
+        }
+    }
+
+    pub fn submit(&self, sample: TimingMeasurement) {
+        if let Some(sender) = &self.sender {
+            let _ = sender.try_send(TimingWriteMessage::Sample(sample));
+        }
+    }
+
+    #[cfg(test)]
+    fn flush_for_test(&self) {
+        let sender = self.sender.as_ref().expect("timing writer started");
+        let (acknowledgement, received) = std::sync::mpsc::sync_channel(0);
+        sender
+            .send(TimingWriteMessage::Flush(acknowledgement))
+            .expect("timing writer accepts a flush barrier");
+        received
+            .recv()
+            .expect("timing writer crosses the flush barrier");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bounded_background_timing_writer_flushes_queued_samples() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = crate::storage::LocalStore::open_encrypted(
+            &directory.path().join("timing-writer.db"),
+            &crate::secrets::SecretBytes::new(vec![73; 32]),
+        )
+        .unwrap();
+        let writer = TimingPersistence::new(store.clone());
+        writer.submit(TimingMeasurement {
+            operation: "read_file".into(),
+            elapsed_micros: 3_200,
+            succeeded: true,
+        });
+        writer.flush_for_test();
+
+        let records = store.load_execution_timings().unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].operation, "read_file");
+        assert_eq!(records[0].ewma_micros, 3_200);
+        assert_eq!((records[0].attempts, records[0].successes), (1, 1));
+    }
+
+    #[test]
+    fn restored_executor_timings_drive_the_existing_ready_cost_estimate() {
+        let action = Action::ReadFile {
+            path: std::path::PathBuf::from("/tmp/evidence.txt"),
+            max_bytes: 1024,
+        };
+        let mut timings = Timings::default();
+        timings.restore([
+            PersistedTiming {
+                operation: "read_file".into(),
+                ewma_micros: 12_000,
+                attempts: 10,
+                successes: 9,
+                failures: 1,
+            },
+            PersistedTiming {
+                operation: "../tmp".into(),
+                ewma_micros: u64::MAX,
+                attempts: 1,
+                successes: 1,
+                failures: 0,
+            },
+        ]);
+        assert_eq!(timings.estimate(&action), 12_000);
+        timings.record("read_file", 4_000, false);
+        let sample = timings.operations.get("read_file").unwrap();
+        assert_eq!(sample.ewma_micros, 11_000);
+        assert_eq!(
+            (sample.attempts, sample.successes, sample.failures),
+            (11, 9, 2)
+        );
+        assert_eq!(timings.operations.len(), 1);
+    }
+
     #[tokio::test]
     async fn dropping_run_synchronously_drops_all_children() {
         struct Guard(std::sync::Arc<std::sync::atomic::AtomicUsize>);

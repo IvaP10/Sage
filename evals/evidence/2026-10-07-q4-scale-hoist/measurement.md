@@ -26,7 +26,7 @@ The prior SIMD implementation's recorded 21-sample run measured 0.659 / 0.681 ms
 The three release runs used:
 
 ```sh
-cargo test --release -p sage-core --features qwen35-evaluation --lib --locked --offline inference_cpu::tests::qwen_hidden_q4_projection_latency_measurement -- --ignored --exact --nocapture --test-threads=1
+cargo test --release -p sage-inference-math --lib --locked --offline tests::qwen_hidden_q4_projection_latency_measurement -- --ignored --exact --nocapture --test-threads=1
 ```
 
 The benchmark checks NEON and Metal outputs against the independent f64 Q4 reference within `1e-3` absolute plus relative tolerance. The separate odd-shape/cross-group kernel test passes its tighter `2e-5` tolerance. The current Metal single-projection path measured substantially slower than NEON on this fixture; it remains an opt-in evaluation backend, with batching/fusion required before treating it as a fast path. These synthetic projection measurements do not establish checkpoint parity, quantization quality, full-model latency, peak resident memory, or 16 GiB hardware acceptance.

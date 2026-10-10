@@ -14,7 +14,7 @@ Commands:
 
 ```sh
 cargo test -p sage-core --features qwen35-evaluation --lib indexed_constrained_mask_measurement --release -- --ignored --nocapture
-cargo test -p sage-core --features qwen35-evaluation --lib constrained_token_selection_buffer_measurement --release -- --ignored --nocapture
+cargo test --offline -p sage-qwen35-runtime --release --lib qwen35::tests::constrained_token_selection_buffer_measurement -- --ignored --nocapture
 ```
 
 ## Results

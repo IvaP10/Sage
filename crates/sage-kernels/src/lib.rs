@@ -7,7 +7,11 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 use std::{
-    sync::OnceLock,
+    panic::{AssertUnwindSafe, catch_unwind},
+    sync::{
+        Arc, Mutex, OnceLock,
+        mpsc::{self, SyncSender},
+    },
     thread::{self, Builder},
 };
 
@@ -20,14 +24,19 @@ const MAX_RMS_NORM_ELEMENTS: usize = 250_000_000;
 const MAX_INFERENCE_CPU_WORKERS: usize = 8;
 const MIN_PARALLEL_Q4_ROWS: usize = 256;
 const MIN_PARALLEL_Q4_ELEMENTS: usize = 2_000_000;
+#[cfg(any(target_arch = "aarch64", test))]
 const MAX_ATTENTION_VALUE_DIMENSION: usize = 512;
+#[cfg(target_arch = "aarch64")]
 const MAX_ATTENTION_VECTOR_BLOCKS: usize = MAX_ATTENTION_VALUE_DIMENSION / 4;
-const MAX_GROUPED_QUERY_HEADS: usize = 4;
+const MAX_GROUPED_QUERY_HEADS: usize = 5;
+#[cfg(target_arch = "aarch64")]
 const MAX_GROUPED_ATTENTION_VALUE_DIMENSION: usize = 256;
+#[cfg(target_arch = "aarch64")]
 const MAX_GROUPED_ATTENTION_VECTOR_BLOCKS: usize = MAX_GROUPED_ATTENTION_VALUE_DIMENSION / 4;
 const MAX_DELTA_HEAD_ELEMENTS: usize = 1_000_000;
 const MAX_DELTA_KEY_DIMENSION: usize = 512;
 const MAX_DELTA_VALUE_DIMENSION: usize = 512;
+#[cfg(target_arch = "aarch64")]
 const MAX_DELTA_VECTOR_BLOCKS: usize = MAX_DELTA_VALUE_DIMENSION / 4;
 
 /// Decode one IEEE-754 binary16 value using first-party bit operations.
@@ -91,6 +100,230 @@ pub fn f32_to_f16_bits(value: f32) -> u16 {
         return sign | 0x7c00;
     }
     sign | ((half_exponent as u16) << 10) | half_fraction as u16
+}
+
+/// Convert a slice of f32 values into IEEE binary16 bits in caller-owned
+/// storage. AArch64 systems with native FP16 conversion use a four-lane
+/// `FCVTN` path for ordinary finite values; boundary, subnormal, and special
+/// values use Sage's exact scalar reference conversion.
+pub fn f32_to_f16_bits_into(values: &[f32], output: &mut [u16]) -> Result<(), &'static str> {
+    if values.len() != output.len() {
+        output.fill(0);
+        return Err("Binary16 conversion input and output lengths do not match");
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    if values.len() >= 16 && native_aarch64_fp16_conversion_available() {
+        // SAFETY: runtime detection confirms native FP16 support; the target
+        // function validates each four-lane group before using FCVTN.
+        unsafe { f32_to_f16_bits_neon(values, output) };
+        return Ok(());
+    }
+
+    for (value, destination) in values.iter().zip(output) {
+        *destination = f32_to_f16_bits(*value);
+    }
+    Ok(())
+}
+
+/// Validate and convert values that will be stored in Sage's binary16 KV
+/// cache. Validation is fused with conversion: ordinary finite AArch64 lanes
+/// are range-checked in NEON registers and converted from the same loaded
+/// vector. Subnormals retain the exact scalar reference behavior.
+pub fn f32_to_f16_bits_checked_into(
+    values: &[f32],
+    output: &mut [u16],
+) -> Result<(), &'static str> {
+    if values.len() != output.len() {
+        output.fill(0);
+        return Err("Binary16 conversion input and output lengths do not match");
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    if values.len() >= 4 && native_aarch64_fp16_conversion_available() {
+        // SAFETY: runtime detection confirms native FP16 support; the target
+        // function checks every lane before conversion and stays in bounds.
+        let result = unsafe { f32_to_f16_bits_checked_neon(values, output.as_mut_ptr()) };
+        if result.is_err() {
+            output.fill(0);
+        }
+        return result;
+    }
+
+    for index in 0..values.len() {
+        let value = values[index];
+        if !value.is_finite() || value.abs() > 65_504.0 {
+            output.fill(0);
+            return Err("KV cache value is outside the finite binary16 range");
+        }
+        output[index] = f32_to_f16_bits(value);
+    }
+    Ok(())
+}
+
+/// Validate and append binary16 values directly into a vector's spare
+/// capacity. Unlike `resize` followed by conversion, this writes each new
+/// element once. If validation fails after a vector prefix was converted, the
+/// complete spare region is scrubbed while the vector's initialized length
+/// remains unchanged.
+pub fn f32_to_f16_bits_checked_extend(
+    values: &[f32],
+    output: &mut Vec<u16>,
+) -> Result<(), &'static str> {
+    let initial_length = output.len();
+    let final_length = initial_length
+        .checked_add(values.len())
+        .ok_or("Binary16 append length overflowed")?;
+    output
+        .try_reserve(values.len())
+        .map_err(|_| "Binary16 append allocation was denied")?;
+
+    let converted = {
+        let spare = &mut output.spare_capacity_mut()[..values.len()];
+        #[cfg(target_arch = "aarch64")]
+        let result = if values.len() >= 4 && native_aarch64_fp16_conversion_available() {
+            // SAFETY: `try_reserve` guarantees this spare range is writable;
+            // the converter writes at most `values.len()` initialized u16s.
+            unsafe { f32_to_f16_bits_checked_neon(values, spare.as_mut_ptr().cast::<u16>()) }
+        } else {
+            write_checked_f16_scalar(values, spare)
+        };
+        #[cfg(not(target_arch = "aarch64"))]
+        let result = write_checked_f16_scalar(values, spare);
+
+        if result.is_err() {
+            for slot in spare {
+                slot.write(0);
+            }
+        }
+        result
+    };
+    converted?;
+
+    // SAFETY: every slot in the appended range was initialized by the scalar
+    // or SIMD converter before this length change.
+    unsafe { output.set_len(final_length) };
+    Ok(())
+}
+
+/// Quantize one finite group into Sage's symmetric signed four-bit values.
+/// The returned scale and rounded values match the scalar Q4 reference.
+pub fn quantize_symmetric_q4_group(
+    values: &[f32],
+    quantized: &mut [i8],
+) -> Result<f32, &'static str> {
+    if values.is_empty() || values.len() > 4096 || values.len() != quantized.len() {
+        quantized.fill(0);
+        return Err("Q4 quantization group dimensions are invalid");
+    }
+    if values.iter().any(|value| !value.is_finite()) {
+        quantized.fill(0);
+        return Err("Q4 quantization group contains a non-finite value");
+    }
+
+    quantize_symmetric_q4_group_finite(values, quantized)
+}
+
+/// Quantize a group already proven finite by its streaming owner.
+///
+/// Callers must validate the complete source chunk before passing any slices
+/// here. This avoids rescanning every model weight once per quantization group.
+pub fn quantize_symmetric_q4_group_finite(
+    values: &[f32],
+    quantized: &mut [i8],
+) -> Result<f32, &'static str> {
+    if values.is_empty() || values.len() > 4096 || values.len() != quantized.len() {
+        quantized.fill(0);
+        return Err("Q4 quantization group dimensions are invalid");
+    }
+    #[cfg(target_arch = "aarch64")]
+    if values.len() >= 8 {
+        // SAFETY: lengths are bounded above; the streaming owner validated
+        // every source chunk before constructing these group slices.
+        return Ok(unsafe { quantize_symmetric_q4_group_neon(values, quantized) });
+    }
+
+    quantize_symmetric_q4_group_scalar(values, quantized)
+}
+
+fn quantize_symmetric_q4_group_scalar(
+    values: &[f32],
+    quantized: &mut [i8],
+) -> Result<f32, &'static str> {
+    let maximum = values
+        .iter()
+        .fold(0.0f32, |prior, value| prior.max(value.abs()));
+    let scale = if maximum == 0.0 { 1.0 } else { maximum / 7.0 };
+    for (value, output) in values.iter().zip(quantized) {
+        *output = ((*value / scale).round().clamp(-7.0, 7.0)) as i8;
+    }
+    Ok(scale)
+}
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn quantize_symmetric_q4_group_neon(values: &[f32], quantized: &mut [i8]) -> f32 {
+    use std::arch::aarch64::{
+        vabsq_f32, vcombine_s16, vcvtaq_s32_f32, vdivq_f32, vdupq_n_f32, vld1q_f32, vmaxq_f32,
+        vmaxq_s32, vmaxvq_f32, vminq_s32, vmovn_s16, vmovn_s32, vst1_s8,
+    };
+
+    let mut maximum_lanes = vdupq_n_f32(0.0);
+    let mut index = 0usize;
+    while index + 4 <= values.len() {
+        // SAFETY: the loop bound guarantees four readable f32 values.
+        let lanes = unsafe { vld1q_f32(values.as_ptr().add(index)) };
+        maximum_lanes = vmaxq_f32(maximum_lanes, vabsq_f32(lanes));
+        index += 4;
+    }
+    let mut maximum = vmaxvq_f32(maximum_lanes);
+    for value in values.iter().skip(index) {
+        maximum = maximum.max(value.abs());
+    }
+    let scale = if maximum == 0.0 { 1.0 } else { maximum / 7.0 };
+    if scale == 0.0 {
+        for (value, output) in values.iter().zip(quantized) {
+            *output = ((*value / scale).round().clamp(-7.0, 7.0)) as i8;
+        }
+        return scale;
+    }
+    let scale_lanes = vdupq_n_f32(scale);
+    let lower_bound = std::arch::aarch64::vdupq_n_s32(-7);
+    let upper_bound = std::arch::aarch64::vdupq_n_s32(7);
+    index = 0;
+    while index + 8 <= values.len() {
+        // SAFETY: each iteration reads and writes eight validated elements.
+        let first = unsafe { vld1q_f32(values.as_ptr().add(index)) };
+        // SAFETY: the eight-element loop bound includes this second four-lane load.
+        let second = unsafe { vld1q_f32(values.as_ptr().add(index + 4)) };
+        let first = vcvtaq_s32_f32(vdivq_f32(first, scale_lanes));
+        let second = vcvtaq_s32_f32(vdivq_f32(second, scale_lanes));
+        let first = vmaxq_s32(vminq_s32(first, upper_bound), lower_bound);
+        let second = vmaxq_s32(vminq_s32(second, upper_bound), lower_bound);
+        let narrowed = vcombine_s16(vmovn_s32(first), vmovn_s32(second));
+        let packed = vmovn_s16(narrowed);
+        // SAFETY: the loop bound reserves all eight output bytes at this offset.
+        unsafe { vst1_s8(quantized.as_mut_ptr().add(index), packed) };
+        index += 8;
+    }
+    while index < values.len() {
+        quantized[index] = ((values[index] / scale).round().clamp(-7.0, 7.0)) as i8;
+        index += 1;
+    }
+    scale
+}
+
+fn write_checked_f16_scalar(
+    values: &[f32],
+    output: &mut [std::mem::MaybeUninit<u16>],
+) -> Result<(), &'static str> {
+    for (value, destination) in values.iter().zip(output) {
+        if !value.is_finite() || value.abs() > 65_504.0 {
+            return Err("KV cache value is outside the finite binary16 range");
+        }
+        destination.write(f32_to_f16_bits(*value));
+    }
+    Ok(())
 }
 
 /// Qwen3.5 zero-centered RMS normalization into caller-owned storage.
@@ -344,8 +577,8 @@ fn round_shift_ties_even(value: u32, shift: u32) -> u32 {
 ///
 /// The matrix is row-major. Each quantized nibble stores a value in `[-8, 7]`
 /// and `scales` contains one scale for every `group_size` flattened elements.
-/// AArch64 uses a four-lane NEON implementation; other architectures use the
-/// scalar reference implementation.
+/// AArch64 uses NEON, x86-64 uses runtime-gated AVX2, and other architectures
+/// use the scalar reference implementation.
 pub fn project_q4(
     packed: &[u8],
     scales: &[f32],
@@ -397,6 +630,129 @@ pub fn project_q4_into(
     Ok(())
 }
 
+/// Project a long-lived grouped-Q4 matrix through Sage's bounded persistent
+/// CPU workers. Workers write only their assigned rows into `output`; the
+/// function waits for every dispatched range before returning, so the caller's
+/// input and output slices remain borrowed for the complete operation.
+pub fn project_q4_into_pooled(
+    packed: Arc<Vec<u8>>,
+    scales: Arc<Vec<f32>>,
+    input: &[f32],
+    rows: usize,
+    columns: usize,
+    group_size: usize,
+    output: &mut [f32],
+) -> Result<(), &'static str> {
+    if let Err(error) = validate_q4_matrix(&packed, &scales, input, rows, columns, group_size) {
+        output.fill(0.0);
+        return Err(error);
+    }
+    if output.len() != rows {
+        output.fill(0.0);
+        return Err("Q4 projection output length does not match the matrix rows");
+    }
+    if input.iter().any(|value| !value.is_finite()) {
+        output.fill(0.0);
+        return Err("Q4 projection input contains a non-finite value");
+    }
+
+    let enough_work = rows >= MIN_PARALLEL_Q4_ROWS
+        && rows
+            .checked_mul(columns)
+            .is_some_and(|elements| elements >= MIN_PARALLEL_Q4_ELEMENTS);
+    if !enough_work {
+        return project_q4_into(&packed, &scales, input, rows, columns, group_size, output);
+    }
+
+    let pool = q4_cpu_worker_pool();
+    let worker_count = pool.worker_count.min(rows);
+    if worker_count <= 1 {
+        return project_q4_into(&packed, &scales, input, rows, columns, group_size, output);
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    let use_scalar = {
+        let maximum_input = input
+            .iter()
+            .map(|value| f64::from(value.abs()))
+            .fold(0.0f64, f64::max);
+        let maximum_group_terms = (group_size.min(columns) as f64) * 8.0;
+        maximum_input * maximum_group_terms > f64::from(f32::MAX)
+    };
+    #[cfg(target_arch = "x86_64")]
+    let use_scalar = !native_x86_avx2_available();
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+    let use_scalar = true;
+
+    if let Some(result) = project_q4_into_pooled_parallel(
+        pool,
+        Arc::clone(&packed),
+        Arc::clone(&scales),
+        input.as_ptr(),
+        output.as_mut_ptr(),
+        rows,
+        columns,
+        group_size,
+        worker_count,
+        use_scalar,
+    ) {
+        if result.is_err() {
+            output.fill(0.0);
+        }
+        return result;
+    }
+
+    // A closed or saturated pool never weakens result semantics. All submitted
+    // ranges have settled before the helper returns `None`, so scoped workers
+    // can safely recompute the complete destination.
+    project_q4_into(&packed, &scales, input, rows, columns, group_size, output)
+}
+
+/// Project a grouped-Q4 matrix and return the index and value of its largest
+/// output without materializing the row-sized output vector. Equal values keep
+/// the lower row index, matching a dense left-to-right greedy scan. Large
+/// projections use the same bounded worker ceiling as `project_q4_into`.
+pub fn project_q4_argmax(
+    packed: &[u8],
+    scales: &[f32],
+    input: &[f32],
+    rows: usize,
+    columns: usize,
+    group_size: usize,
+) -> Result<(usize, f32), &'static str> {
+    validate_q4_matrix(packed, scales, input, rows, columns, group_size)?;
+    if input.iter().any(|value| !value.is_finite()) {
+        return Err("Q4 projection input contains a non-finite value");
+    }
+
+    let use_scalar = q4_argmax_uses_scalar(input, group_size, columns);
+
+    let worker_count = inference_cpu_worker_limit().min(rows);
+    let enough_work = rows >= MIN_PARALLEL_Q4_ROWS
+        && rows
+            .checked_mul(columns)
+            .is_some_and(|elements| elements >= MIN_PARALLEL_Q4_ELEMENTS);
+    if enough_work
+        && worker_count > 1
+        && let Some(result) = project_q4_argmax_parallel(
+            packed,
+            scales,
+            input,
+            rows,
+            columns,
+            group_size,
+            worker_count,
+            use_scalar,
+        )
+    {
+        return result;
+    }
+
+    project_q4_argmax_range(
+        packed, scales, input, columns, group_size, 0, rows, use_scalar,
+    )
+}
+
 /// Project a row-major batch through one grouped-Q4 matrix. Activations are
 /// transposed in bounded tiles so each packed weight is reused across up to
 /// 32 inputs and AArch64 can process four inputs per NEON vector. `scratch`
@@ -435,12 +791,52 @@ pub fn project_q4_batch_into(
     #[cfg(not(target_arch = "aarch64"))]
     let use_scalar = true;
 
-    let tile_count = batch_size.div_ceil(Q4_BATCH_TILE_SIZE);
+    if batch_size == 1 {
+        scratch.fill(0.0);
+        return project_q4_into(packed, scales, input, rows, columns, group_size, output);
+    }
+    let tile_size = q4_batch_tile_size(batch_size);
+    let tile_count = batch_size.div_ceil(tile_size);
     let worker_count = inference_cpu_worker_limit().min(tile_count);
     let enough_work = rows
         .checked_mul(columns)
         .and_then(|elements| elements.checked_mul(batch_size))
         .is_some_and(|elements| elements >= MIN_PARALLEL_Q4_ELEMENTS);
+    let row_worker_count = inference_cpu_worker_limit().min(rows);
+    // A single four-input tile shares each decoded Q4 weight across NEON
+    // lanes, but scheduling by input would leave the other cores idle. Split
+    // its independent output rows while sharing one transposed activation
+    // tile across workers.
+    if enough_work && worker_count == 1 && batch_size > 1 && row_worker_count > 1 {
+        transpose_q4_batch_tile(
+            input,
+            columns,
+            0,
+            batch_size,
+            &mut scratch[..columns * batch_size],
+        );
+        if let Some(result) = project_q4_batch_rows_parallel(
+            packed,
+            scales,
+            &scratch[..columns * batch_size],
+            rows,
+            columns,
+            group_size,
+            batch_size,
+            output,
+            row_worker_count,
+            use_scalar,
+        ) {
+            scratch.fill(0.0);
+            if result.is_err() {
+                output.fill(0.0);
+            }
+            return result;
+        }
+        // If thread creation fails, the helper waits for launched workers and
+        // returns only after their row ranges have settled. Recompute the full
+        // output through the established bounded path below.
+    }
     if enough_work
         && worker_count > 1
         && let Some(result) = project_q4_batch_parallel(
@@ -451,6 +847,7 @@ pub fn project_q4_batch_into(
             columns,
             group_size,
             batch_size,
+            tile_size,
             output,
             worker_count,
             use_scalar,
@@ -464,14 +861,155 @@ pub fn project_q4_batch_into(
     }
 
     let result = project_q4_batch_range(
-        packed, scales, input, rows, columns, group_size, 0, batch_size, scratch, output,
-        use_scalar,
+        packed, scales, input, rows, columns, group_size, 0, batch_size, tile_size, scratch,
+        output, use_scalar,
     );
     scratch.fill(0.0);
     if result.is_err() {
         output.fill(0.0);
     }
     result
+}
+
+#[allow(clippy::too_many_arguments)]
+fn project_q4_batch_rows_parallel(
+    packed: &[u8],
+    scales: &[f32],
+    transposed: &[f32],
+    rows: usize,
+    columns: usize,
+    group_size: usize,
+    batch_size: usize,
+    output: &mut [f32],
+    worker_count: usize,
+    use_scalar: bool,
+) -> Option<Result<(), &'static str>> {
+    let rows_per_worker = rows.div_ceil(worker_count);
+    let mut output_by_batch = output.chunks_mut(rows).collect::<Vec<_>>();
+    let mut row_partitions = Vec::with_capacity(worker_count);
+    for worker_index in 0..worker_count {
+        let first_row = worker_index * rows_per_worker;
+        if first_row >= rows {
+            break;
+        }
+        let row_count = (rows - first_row).min(rows_per_worker);
+        let mut output_segments = Vec::with_capacity(batch_size);
+        let mut remaining_batches = Vec::with_capacity(batch_size);
+        for remaining_rows in output_by_batch.drain(..) {
+            let (segment, remaining) = remaining_rows.split_at_mut(row_count);
+            output_segments.push(segment);
+            remaining_batches.push(remaining);
+        }
+        row_partitions.push((first_row, row_count, output_segments));
+        output_by_batch = remaining_batches;
+    }
+
+    thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(row_partitions.len());
+        let mut spawn_failed = false;
+        for (first_row, row_count, mut output_segments) in row_partitions {
+            let result = Builder::new()
+                .name("sage-q4-batch-row-worker".into())
+                .spawn_scoped(scope, move || {
+                    project_q4_batch_row_range(
+                        packed,
+                        scales,
+                        transposed,
+                        first_row,
+                        row_count,
+                        columns,
+                        group_size,
+                        use_scalar,
+                        &mut output_segments,
+                    )
+                });
+            match result {
+                Ok(handle) => handles.push(handle),
+                Err(_) => {
+                    spawn_failed = true;
+                    break;
+                }
+            }
+        }
+
+        let mut worker_error = None;
+        for handle in handles {
+            match handle.join() {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    worker_error.get_or_insert(error);
+                }
+                Err(_) => {
+                    worker_error.get_or_insert("Q4 batch row worker panicked");
+                }
+            }
+        }
+        if spawn_failed {
+            None
+        } else {
+            Some(worker_error.map_or(Ok(()), Err))
+        }
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn project_q4_batch_row_range(
+    packed: &[u8],
+    scales: &[f32],
+    transposed: &[f32],
+    first_row: usize,
+    row_count: usize,
+    columns: usize,
+    group_size: usize,
+    use_scalar: bool,
+    output_segments: &mut [&mut [f32]],
+) -> Result<(), &'static str> {
+    #[cfg(not(target_arch = "aarch64"))]
+    let _ = use_scalar;
+
+    #[cfg(target_arch = "aarch64")]
+    if !use_scalar {
+        let batch_size = output_segments.len();
+        // SAFETY: public batch validation bounds each row and token segment;
+        // worker slices are disjoint and the shared transpose is read-only.
+        return unsafe {
+            project_q4_batch_neon_rows(
+                packed,
+                scales,
+                transposed,
+                first_row,
+                row_count,
+                columns,
+                group_size,
+                batch_size,
+                |batch_index, local_row, value| {
+                    output_segments[batch_index][local_row] = value;
+                },
+            )
+        };
+    }
+    project_q4_batch_scalar_segments(
+        packed,
+        scales,
+        transposed,
+        first_row,
+        row_count,
+        columns,
+        group_size,
+        output_segments,
+    )
+}
+
+fn q4_batch_tile_size(batch_size: usize) -> usize {
+    let workers = inference_cpu_worker_limit()
+        .min(batch_size.div_ceil(4))
+        .max(1);
+    let target = batch_size.div_ceil(workers);
+    target
+        .div_ceil(4)
+        .saturating_mul(4)
+        .min(Q4_BATCH_TILE_SIZE)
+        .min(batch_size)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -483,14 +1021,15 @@ fn project_q4_batch_parallel(
     columns: usize,
     group_size: usize,
     batch_size: usize,
+    tile_size: usize,
     output: &mut [f32],
     worker_count: usize,
     use_scalar: bool,
 ) -> Option<Result<(), &'static str>> {
-    let tile_count = batch_size.div_ceil(Q4_BATCH_TILE_SIZE);
+    let tile_count = batch_size.div_ceil(tile_size);
     let tiles_per_worker = tile_count.div_ceil(worker_count);
-    let batches_per_worker = tiles_per_worker * Q4_BATCH_TILE_SIZE;
-    let scratch_elements = columns * Q4_BATCH_TILE_SIZE.min(batch_size);
+    let batches_per_worker = tiles_per_worker * tile_size;
+    let scratch_elements = columns * tile_size.min(batch_size);
 
     thread::scope(|scope| {
         let mut handles = Vec::with_capacity(worker_count);
@@ -518,6 +1057,7 @@ fn project_q4_batch_parallel(
                         group_size,
                         first_batch,
                         end_batch,
+                        tile_size,
                         &mut scratch.0,
                         output_chunk,
                         use_scalar,
@@ -562,6 +1102,7 @@ fn project_q4_batch_range(
     group_size: usize,
     first_batch: usize,
     end_batch: usize,
+    tile_size: usize,
     scratch: &mut [f32],
     output: &mut [f32],
     use_scalar: bool,
@@ -569,8 +1110,8 @@ fn project_q4_batch_range(
     #[cfg(not(target_arch = "aarch64"))]
     let _ = use_scalar;
 
-    for batch_start in (first_batch..end_batch).step_by(Q4_BATCH_TILE_SIZE) {
-        let tile_count = (end_batch - batch_start).min(Q4_BATCH_TILE_SIZE);
+    for batch_start in (first_batch..end_batch).step_by(tile_size) {
+        let tile_count = (end_batch - batch_start).min(tile_size);
         let tile_elements = columns * tile_count;
         let tile_scratch = &mut scratch[..tile_elements];
         transpose_q4_batch_tile(input, columns, batch_start, tile_count, tile_scratch);
@@ -587,8 +1128,6 @@ fn project_q4_batch_range(
                 rows,
                 columns,
                 group_size,
-                0,
-                tile_count,
                 tile_output,
             )
         } else {
@@ -602,8 +1141,6 @@ fn project_q4_batch_range(
                     rows,
                     columns,
                     group_size,
-                    0,
-                    tile_count,
                     tile_output,
                 )
             }
@@ -616,8 +1153,6 @@ fn project_q4_batch_range(
             rows,
             columns,
             group_size,
-            0,
-            tile_count,
             tile_output,
         );
 
@@ -714,28 +1249,81 @@ fn project_q4_batch_scalar_tile(
     rows: usize,
     columns: usize,
     group_size: usize,
-    batch_start: usize,
-    tile_count: usize,
     output: &mut [f32],
 ) -> Result<(), &'static str> {
+    let batch_size = output.len() / rows;
+    project_q4_batch_scalar_rows(
+        packed,
+        scales,
+        transposed,
+        0,
+        rows,
+        columns,
+        group_size,
+        batch_size,
+        |batch_index, row, value| output[batch_index * rows + row] = value,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn project_q4_batch_scalar_segments(
+    packed: &[u8],
+    scales: &[f32],
+    transposed: &[f32],
+    first_row: usize,
+    row_count: usize,
+    columns: usize,
+    group_size: usize,
+    output_segments: &mut [&mut [f32]],
+) -> Result<(), &'static str> {
+    let batch_size = output_segments.len();
+    project_q4_batch_scalar_rows(
+        packed,
+        scales,
+        transposed,
+        first_row,
+        row_count,
+        columns,
+        group_size,
+        batch_size,
+        |batch_index, row, value| output_segments[batch_index][row] = value,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+#[inline]
+fn project_q4_batch_scalar_rows<F>(
+    packed: &[u8],
+    scales: &[f32],
+    transposed: &[f32],
+    first_row: usize,
+    row_count: usize,
+    columns: usize,
+    group_size: usize,
+    batch_size: usize,
+    mut write_output: F,
+) -> Result<(), &'static str>
+where
+    F: FnMut(usize, usize, f32),
+{
     let mut sums = [0.0f64; Q4_BATCH_TILE_SIZE];
-    for row in 0..rows {
+    for local_row in 0..row_count {
         sums.fill(0.0);
-        let row_start = row * columns;
+        let row_start = (first_row + local_row) * columns;
         for column in 0..columns {
             let index = row_start + column;
             let weight = f64::from(signed_q4_at(packed, index) as f32 * scales[index / group_size]);
-            let activations = &transposed[column * tile_count..(column + 1) * tile_count];
-            for tile_index in 0..tile_count {
-                sums[tile_index] += weight * f64::from(activations[tile_index]);
+            let activations = &transposed[column * batch_size..(column + 1) * batch_size];
+            for batch_index in 0..batch_size {
+                sums[batch_index] += weight * f64::from(activations[batch_index]);
             }
         }
-        for tile_index in 0..tile_count {
-            let projected = sums[tile_index] as f32;
+        for (batch_index, sum) in sums.iter().take(batch_size).enumerate() {
+            let projected = *sum as f32;
             if !projected.is_finite() {
                 return Err("Q4 batch projection result is non-finite");
             }
-            output[(batch_start + tile_index) * rows + row] = projected;
+            write_output(batch_index, local_row, projected);
         }
     }
     Ok(())
@@ -751,10 +1339,42 @@ unsafe fn project_q4_batch_neon_tile(
     rows: usize,
     columns: usize,
     group_size: usize,
-    batch_start: usize,
-    tile_count: usize,
     output: &mut [f32],
 ) -> Result<(), &'static str> {
+    let tile_count = output.len() / rows;
+    // SAFETY: callers validate the matrix, transposed tile, and output rows.
+    unsafe {
+        project_q4_batch_neon_rows(
+            packed,
+            scales,
+            transposed,
+            0,
+            rows,
+            columns,
+            group_size,
+            tile_count,
+            |batch_index, row, value| output[batch_index * rows + row] = value,
+        )
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+#[allow(clippy::too_many_arguments)]
+#[target_feature(enable = "neon")]
+unsafe fn project_q4_batch_neon_rows<F>(
+    packed: &[u8],
+    scales: &[f32],
+    transposed: &[f32],
+    first_row: usize,
+    row_count: usize,
+    columns: usize,
+    group_size: usize,
+    tile_count: usize,
+    mut write_output: F,
+) -> Result<(), &'static str>
+where
+    F: FnMut(usize, usize, f32),
+{
     use std::arch::aarch64::{
         float32x4_t, vaddq_f32, vdupq_n_f32, vfmaq_f32, vld1q_f32, vst1q_f32,
     };
@@ -762,8 +1382,9 @@ unsafe fn project_q4_batch_neon_tile(
     let vector_count = tile_count / 4 * 4;
     let vector_groups = vector_count / 4;
     let mut sums = [0.0f64; Q4_BATCH_TILE_SIZE];
-    for row in 0..rows {
+    for local_row in 0..row_count {
         sums.fill(0.0);
+        let row = first_row + local_row;
         let row_start = row * columns;
         let zero = vdupq_n_f32(0.0);
         let mut column = 0usize;
@@ -776,16 +1397,14 @@ unsafe fn project_q4_batch_neon_tile(
                 [[zero; 2]; Q4_BATCH_TILE_SIZE / 4];
             let mut element = 0usize;
             while column < segment_end {
-                // Reuse each decoded Q4 value across every four-input vector
-                // in the tile before advancing to the next matrix element.
                 let signed = signed_q4_at(packed, row_start + column) as f32;
                 let weight = vdupq_n_f32(signed);
                 for (vector_group, vector_accumulators) in
                     accumulators.iter_mut().enumerate().take(vector_groups)
                 {
                     let activation_offset = column * tile_count + vector_group * 4;
-                    // SAFETY: the row, segment and four-lane tile fit the
-                    // validated matrix, transposed scratch and output shapes.
+                    // SAFETY: validation bounds the transposed tile, and each
+                    // vector group starts at a complete four-value segment.
                     let activation =
                         unsafe { vld1q_f32(transposed.as_ptr().add(activation_offset)) };
                     let accumulator = &mut vector_accumulators[element & 1];
@@ -808,8 +1427,7 @@ unsafe fn project_q4_batch_neon_tile(
             }
         }
 
-        // A short final token tile is handled with the same f64 arithmetic as
-        // the portable reference, without an out-of-bounds vector load.
+        // A final partial SIMD group uses the scalar f64 reference arithmetic.
         for tile_index in vector_count..tile_count {
             let mut total = 0.0f64;
             for column in 0..columns {
@@ -821,12 +1439,12 @@ unsafe fn project_q4_batch_neon_tile(
             sums[tile_index] = total;
         }
 
-        for tile_index in 0..tile_count {
-            let projected = sums[tile_index] as f32;
+        for (tile_index, sum) in sums.iter().take(tile_count).enumerate() {
+            let projected = *sum as f32;
             if !projected.is_finite() {
                 return Err("Q4 batch projection result is non-finite");
             }
-            output[(batch_start + tile_index) * rows + row] = projected;
+            write_output(tile_index, local_row, projected);
         }
     }
     Ok(())
@@ -868,7 +1486,9 @@ pub fn project_q4_selected_into(
         let maximum_group_terms = (group_size.min(columns) as f64) * 8.0;
         maximum_input * maximum_group_terms > f64::from(f32::MAX)
     };
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(target_arch = "x86_64")]
+    let use_scalar = !native_x86_avx2_available();
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
     let use_scalar = true;
 
     let worker_count = inference_cpu_worker_limit().min(selected_rows.len());
@@ -969,7 +1589,9 @@ fn project_q4_validated(
         let maximum_group_terms = (group_size.min(columns) as f64) * 8.0;
         maximum_input * maximum_group_terms > f64::from(f32::MAX)
     };
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(target_arch = "x86_64")]
+    let use_scalar = !native_x86_avx2_available();
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
     let use_scalar = true;
 
     if enough_work
@@ -1010,6 +1632,12 @@ fn inference_cpu_worker_limit() -> usize {
     })
 }
 
+#[cfg(target_arch = "x86_64")]
+fn native_x86_avx2_available() -> bool {
+    static AVAILABLE: OnceLock<bool> = OnceLock::new();
+    *AVAILABLE.get_or_init(|| std::is_x86_feature_detected!("avx2"))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn project_q4_parallel(
     packed: &[u8],
@@ -1033,6 +1661,286 @@ fn project_q4_parallel(
             use_scalar,
         )
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn project_q4_argmax_parallel(
+    packed: &[u8],
+    scales: &[f32],
+    input: &[f32],
+    rows: usize,
+    columns: usize,
+    group_size: usize,
+    worker_count: usize,
+    use_scalar: bool,
+) -> Option<Result<(usize, f32), &'static str>> {
+    let rows_per_worker = rows.div_ceil(worker_count);
+    thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(worker_count);
+        let mut spawn_failed = false;
+        for worker_index in 0..worker_count {
+            let first_row = worker_index * rows_per_worker;
+            if first_row >= rows {
+                break;
+            }
+            let end_row = (first_row + rows_per_worker).min(rows);
+            let result =
+                Builder::new()
+                    .name("sage-q4-argmax".into())
+                    .spawn_scoped(scope, move || {
+                        project_q4_argmax_range(
+                            packed, scales, input, columns, group_size, first_row, end_row,
+                            use_scalar,
+                        )
+                    });
+            match result {
+                Ok(handle) => handles.push(handle),
+                Err(_) => {
+                    spawn_failed = true;
+                    break;
+                }
+            }
+        }
+
+        let mut best = None;
+        let mut worker_error = None;
+        for handle in handles {
+            match handle.join() {
+                Ok(Ok(candidate)) => keep_q4_argmax(&mut best, candidate),
+                Ok(Err(error)) => {
+                    worker_error.get_or_insert(error);
+                }
+                Err(_) => {
+                    worker_error.get_or_insert("Q4 argmax worker panicked");
+                }
+            }
+        }
+        if spawn_failed {
+            None
+        } else if let Some(error) = worker_error {
+            Some(Err(error))
+        } else {
+            Some(best.ok_or("Q4 argmax did not project any rows"))
+        }
+    })
+}
+
+struct Q4CpuWorkerPool {
+    sender: SyncSender<Q4ProjectionWork>,
+    worker_count: usize,
+}
+
+struct Q4ProjectionWork {
+    packed: Arc<Vec<u8>>,
+    scales: Arc<Vec<f32>>,
+    input: *const f32,
+    output: *mut f32,
+    columns: usize,
+    group_size: usize,
+    first_row: usize,
+    end_row: usize,
+    use_scalar: bool,
+    completion: SyncSender<Result<(), &'static str>>,
+}
+
+// SAFETY: projection work is created only by `project_q4_into_pooled`, which
+// holds the borrowed input/output slices until every submitted range completes.
+// The input is shared read-only, and the submitter assigns disjoint output rows.
+unsafe impl Send for Q4ProjectionWork {}
+
+fn q4_cpu_worker_pool() -> &'static Q4CpuWorkerPool {
+    static POOL: OnceLock<Q4CpuWorkerPool> = OnceLock::new();
+    POOL.get_or_init(|| {
+        let requested_workers = inference_cpu_worker_limit();
+        let (sender, receiver) =
+            mpsc::sync_channel::<Q4ProjectionWork>(requested_workers.max(1) * 2);
+        let receiver = Arc::new(Mutex::new(receiver));
+        let mut worker_count = 0;
+        for worker_index in 0..requested_workers {
+            let receiver = Arc::clone(&receiver);
+            let result = Builder::new()
+                .name(format!("sage-q4-pool-{worker_index}"))
+                .spawn(move || q4_cpu_worker(receiver));
+            if result.is_ok() {
+                worker_count += 1;
+            } else {
+                break;
+            }
+        }
+        Q4CpuWorkerPool {
+            sender,
+            worker_count,
+        }
+    })
+}
+
+fn q4_cpu_worker(receiver: Arc<Mutex<mpsc::Receiver<Q4ProjectionWork>>>) {
+    loop {
+        let work = match receiver.lock() {
+            Ok(receiver) => receiver.recv(),
+            Err(_) => return,
+        };
+        let Ok(work) = work else {
+            return;
+        };
+        let Q4ProjectionWork {
+            packed,
+            scales,
+            input: input_pointer,
+            output: output_pointer,
+            columns,
+            group_size,
+            first_row,
+            end_row,
+            use_scalar,
+            completion,
+        } = work;
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            // SAFETY: the submitting call keeps its input and output slices
+            // alive until it receives this job's completion. Row ranges are
+            // disjoint; each worker creates only its own mutable range.
+            let input = unsafe { std::slice::from_raw_parts(input_pointer, columns) };
+            let output_length = end_row - first_row;
+            let output = unsafe {
+                std::slice::from_raw_parts_mut(output_pointer.add(first_row), output_length)
+            };
+            project_q4_range(
+                &packed, &scales, input, columns, group_size, first_row, output, use_scalar,
+            )
+        }))
+        .unwrap_or(Err("Q4 persistent projection worker panicked"));
+        drop(packed);
+        drop(scales);
+        let _ = completion.send(result);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn project_q4_into_pooled_parallel(
+    pool: &Q4CpuWorkerPool,
+    packed: Arc<Vec<u8>>,
+    scales: Arc<Vec<f32>>,
+    input: *const f32,
+    output: *mut f32,
+    rows: usize,
+    columns: usize,
+    group_size: usize,
+    worker_count: usize,
+    use_scalar: bool,
+) -> Option<Result<(), &'static str>> {
+    let rows_per_worker = rows.div_ceil(worker_count);
+    let job_count = rows.div_ceil(rows_per_worker);
+    let (completion, completed) = mpsc::sync_channel(job_count);
+    let mut sent_count = 0;
+    for worker_index in 0..job_count {
+        let first_row = worker_index * rows_per_worker;
+        let work = Q4ProjectionWork {
+            packed: Arc::clone(&packed),
+            scales: Arc::clone(&scales),
+            input,
+            output,
+            columns,
+            group_size,
+            first_row,
+            end_row: (first_row + rows_per_worker).min(rows),
+            use_scalar,
+            completion: completion.clone(),
+        };
+        if pool.sender.send(work).is_err() {
+            break;
+        }
+        sent_count += 1;
+    }
+    drop(completion);
+
+    let send_succeeded = sent_count == job_count;
+    let mut worker_error = None;
+    let mut completed_count = 0;
+    while completed_count < sent_count {
+        match completed.recv() {
+            Ok(Ok(())) => completed_count += 1,
+            Ok(Err(error)) => {
+                worker_error.get_or_insert(error);
+                completed_count += 1;
+            }
+            Err(_) => break,
+        }
+    }
+
+    if !send_succeeded || completed_count != job_count {
+        None
+    } else {
+        Some(worker_error.map_or(Ok(()), Err))
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+fn q4_argmax_uses_scalar(input: &[f32], group_size: usize, columns: usize) -> bool {
+    // Advanced SIMD is mandatory in AArch64's architectural baseline.
+    // Extreme finite activations use the f64 scalar reference so the
+    // unscaled SIMD accumulators cannot overflow before their group scale.
+    let maximum_input = input
+        .iter()
+        .map(|value| f64::from(value.abs()))
+        .fold(0.0f64, f64::max);
+    let maximum_group_terms = (group_size.min(columns) as f64) * 8.0;
+    maximum_input * maximum_group_terms > f64::from(f32::MAX)
+}
+
+#[cfg(target_arch = "x86_64")]
+fn q4_argmax_uses_scalar(_input: &[f32], _group_size: usize, _columns: usize) -> bool {
+    !native_x86_avx2_available()
+}
+
+#[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+fn q4_argmax_uses_scalar(_input: &[f32], _group_size: usize, _columns: usize) -> bool {
+    true
+}
+
+#[allow(clippy::too_many_arguments)]
+fn project_q4_argmax_range(
+    packed: &[u8],
+    scales: &[f32],
+    input: &[f32],
+    columns: usize,
+    group_size: usize,
+    first_row: usize,
+    end_row: usize,
+    use_scalar: bool,
+) -> Result<(usize, f32), &'static str> {
+    let mut best = None;
+    for row in first_row..end_row {
+        let projected = if use_scalar {
+            project_q4_scalar_row(packed, scales, input, row, columns, group_size)?
+        } else {
+            #[cfg(target_arch = "aarch64")]
+            {
+                // SAFETY: the public entry point validated matrix geometry and
+                // finite input; this row is within the validated row range.
+                unsafe { project_q4_neon_row(packed, scales, input, row, columns, group_size)? }
+            }
+            #[cfg(target_arch = "x86_64")]
+            {
+                // SAFETY: public dispatch selects this function only after
+                // runtime detection confirms AVX2 support and row geometry is validated.
+                unsafe { project_q4_avx2_row(packed, scales, input, row, columns, group_size)? }
+            }
+            #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+            {
+                project_q4_scalar_row(packed, scales, input, row, columns, group_size)?
+            }
+        };
+        keep_q4_argmax(&mut best, (row, projected));
+    }
+    best.ok_or("Q4 argmax did not project any rows")
+}
+
+fn keep_q4_argmax(best: &mut Option<(usize, f32)>, candidate: (usize, f32)) {
+    if best.is_none_or(|(best_row, best_value)| {
+        candidate.1 > best_value || (candidate.1 == best_value && candidate.0 < best_row)
+    }) {
+        *best = Some(candidate);
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1137,7 +2045,18 @@ fn project_q4_range(
         }
     }
 
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(target_arch = "x86_64")]
+    {
+        // SAFETY: public dispatch selects this function only after runtime
+        // detection confirms AVX2 support; matrix and input bounds are validated.
+        unsafe {
+            project_q4_avx2_range(
+                packed, scales, input, columns, group_size, first_row, output,
+            )
+        }
+    }
+
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
     {
         project_q4_scalar_range(
             packed, scales, input, columns, group_size, first_row, output,
@@ -1184,7 +2103,18 @@ fn project_q4_selected_range(
         }
     }
 
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(target_arch = "x86_64")]
+    {
+        for (selected_index, row) in selected_rows.iter().copied().enumerate() {
+            // SAFETY: public dispatch selects this function only after runtime
+            // detection confirms AVX2 support; each selected row was validated.
+            output[selected_index] =
+                unsafe { project_q4_avx2_row(packed, scales, input, row, columns, group_size)? };
+        }
+        Ok(())
+    }
+
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
     {
         for (selected_index, row) in selected_rows.iter().copied().enumerate() {
             output[selected_index] =
@@ -1323,7 +2253,7 @@ pub fn dot_rows_f16(
     Ok(())
 }
 
-/// Dot up to four query heads against one shared position-major KV-head slice.
+/// Dot up to five query heads against one shared position-major KV-head slice.
 /// Query rows are `[query_head, dimension]`; scores are `[query_head, position]`.
 /// On AArch64 the cached key vector is widened once and reused across all query
 /// heads in the group, matching grouped-query attention's shared KV layout.
@@ -1356,6 +2286,7 @@ pub fn dot_rows_f16_grouped(
         })
         || queries.iter().any(|value| !value.is_finite())
     {
+        output.fill(0.0);
         return Err("Grouped binary16 attention dot-product dimensions are invalid");
     }
     let dimension = query_dimension.expect("validated query dimension");
@@ -1375,24 +2306,144 @@ pub fn dot_rows_f16_grouped(
                 output,
             );
         }
-    } else {
-        dot_rows_f16(queries, keys, row_stride, column_offset, output)?;
+    } else if let Err(error) = dot_rows_f16(queries, keys, row_stride, column_offset, output) {
+        output.fill(0.0);
+        return Err(error);
     }
     #[cfg(not(target_arch = "aarch64"))]
     for query_head in 0..query_heads {
         let query_start = query_head * dimension;
         let score_start = query_head * rows;
-        dot_rows_f16(
+        if let Err(error) = dot_rows_f16(
             &queries[query_start..query_start + dimension],
             keys,
             row_stride,
             column_offset,
             &mut output[score_start..score_start + rows],
-        )?;
+        ) {
+            output.fill(0.0);
+            return Err(error);
+        }
     }
     if output.iter().all(|score| score.is_finite()) {
         Ok(())
     } else {
+        output.fill(0.0);
+        Err("Grouped binary16 attention dot product is non-finite")
+    }
+}
+
+/// Compute grouped binary16 query-key scores, apply a finite scale, and return
+/// each query row's maximum in the same pass. Attention uses that maximum to
+/// start its stable blockwise softmax, avoiding a second scan of each score
+/// block. AArch64 folds the scale and maximum into the NEON dot-product loop.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GroupedAttentionScoreConfig {
+    pub query_heads: usize,
+    pub rows: usize,
+    pub row_stride: usize,
+    pub column_offset: usize,
+    pub scale: f64,
+}
+
+pub fn dot_rows_f16_grouped_scaled_max(
+    queries: &[f32],
+    keys: &[u16],
+    config: GroupedAttentionScoreConfig,
+    output: &mut [f64],
+    maxima: &mut [f64],
+) -> Result<(), &'static str> {
+    let GroupedAttentionScoreConfig {
+        query_heads,
+        rows,
+        row_stride,
+        column_offset,
+        scale,
+    } = config;
+    let query_dimension = queries.len().checked_div(query_heads.max(1));
+    let score_count = query_heads.checked_mul(rows);
+    let value_count = rows.checked_mul(row_stride);
+    if query_heads == 0
+        || query_heads > MAX_GROUPED_QUERY_HEADS
+        || rows == 0
+        || row_stride == 0
+        || query_dimension.is_none_or(|dimension| dimension == 0 || dimension > 1024)
+        || query_dimension.and_then(|dimension| dimension.checked_mul(query_heads))
+            != Some(queries.len())
+        || score_count != Some(output.len())
+        || maxima.len() != query_heads
+        || value_count.is_none_or(|count| count == 0 || count > MAX_Q4_ELEMENTS)
+        || value_count != Some(keys.len())
+        || query_dimension.is_some_and(|dimension| {
+            column_offset
+                .checked_add(dimension)
+                .is_none_or(|end| end > row_stride)
+        })
+        || !scale.is_finite()
+        || queries.iter().any(|value| !value.is_finite())
+    {
+        output.fill(0.0);
+        maxima.fill(0.0);
+        return Err("Grouped binary16 attention dot-product dimensions are invalid");
+    }
+    let dimension = query_dimension.expect("validated query dimension");
+    maxima.fill(f64::NEG_INFINITY);
+    #[cfg(target_arch = "aarch64")]
+    if query_heads > 1 {
+        // SAFETY: the public wrapper validates every query, score, row, and
+        // selected-head range before the grouped NEON implementation runs.
+        unsafe {
+            dot_rows_f16_grouped_scaled_max_neon(
+                queries,
+                query_heads,
+                dimension,
+                keys,
+                rows,
+                row_stride,
+                column_offset,
+                scale,
+                output,
+                maxima,
+            );
+        }
+    } else {
+        if let Err(error) = dot_rows_f16(queries, keys, row_stride, column_offset, output) {
+            output.fill(0.0);
+            maxima.fill(0.0);
+            return Err(error);
+        }
+        let maximum = &mut maxima[0];
+        for score in output.iter_mut() {
+            *score *= scale;
+            *maximum = maximum.max(*score);
+        }
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    for query_head in 0..query_heads {
+        let query_start = query_head * dimension;
+        let score_start = query_head * rows;
+        if let Err(error) = dot_rows_f16(
+            &queries[query_start..query_start + dimension],
+            keys,
+            row_stride,
+            column_offset,
+            &mut output[score_start..score_start + rows],
+        ) {
+            output.fill(0.0);
+            maxima.fill(0.0);
+            return Err(error);
+        }
+        let maximum = &mut maxima[query_head];
+        for score in &mut output[score_start..score_start + rows] {
+            *score *= scale;
+            *maximum = maximum.max(*score);
+        }
+    }
+    if output.iter().all(|score| score.is_finite()) {
+        Ok(())
+    } else {
+        output.fill(0.0);
+        maxima.fill(0.0);
         Err("Grouped binary16 attention dot product is non-finite")
     }
 }
@@ -1517,7 +2568,7 @@ pub fn weighted_sum_rows_f16_into(
     }
 }
 
-/// Compute up to four query heads' weighted value sums while loading each
+/// Compute up to five query heads' weighted value sums while loading each
 /// binary16 value row once. `weights` and `output` are head-major.
 pub fn weighted_sum_rows_f16_grouped_into(
     values: &[u16],
@@ -1655,6 +2706,7 @@ fn weighted_sum_rows_into_validated(
     column_offset: usize,
     output: &mut [f32],
 ) -> Result<(), &'static str> {
+    #[cfg(target_arch = "aarch64")]
     let columns = output.len();
     #[cfg(target_arch = "aarch64")]
     if columns <= MAX_ATTENTION_VALUE_DIMENSION {
@@ -2164,6 +3216,71 @@ unsafe fn dot_rows_f16_grouped_neon(
 
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
+// Keep the validated geometry explicit at this narrow unsafe SIMD boundary.
+#[allow(clippy::too_many_arguments)]
+unsafe fn dot_rows_f16_grouped_scaled_max_neon(
+    queries: &[f32],
+    query_heads: usize,
+    dimension: usize,
+    keys: &[u16],
+    rows: usize,
+    row_stride: usize,
+    column_offset: usize,
+    scale: f64,
+    output: &mut [f64],
+    maxima: &mut [f64],
+) {
+    use std::arch::aarch64::{vaddq_f32, vaddvq_f32, vdupq_n_f32, vfmaq_f32, vld1_u16, vld1q_f32};
+
+    let native_fp16 = native_aarch64_fp16_conversion_available();
+    let zero = vdupq_n_f32(0.0);
+    for position in 0..rows {
+        let row_start = position * row_stride + column_offset;
+        let row = &keys[row_start..row_start + dimension];
+        let mut accumulators = [[zero; 4]; MAX_GROUPED_QUERY_HEADS];
+        let mut index = 0usize;
+        while index + 16 <= dimension {
+            // SAFETY: the 16-element loop bound proves all four packed key
+            // loads fit in the selected row.
+            let key0 = unsafe { widen_f16x4_neon(vld1_u16(row.as_ptr().add(index)), native_fp16) };
+            let key1 =
+                unsafe { widen_f16x4_neon(vld1_u16(row.as_ptr().add(index + 4)), native_fp16) };
+            let key2 =
+                unsafe { widen_f16x4_neon(vld1_u16(row.as_ptr().add(index + 8)), native_fp16) };
+            let key3 =
+                unsafe { widen_f16x4_neon(vld1_u16(row.as_ptr().add(index + 12)), native_fp16) };
+            for head in 0..query_heads {
+                let query = &queries[head * dimension..(head + 1) * dimension];
+                // SAFETY: the same 16-element loop bound fits four query loads.
+                let query0 = unsafe { vld1q_f32(query.as_ptr().add(index)) };
+                let query1 = unsafe { vld1q_f32(query.as_ptr().add(index + 4)) };
+                let query2 = unsafe { vld1q_f32(query.as_ptr().add(index + 8)) };
+                let query3 = unsafe { vld1q_f32(query.as_ptr().add(index + 12)) };
+                accumulators[head][0] = vfmaq_f32(accumulators[head][0], query0, key0);
+                accumulators[head][1] = vfmaq_f32(accumulators[head][1], query1, key1);
+                accumulators[head][2] = vfmaq_f32(accumulators[head][2], query2, key2);
+                accumulators[head][3] = vfmaq_f32(accumulators[head][3], query3, key3);
+            }
+            index += 16;
+        }
+        let tail_start = index;
+        for head in 0..query_heads {
+            let sums = accumulators[head];
+            let combined = vaddq_f32(vaddq_f32(sums[0], sums[1]), vaddq_f32(sums[2], sums[3]));
+            let mut total = f64::from(vaddvq_f32(combined));
+            let query = &queries[head * dimension..(head + 1) * dimension];
+            for tail in tail_start..dimension {
+                total += f64::from(query[tail]) * f64::from(f16_bits_to_f32(row[tail]));
+            }
+            let scaled = total * scale;
+            output[head * rows + position] = scaled;
+            maxima[head] = maxima[head].max(scaled);
+        }
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
 unsafe fn widen_f16x4_neon(
     values: std::arch::aarch64::uint16x4_t,
     native_fp16: bool,
@@ -2222,6 +3339,117 @@ unsafe fn widen_f16x4_neon(
 fn native_aarch64_fp16_conversion_available() -> bool {
     static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *AVAILABLE.get_or_init(|| std::arch::is_aarch64_feature_detected!("fp16"))
+}
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon,fp16")]
+unsafe fn f32_to_f16_bits_neon(values: &[f32], output: &mut [u16]) {
+    use std::arch::aarch64::{vld1q_f32, vst1_u16};
+
+    const MIN_NORMAL_F16_AS_F32: f32 = f32::from_bits(0x3880_0000);
+    let (value_groups, value_tail) = values.as_chunks::<4>();
+    let (output_groups, output_tail) = output.as_chunks_mut::<4>();
+    for (source, destination) in value_groups.iter().zip(output_groups) {
+        if source.iter().all(|value| {
+            value.is_finite() && value.abs() >= MIN_NORMAL_F16_AS_F32 && value.abs() <= 65_504.0
+        }) {
+            // SAFETY: each iterator item has four readable f32 values and four
+            // writable u16 destinations. FP16 support was checked by the
+            // caller before entering this target-feature function.
+            let input = unsafe { vld1q_f32(source.as_ptr()) };
+            let converted;
+            // FCVTN rounds to nearest, ties to even, matching Sage's scalar
+            // reference for normal finite values. Special and subnormal cases
+            // stay on that scalar path to preserve its exact bit behavior.
+            unsafe {
+                core::arch::asm!(
+                    "fcvtn {output:v}.4h, {input:v}.4s",
+                    output = lateout(vreg) converted,
+                    input = in(vreg) input,
+                    options(pure, nomem, nostack),
+                );
+            }
+            // SAFETY: `converted` contains the four half lanes represented by
+            // this destination slice.
+            unsafe { vst1_u16(destination.as_mut_ptr(), converted) };
+        } else {
+            for (value, output) in source.iter().zip(destination) {
+                *output = f32_to_f16_bits(*value);
+            }
+        }
+    }
+
+    for (value, output) in value_tail.iter().zip(output_tail) {
+        *output = f32_to_f16_bits(*value);
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon,fp16")]
+unsafe fn f32_to_f16_bits_checked_neon(
+    values: &[f32],
+    output: *mut u16,
+) -> Result<(), &'static str> {
+    use std::arch::aarch64::{
+        vabsq_f32, vandq_u32, vcgeq_f32, vcleq_f32, vdupq_n_f32, vld1q_f32, vminvq_u32, vst1_u16,
+    };
+
+    const MIN_NORMAL_F16_AS_F32: f32 = f32::from_bits(0x3880_0000);
+    const MAX_FINITE_F16_AS_F32: f32 = 65_504.0;
+    let (value_groups, value_tail) = values.as_chunks::<4>();
+    for (group_index, source) in value_groups.iter().enumerate() {
+        // SAFETY: the caller provides `values.len()` output slots and each
+        // group addresses four consecutive values within that range.
+        let destination = unsafe { output.add(group_index * 4) };
+        // SAFETY: each source group contains four readable f32 values. FP16
+        // support was checked by the safe caller.
+        let input = unsafe { vld1q_f32(source.as_ptr()) };
+        let magnitude = vabsq_f32(input);
+        let in_range = vandq_u32(
+            vcgeq_f32(magnitude, vdupq_n_f32(MIN_NORMAL_F16_AS_F32)),
+            vcleq_f32(magnitude, vdupq_n_f32(MAX_FINITE_F16_AS_F32)),
+        );
+        if vminvq_u32(in_range) == u32::MAX {
+            let converted;
+            // FCVTN rounds to nearest, ties to even. The range mask excludes
+            // subnormals and special values, so this matches the scalar path.
+            unsafe {
+                core::arch::asm!(
+                    "fcvtn {output:v}.4h, {input:v}.4s",
+                    output = lateout(vreg) converted,
+                    input = in(vreg) input,
+                    options(pure, nomem, nostack),
+                );
+            }
+            // SAFETY: the converted register and destination each have four
+            // binary16 lanes.
+            unsafe { vst1_u16(destination, converted) };
+        } else {
+            for (lane, value) in source.iter().enumerate() {
+                if !value.is_finite() || value.abs() > MAX_FINITE_F16_AS_F32 {
+                    return Err("KV cache value is outside the finite binary16 range");
+                }
+                // SAFETY: `destination` points to this group's four writable
+                // slots, and `lane` is in 0..4.
+                unsafe { destination.add(lane).write(f32_to_f16_bits(*value)) };
+            }
+        }
+    }
+
+    let tail_start = value_groups.len() * 4;
+    for (tail_index, value) in value_tail.iter().enumerate() {
+        if !value.is_finite() || value.abs() > MAX_FINITE_F16_AS_F32 {
+            return Err("KV cache value is outside the finite binary16 range");
+        }
+        // SAFETY: the tail starts immediately after the complete groups and
+        // contains fewer than four values within the caller's output range.
+        unsafe {
+            output
+                .add(tail_start + tail_index)
+                .write(f32_to_f16_bits(*value))
+        };
+    }
+    Ok(())
 }
 
 #[cfg(target_arch = "aarch64")]
@@ -2515,9 +3743,214 @@ fn signed_q4_at(packed: &[u8], index: usize) -> i32 {
     i32::from(nibble) - 8
 }
 
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn project_q4_avx2_range(
+    packed: &[u8],
+    scales: &[f32],
+    input: &[f32],
+    columns: usize,
+    group_size: usize,
+    first_row: usize,
+    output: &mut [f32],
+) -> Result<(), &'static str> {
+    for (offset, output_value) in output.iter_mut().enumerate() {
+        // SAFETY: the public wrapper validates the Q4 geometry and finite
+        // activation range before splitting disjoint output rows.
+        *output_value = unsafe {
+            project_q4_avx2_row(
+                packed,
+                scales,
+                input,
+                first_row + offset,
+                columns,
+                group_size,
+            )?
+        };
+    }
+    Ok(())
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn project_q4_avx2_row(
+    packed: &[u8],
+    scales: &[f32],
+    input: &[f32],
+    row: usize,
+    columns: usize,
+    group_size: usize,
+) -> Result<f32, &'static str> {
+    use std::arch::x86_64::*;
+
+    let row_start = row * columns;
+    let mut column = 0usize;
+    let mut total = 0.0f64;
+
+    while column < columns {
+        let first_index = row_start + column;
+        let scale = scales[first_index / group_size];
+        let segment_end = (column + group_size - first_index % group_size).min(columns);
+        let scale_vector = _mm256_set1_ps(scale);
+        let nibble_offset = _mm_set1_epi8(8);
+        let mut sum0 = _mm256_setzero_pd();
+        let mut sum1 = _mm256_setzero_pd();
+        let mut sum2 = _mm256_setzero_pd();
+        let mut sum3 = _mm256_setzero_pd();
+        let mut scalar_sum = 0.0f64;
+
+        // Align the first packed block to a byte boundary. This also handles
+        // odd row widths, whose next row begins in a high nibble.
+        if first_index & 1 != 0 {
+            let quantized = signed_q4_at(packed, first_index) as f32 * scale;
+            scalar_sum += f64::from(quantized) * f64::from(input[column]);
+            column += 1;
+        }
+
+        while column + 16 <= segment_end {
+            let packed_offset = (row_start + column) / 2;
+            // SAFETY: the global Q4 index is even and the 16-element bound
+            // guarantees eight readable bytes inside the validated matrix.
+            let bytes =
+                unsafe { _mm_loadl_epi64(packed.as_ptr().add(packed_offset).cast::<__m128i>()) };
+            let low = _mm_and_si128(bytes, _mm_set1_epi8(0x0f));
+            let high = _mm_and_si128(_mm_srli_epi16(bytes, 4), _mm_set1_epi8(0x0f));
+            let first_eight = _mm_sub_epi8(_mm_unpacklo_epi8(low, high), nibble_offset);
+            let later_bytes = _mm_srli_si128(bytes, 4);
+            let later_low = _mm_and_si128(later_bytes, _mm_set1_epi8(0x0f));
+            let later_high = _mm_and_si128(_mm_srli_epi16(later_bytes, 4), _mm_set1_epi8(0x0f));
+            let second_eight =
+                _mm_sub_epi8(_mm_unpacklo_epi8(later_low, later_high), nibble_offset);
+            let quantized0 = _mm256_cvtepi8_epi32(first_eight);
+            let quantized1 = _mm256_cvtepi8_epi32(second_eight);
+            let weights0 = _mm256_mul_ps(_mm256_cvtepi32_ps(quantized0), scale_vector);
+            let weights1 = _mm256_mul_ps(_mm256_cvtepi32_ps(quantized1), scale_vector);
+            // SAFETY: all activation lanes lie inside the validated input
+            // slice because the vector block ends at `segment_end`.
+            let activations0 = unsafe { _mm256_loadu_ps(input.as_ptr().add(column)) };
+            // SAFETY: the second eight-value block shares the same validated
+            // 16-element bound as the first.
+            let activations1 = unsafe { _mm256_loadu_ps(input.as_ptr().add(column + 8)) };
+
+            sum0 = _mm256_add_pd(
+                sum0,
+                _mm256_mul_pd(
+                    _mm256_cvtps_pd(_mm256_castps256_ps128(weights0)),
+                    _mm256_cvtps_pd(_mm256_castps256_ps128(activations0)),
+                ),
+            );
+            sum1 = _mm256_add_pd(
+                sum1,
+                _mm256_mul_pd(
+                    _mm256_cvtps_pd(_mm256_extractf128_ps(weights0, 1)),
+                    _mm256_cvtps_pd(_mm256_extractf128_ps(activations0, 1)),
+                ),
+            );
+            sum2 = _mm256_add_pd(
+                sum2,
+                _mm256_mul_pd(
+                    _mm256_cvtps_pd(_mm256_castps256_ps128(weights1)),
+                    _mm256_cvtps_pd(_mm256_castps256_ps128(activations1)),
+                ),
+            );
+            sum3 = _mm256_add_pd(
+                sum3,
+                _mm256_mul_pd(
+                    _mm256_cvtps_pd(_mm256_extractf128_ps(weights1, 1)),
+                    _mm256_cvtps_pd(_mm256_extractf128_ps(activations1, 1)),
+                ),
+            );
+            column += 16;
+        }
+
+        let combined = _mm256_add_pd(_mm256_add_pd(sum0, sum1), _mm256_add_pd(sum2, sum3));
+        let mut lanes = [0.0f64; 4];
+        // SAFETY: `lanes` has exactly four writable f64 values.
+        unsafe { _mm256_storeu_pd(lanes.as_mut_ptr(), combined) };
+        let mut group_sum = scalar_sum + lanes.into_iter().sum::<f64>();
+        while column < segment_end {
+            let index = row_start + column;
+            let quantized = signed_q4_at(packed, index) as f32 * scale;
+            group_sum += f64::from(quantized) * f64::from(input[column]);
+            column += 1;
+        }
+        total += group_sum;
+    }
+
+    debug_assert_eq!(column, columns);
+    let projected = total as f32;
+    if projected.is_finite() {
+        Ok(projected)
+    } else {
+        Err("Q4 projection result is non-finite")
+    }
+}
+
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
 unsafe fn project_q4_neon_range(
+    packed: &[u8],
+    scales: &[f32],
+    input: &[f32],
+    columns: usize,
+    group_size: usize,
+    first_row: usize,
+    output: &mut [f32],
+) -> Result<(), &'static str> {
+    if group_size == 0
+        || group_size < 16
+        || !group_size.is_multiple_of(16)
+        || !columns.is_multiple_of(group_size)
+        || !columns.is_multiple_of(16)
+    {
+        // SAFETY: the caller established the same validated matrix and input
+        // bounds required by the row kernel.
+        return unsafe {
+            project_q4_neon_range_reference(
+                packed, scales, input, columns, group_size, first_row, output,
+            )
+        };
+    }
+
+    let mut first_output = 0;
+    let mut row = first_row;
+    if row & 1 != 0 && !output.is_empty() {
+        // SAFETY: this row belongs to the validated output range.
+        output[0] =
+            unsafe { project_q4_neon_row(packed, scales, input, row, columns, group_size)? };
+        first_output = 1;
+        row += 1;
+    }
+
+    let paired_length = (output.len() - first_output) / 2 * 2;
+    if paired_length > 0 {
+        // SAFETY: even row starts, group-aligned rows, and complete paired
+        // output ranges are required and checked above.
+        unsafe {
+            project_q4_neon_paired_range(
+                packed,
+                scales,
+                input,
+                columns,
+                group_size,
+                row,
+                &mut output[first_output..first_output + paired_length],
+            )?
+        };
+        row += paired_length;
+    }
+
+    if first_output + paired_length < output.len() {
+        // SAFETY: the final unpaired row is inside the validated row range.
+        output[first_output + paired_length] =
+            unsafe { project_q4_neon_row(packed, scales, input, row, columns, group_size)? };
+    }
+    Ok(())
+}
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn project_q4_neon_range_reference(
     packed: &[u8],
     scales: &[f32],
     input: &[f32],
@@ -2539,6 +3972,123 @@ unsafe fn project_q4_neon_range(
                 group_size,
             )?
         };
+    }
+    Ok(())
+}
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn project_q4_neon_paired_range(
+    packed: &[u8],
+    scales: &[f32],
+    input: &[f32],
+    columns: usize,
+    group_size: usize,
+    first_row: usize,
+    output: &mut [f32],
+) -> Result<(), &'static str> {
+    use std::arch::aarch64::{
+        vaddq_f32, vaddvq_f32, vand_u8, vcombine_u8, vcvtq_f32_s32, vdup_n_u8, vdupq_n_f32,
+        vdupq_n_u8, vfmaq_f32, vget_high_s8, vget_high_s16, vget_low_s8, vget_low_s16, vld1_u8,
+        vld1q_f32, vmovl_s8, vmovl_s16, vreinterpretq_s8_u8, vshr_n_u8, vsubq_u8, vzip_u8,
+    };
+
+    debug_assert_eq!(output.len() % 2, 0);
+    debug_assert_eq!(first_row % 2, 0);
+    let zero = vdupq_n_f32(0.0);
+    let (output_pairs, _) = output.as_chunks_mut::<2>();
+    for (pair_index, pair_output) in output_pairs.iter_mut().enumerate() {
+        let row0 = first_row + pair_index * 2;
+        let row1 = row0 + 1;
+        let row0_start = row0 * columns;
+        let row1_start = row1 * columns;
+        let mut total0 = 0.0f64;
+        let mut total1 = 0.0f64;
+
+        for group_start in (0..columns).step_by(group_size) {
+            let group_end = group_start + group_size;
+            let scale0 = scales[(row0_start + group_start) / group_size];
+            let scale1 = scales[(row1_start + group_start) / group_size];
+            let mut sum0 = [zero; 4];
+            let mut sum1 = [zero; 4];
+            let mut column = group_start;
+
+            while column + 16 <= group_end {
+                let packed0 = (row0_start + column) / 2;
+                let packed1 = (row1_start + column) / 2;
+                // SAFETY: rows and groups are even and the 16-element tile
+                // contains exactly eight packed bytes in each validated row.
+                let bytes0 = unsafe { vld1_u8(packed.as_ptr().add(packed0)) };
+                let bytes1 = unsafe { vld1_u8(packed.as_ptr().add(packed1)) };
+                let low0 = vand_u8(bytes0, vdup_n_u8(0x0f));
+                let high0 = vshr_n_u8::<4>(bytes0);
+                let low1 = vand_u8(bytes1, vdup_n_u8(0x0f));
+                let high1 = vshr_n_u8::<4>(bytes1);
+                let interleaved0 = vzip_u8(low0, high0);
+                let interleaved1 = vzip_u8(low1, high1);
+                let values0 = vreinterpretq_s8_u8(vsubq_u8(
+                    vcombine_u8(interleaved0.0, interleaved0.1),
+                    vdupq_n_u8(8),
+                ));
+                let values1 = vreinterpretq_s8_u8(vsubq_u8(
+                    vcombine_u8(interleaved1.0, interleaved1.1),
+                    vdupq_n_u8(8),
+                ));
+                let lower0 = vmovl_s8(vget_low_s8(values0));
+                let upper0 = vmovl_s8(vget_high_s8(values0));
+                let lower1 = vmovl_s8(vget_low_s8(values1));
+                let upper1 = vmovl_s8(vget_high_s8(values1));
+                let quantized0 = [
+                    vcvtq_f32_s32(vmovl_s16(vget_low_s16(lower0))),
+                    vcvtq_f32_s32(vmovl_s16(vget_high_s16(lower0))),
+                    vcvtq_f32_s32(vmovl_s16(vget_low_s16(upper0))),
+                    vcvtq_f32_s32(vmovl_s16(vget_high_s16(upper0))),
+                ];
+                let quantized1 = [
+                    vcvtq_f32_s32(vmovl_s16(vget_low_s16(lower1))),
+                    vcvtq_f32_s32(vmovl_s16(vget_high_s16(lower1))),
+                    vcvtq_f32_s32(vmovl_s16(vget_low_s16(upper1))),
+                    vcvtq_f32_s32(vmovl_s16(vget_high_s16(upper1))),
+                ];
+                // Load each activation vector once and reuse it for both
+                // adjacent output rows in this tile.
+                // SAFETY: each four-value window lies within the validated
+                // input slice because the tile ends no later than group_end.
+                let activations = [
+                    unsafe { vld1q_f32(input.as_ptr().add(column)) },
+                    unsafe { vld1q_f32(input.as_ptr().add(column + 4)) },
+                    unsafe { vld1q_f32(input.as_ptr().add(column + 8)) },
+                    unsafe { vld1q_f32(input.as_ptr().add(column + 12)) },
+                ];
+                for vector in 0..4 {
+                    sum0[vector] = vfmaq_f32(sum0[vector], quantized0[vector], activations[vector]);
+                    sum1[vector] = vfmaq_f32(sum1[vector], quantized1[vector], activations[vector]);
+                }
+                column += 16;
+            }
+
+            let combined0 = vaddq_f32(vaddq_f32(sum0[0], sum0[1]), vaddq_f32(sum0[2], sum0[3]));
+            let combined1 = vaddq_f32(vaddq_f32(sum1[0], sum1[1]), vaddq_f32(sum1[2], sum1[3]));
+            let mut group0 = f64::from(vaddvq_f32(combined0));
+            let mut group1 = f64::from(vaddvq_f32(combined1));
+            while column < group_end {
+                group0 +=
+                    f64::from(signed_q4_at(packed, row0_start + column)) * f64::from(input[column]);
+                group1 +=
+                    f64::from(signed_q4_at(packed, row1_start + column)) * f64::from(input[column]);
+                column += 1;
+            }
+            total0 += group0 * f64::from(scale0);
+            total1 += group1 * f64::from(scale1);
+        }
+
+        let projected0 = total0 as f32;
+        let projected1 = total1 as f32;
+        if !projected0.is_finite() || !projected1.is_finite() {
+            return Err("Q4 projection result is non-finite");
+        }
+        pair_output[0] = projected0;
+        pair_output[1] = projected1;
     }
     Ok(())
 }
@@ -2676,12 +4226,16 @@ unsafe fn project_q4_neon_row(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::{
-        MAX_ATTENTION_VALUE_DIMENSION, dot_rows, dot_rows_f16, dot_rows_f16_grouped,
-        dot_rows_f64_into, f16_bits_to_f32, f32_to_f16_bits, gated_delta_step, project_q4,
-        project_q4_batch_into, project_q4_into, project_q4_selected_into, rms_norm_silu_gated_into,
-        rms_norm_zero_centered_into, weighted_sum_rows, weighted_sum_rows_f16_grouped_into,
-        weighted_sum_rows_f16_into, weighted_sum_rows_f64_into, weighted_sum_rows_into,
+        GroupedAttentionScoreConfig, MAX_ATTENTION_VALUE_DIMENSION, dot_rows, dot_rows_f16,
+        dot_rows_f16_grouped, dot_rows_f16_grouped_scaled_max, dot_rows_f64_into, f16_bits_to_f32,
+        f32_to_f16_bits, gated_delta_step, project_q4, project_q4_argmax, project_q4_batch_into,
+        project_q4_into, project_q4_into_pooled, project_q4_selected_into,
+        rms_norm_silu_gated_into, rms_norm_zero_centered_into, run_q4_workers, weighted_sum_rows,
+        weighted_sum_rows_f16_grouped_into, weighted_sum_rows_f16_into, weighted_sum_rows_f64_into,
+        weighted_sum_rows_into,
     };
 
     #[test]
@@ -3143,6 +4697,329 @@ mod tests {
     }
 
     #[test]
+    fn grouped_binary16_scaled_scores_and_maxima_match_unscaled_reference() {
+        let query_heads = 4;
+        let dimension = 19;
+        let rows = 13;
+        let row_stride = 80;
+        let column_offset = 21;
+        let scale = 0.125;
+        let queries = (0..query_heads * dimension)
+            .map(|index| ((index * 7 + 5) as f32 * 0.013).sin())
+            .collect::<Vec<_>>();
+        let keys = (0..rows * row_stride)
+            .map(|index| f32_to_f16_bits(((index * 11 + 3) as f32 * 0.017).cos()))
+            .collect::<Vec<_>>();
+        let mut reference = vec![0.0; query_heads * rows];
+        dot_rows_f16_grouped(
+            &queries,
+            query_heads,
+            &keys,
+            rows,
+            row_stride,
+            column_offset,
+            &mut reference,
+        )
+        .expect("unscaled reference scores");
+
+        let mut actual = vec![0.0; query_heads * rows];
+        let mut maxima = vec![0.0; query_heads];
+        dot_rows_f16_grouped_scaled_max(
+            &queries,
+            &keys,
+            GroupedAttentionScoreConfig {
+                query_heads,
+                rows,
+                row_stride,
+                column_offset,
+                scale,
+            },
+            &mut actual,
+            &mut maxima,
+        )
+        .expect("scaled scores and row maxima");
+        for head in 0..query_heads {
+            let expected = &reference[head * rows..(head + 1) * rows];
+            let observed = &actual[head * rows..(head + 1) * rows];
+            let expected_maximum = expected
+                .iter()
+                .map(|score| score * scale)
+                .fold(f64::NEG_INFINITY, f64::max);
+            assert_eq!(maxima[head], expected_maximum);
+            assert_eq!(
+                observed,
+                expected
+                    .iter()
+                    .map(|score| score * scale)
+                    .collect::<Vec<_>>()
+            );
+        }
+
+        actual.fill(1.0);
+        maxima.fill(1.0);
+        assert!(
+            dot_rows_f16_grouped_scaled_max(
+                &queries,
+                &keys,
+                GroupedAttentionScoreConfig {
+                    query_heads,
+                    rows,
+                    row_stride,
+                    column_offset,
+                    scale: f64::INFINITY,
+                },
+                &mut actual,
+                &mut maxima,
+            )
+            .is_err()
+        );
+        assert!(actual.iter().all(|score| *score == 0.0));
+        assert!(maxima.iter().all(|maximum| *maximum == 0.0));
+
+        let one_query = [0.25, -0.75];
+        let one_head_keys = [
+            f32_to_f16_bits(1.0),
+            f32_to_f16_bits(0.5),
+            f32_to_f16_bits(-0.25),
+            f32_to_f16_bits(0.75),
+            f32_to_f16_bits(0.5),
+            f32_to_f16_bits(-0.5),
+        ];
+        let mut one_head_reference = [0.0; 3];
+        dot_rows_f16(&one_query, &one_head_keys, 2, 0, &mut one_head_reference)
+            .expect("one-head unscaled reference");
+        let mut one_head_actual = [0.0; 3];
+        let mut one_head_maximum = [0.0; 1];
+        dot_rows_f16_grouped_scaled_max(
+            &one_query,
+            &one_head_keys,
+            GroupedAttentionScoreConfig {
+                query_heads: 1,
+                rows: 3,
+                row_stride: 2,
+                column_offset: 0,
+                scale,
+            },
+            &mut one_head_actual,
+            &mut one_head_maximum,
+        )
+        .expect("one-head scaled scores");
+        let expected_one_head = one_head_reference.map(|score| score * scale);
+        assert_eq!(one_head_actual, expected_one_head);
+        assert_eq!(
+            one_head_maximum[0],
+            expected_one_head
+                .into_iter()
+                .fold(f64::NEG_INFINITY, f64::max)
+        );
+    }
+
+    #[test]
+    #[ignore = "release-only grouped QK scale-and-maximum fusion measurement"]
+    fn qwen_grouped_qk_scale_max_fusion_latency_measurement() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        const QUERY_HEADS: usize = 16;
+        const KV_HEADS: usize = 4;
+        const HEAD_DIMENSION: usize = 256;
+        const CONTEXT: usize = 8_192;
+        const BLOCK_SIZE: usize = 256;
+        const GROUP_SIZE: usize = QUERY_HEADS / KV_HEADS;
+        const BLOCKS: usize = CONTEXT / BLOCK_SIZE;
+        let scale = (HEAD_DIMENSION as f64).sqrt().recip();
+        let queries = (0..QUERY_HEADS * HEAD_DIMENSION)
+            .map(|index| (index as f32 * 0.013).sin())
+            .collect::<Vec<_>>();
+        let keys = (0..KV_HEADS)
+            .map(|head| {
+                (0..CONTEXT * HEAD_DIMENSION)
+                    .map(|index| f32_to_f16_bits(((index * 13 + head * 7) as f32 * 0.0013).sin()))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let mut reference_scores = vec![0.0; QUERY_HEADS * CONTEXT];
+        let mut scalar_fused_scores = vec![0.0; QUERY_HEADS * CONTEXT];
+        let mut fused_scores = vec![0.0; QUERY_HEADS * CONTEXT];
+        let mut reference_maxima = vec![0.0; QUERY_HEADS * BLOCKS];
+        let mut scalar_fused_maxima = vec![0.0; QUERY_HEADS * BLOCKS];
+        let mut fused_maxima = vec![0.0; QUERY_HEADS * BLOCKS];
+        let mut reference_block = vec![0.0; GROUP_SIZE * BLOCK_SIZE];
+        let mut scalar_fused_block = vec![0.0; GROUP_SIZE * BLOCK_SIZE];
+        let mut fused_block = vec![0.0; GROUP_SIZE * BLOCK_SIZE];
+        let mut fused_block_maxima = vec![0.0; GROUP_SIZE];
+
+        let mut run_reference = || {
+            let started = Instant::now();
+            for block_index in 0..BLOCKS {
+                let block_start = block_index * BLOCK_SIZE;
+                let block_end = block_start + BLOCK_SIZE;
+                for (kv_head, key_bank) in keys.iter().enumerate() {
+                    let query_start = kv_head * GROUP_SIZE * HEAD_DIMENSION;
+                    let key_start = block_start * HEAD_DIMENSION;
+                    let key_end = block_end * HEAD_DIMENSION;
+                    dot_rows_f16_grouped(
+                        &queries[query_start..query_start + GROUP_SIZE * HEAD_DIMENSION],
+                        GROUP_SIZE,
+                        &key_bank[key_start..key_end],
+                        BLOCK_SIZE,
+                        HEAD_DIMENSION,
+                        0,
+                        &mut reference_block,
+                    )
+                    .expect("reference grouped QK");
+                    for head in 0..GROUP_SIZE {
+                        let scores =
+                            &mut reference_block[head * BLOCK_SIZE..(head + 1) * BLOCK_SIZE];
+                        for score in scores.iter_mut() {
+                            *score *= scale;
+                        }
+                        let maximum = scores.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+                        let query_head = kv_head * GROUP_SIZE + head;
+                        reference_maxima[query_head * BLOCKS + block_index] = maximum;
+                        reference_scores
+                            [query_head * CONTEXT + block_start..query_head * CONTEXT + block_end]
+                            .copy_from_slice(scores);
+                        black_box(maximum);
+                    }
+                }
+            }
+            black_box(&reference_scores);
+            started.elapsed()
+        };
+        let mut run_scalar_fused = || {
+            let started = Instant::now();
+            for block_index in 0..BLOCKS {
+                let block_start = block_index * BLOCK_SIZE;
+                let block_end = block_start + BLOCK_SIZE;
+                for (kv_head, key_bank) in keys.iter().enumerate() {
+                    let query_start = kv_head * GROUP_SIZE * HEAD_DIMENSION;
+                    let key_start = block_start * HEAD_DIMENSION;
+                    let key_end = block_end * HEAD_DIMENSION;
+                    dot_rows_f16_grouped(
+                        &queries[query_start..query_start + GROUP_SIZE * HEAD_DIMENSION],
+                        GROUP_SIZE,
+                        &key_bank[key_start..key_end],
+                        BLOCK_SIZE,
+                        HEAD_DIMENSION,
+                        0,
+                        &mut scalar_fused_block,
+                    )
+                    .expect("scalar-fused grouped QK");
+                    for head in 0..GROUP_SIZE {
+                        let scores =
+                            &mut scalar_fused_block[head * BLOCK_SIZE..(head + 1) * BLOCK_SIZE];
+                        let maximum =
+                            scores.iter_mut().fold(f64::NEG_INFINITY, |maximum, score| {
+                                *score *= scale;
+                                maximum.max(*score)
+                            });
+                        let query_head = kv_head * GROUP_SIZE + head;
+                        scalar_fused_maxima[query_head * BLOCKS + block_index] = maximum;
+                        scalar_fused_scores
+                            [query_head * CONTEXT + block_start..query_head * CONTEXT + block_end]
+                            .copy_from_slice(scores);
+                        black_box(maximum);
+                    }
+                }
+            }
+            black_box((&scalar_fused_scores, &scalar_fused_maxima));
+            started.elapsed()
+        };
+        let mut run_fused = || {
+            let started = Instant::now();
+            for block_index in 0..BLOCKS {
+                let block_start = block_index * BLOCK_SIZE;
+                let block_end = block_start + BLOCK_SIZE;
+                for (kv_head, key_bank) in keys.iter().enumerate() {
+                    let query_start = kv_head * GROUP_SIZE * HEAD_DIMENSION;
+                    let key_start = block_start * HEAD_DIMENSION;
+                    let key_end = block_end * HEAD_DIMENSION;
+                    dot_rows_f16_grouped_scaled_max(
+                        &queries[query_start..query_start + GROUP_SIZE * HEAD_DIMENSION],
+                        &key_bank[key_start..key_end],
+                        GroupedAttentionScoreConfig {
+                            query_heads: GROUP_SIZE,
+                            rows: BLOCK_SIZE,
+                            row_stride: HEAD_DIMENSION,
+                            column_offset: 0,
+                            scale,
+                        },
+                        &mut fused_block,
+                        &mut fused_block_maxima,
+                    )
+                    .expect("fused grouped QK");
+                    for head in 0..GROUP_SIZE {
+                        let query_head = kv_head * GROUP_SIZE + head;
+                        fused_maxima[query_head * BLOCKS + block_index] = fused_block_maxima[head];
+                        fused_scores
+                            [query_head * CONTEXT + block_start..query_head * CONTEXT + block_end]
+                            .copy_from_slice(
+                                &fused_block[head * BLOCK_SIZE..(head + 1) * BLOCK_SIZE],
+                            );
+                    }
+                }
+            }
+            black_box((&fused_scores, &fused_maxima));
+            started.elapsed()
+        };
+
+        black_box(run_reference());
+        black_box(run_scalar_fused());
+        black_box(run_fused());
+        let mut reference_times = Vec::with_capacity(51);
+        let mut scalar_fused_times = Vec::with_capacity(51);
+        let mut fused_times = Vec::with_capacity(51);
+        for sample in 0_usize..51 {
+            match sample % 3 {
+                0 => {
+                    reference_times.push(run_reference());
+                    scalar_fused_times.push(run_scalar_fused());
+                    fused_times.push(run_fused());
+                }
+                1 => {
+                    scalar_fused_times.push(run_scalar_fused());
+                    fused_times.push(run_fused());
+                    reference_times.push(run_reference());
+                }
+                _ => {
+                    fused_times.push(run_fused());
+                    reference_times.push(run_reference());
+                    scalar_fused_times.push(run_scalar_fused());
+                }
+            }
+        }
+        reference_times.sort_unstable();
+        scalar_fused_times.sort_unstable();
+        fused_times.sort_unstable();
+        for index in 0..QUERY_HEADS * CONTEXT {
+            assert_eq!(fused_scores[index], reference_scores[index]);
+            assert_eq!(scalar_fused_scores[index], reference_scores[index]);
+        }
+        for head in 0..QUERY_HEADS {
+            for block_index in 0..BLOCKS {
+                assert_eq!(
+                    scalar_fused_maxima[head * BLOCKS + block_index],
+                    reference_maxima[head * BLOCKS + block_index]
+                );
+                assert_eq!(
+                    fused_maxima[head * BLOCKS + block_index],
+                    reference_maxima[head * BLOCKS + block_index]
+                );
+            }
+        }
+        eprintln!(
+            "qwen-grouped-qk-scale-max context={CONTEXT} block={BLOCK_SIZE} query_heads={QUERY_HEADS} kv_heads={KV_HEADS} head_dim={HEAD_DIMENSION} samples=51 reference_p50_us={} reference_p95_us={} scalar_fused_p50_us={} scalar_fused_p95_us={} kernel_fused_p50_us={} kernel_fused_p95_us={}",
+            reference_times[25].as_nanos() / 1_000,
+            reference_times[48].as_nanos() / 1_000,
+            scalar_fused_times[25].as_nanos() / 1_000,
+            scalar_fused_times[48].as_nanos() / 1_000,
+            fused_times[25].as_nanos() / 1_000,
+            fused_times[48].as_nanos() / 1_000,
+        );
+    }
+
+    #[test]
     #[ignore = "release-only binary16 attention-kernel latency measurement"]
     fn binary16_attention_kernel_latency_measurement() {
         use std::hint::black_box;
@@ -3361,6 +5238,199 @@ mod tests {
         }
     }
 
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn avx2_q4_projection_matches_reference_across_nibble_and_scale_boundaries() {
+        if !super::native_x86_avx2_available() {
+            return;
+        }
+
+        for (rows, columns, group_size) in [(5, 7, 9), (3, 257, 16), (4, 65, 31), (2, 1024, 128)] {
+            let elements: usize = rows * columns;
+            let quantized = (0..elements)
+                .map(|index| ((index * 29 + 11) % 16) as u8)
+                .collect::<Vec<_>>();
+            let packed = quantized
+                .chunks(2)
+                .map(|pair| pair[0] | (pair.get(1).copied().unwrap_or(8) << 4))
+                .collect::<Vec<_>>();
+            let scales = (0..elements.div_ceil(group_size))
+                .map(|group| 0.001 + (group % 23) as f32 * 0.00017)
+                .collect::<Vec<_>>();
+            let input = (0..columns)
+                .map(|column| ((column as f32 - 37.0) * 0.043).cos())
+                .collect::<Vec<_>>();
+            let actual = project_q4(&packed, &scales, &input, rows, columns, group_size)
+                .expect("AVX2 Q4 projection");
+            let expected = scalar_reference(&packed, &scales, &input, rows, columns, group_size);
+            for (actual, expected) in actual.iter().zip(expected) {
+                let tolerance = 2.0e-5 + expected.abs() * 2.0e-5;
+                assert!(
+                    (actual - expected).abs() <= tolerance,
+                    "AVX2 {actual} != scalar {expected}"
+                );
+            }
+        }
+
+        let rows = 3;
+        let columns = 33;
+        let group_size = 13;
+        let elements: usize = rows * columns;
+        let quantized = (0..elements)
+            .map(|index| ((index * 7 + 2) % 16) as u8)
+            .collect::<Vec<_>>();
+        let packed = quantized
+            .chunks(2)
+            .map(|pair| pair[0] | (pair.get(1).copied().unwrap_or(8) << 4))
+            .collect::<Vec<_>>();
+        let scales = vec![1.0e-38; elements.div_ceil(group_size)];
+        let input = vec![f32::MAX; columns];
+        let actual = project_q4(&packed, &scales, &input, rows, columns, group_size)
+            .expect("AVX2 f64 accumulation handles extreme finite activations");
+        let expected = scalar_reference(&packed, &scales, &input, rows, columns, group_size);
+        for (actual, expected) in actual.iter().zip(expected) {
+            assert!((actual - expected).abs() <= expected.abs() * 2.0e-5 + 1.0e-3);
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    #[ignore = "release-only AVX2 versus scalar grouped-Q4 projection benchmark"]
+    fn avx2_q4_projection_latency_measurement() {
+        use std::hint::black_box;
+        use std::time::{Duration, Instant};
+
+        if !super::native_x86_avx2_available() {
+            eprintln!("AVX2 unavailable; no x86 projection measurement was collected");
+            return;
+        }
+
+        let rows = 1024usize;
+        let columns = 4096usize;
+        let group_size = 64usize;
+        let elements = rows * columns;
+        let packed = (0..elements.div_ceil(2))
+            .map(|index| (index.wrapping_mul(37).wrapping_add(9) & 0xff) as u8)
+            .collect::<Vec<_>>();
+        let scales = (0..elements.div_ceil(group_size))
+            .map(|index| 0.004 + (index % 19) as f32 * 0.0003)
+            .collect::<Vec<_>>();
+        let input = (0..columns)
+            .map(|index| ((index as f32 * 0.013) - 9.0).sin())
+            .collect::<Vec<_>>();
+        let mut scalar_output = vec![0.0f32; rows];
+        let mut avx2_output = vec![0.0f32; rows];
+
+        fn measure_scalar(
+            packed: &[u8],
+            scales: &[f32],
+            input: &[f32],
+            columns: usize,
+            group_size: usize,
+            output: &mut [f32],
+        ) -> Duration {
+            let started = Instant::now();
+            super::project_q4_scalar_range(packed, scales, input, columns, group_size, 0, output)
+                .expect("scalar Q4 projection");
+            black_box(output);
+            started.elapsed()
+        }
+
+        fn measure_avx2(
+            packed: &[u8],
+            scales: &[f32],
+            input: &[f32],
+            columns: usize,
+            group_size: usize,
+            output: &mut [f32],
+        ) -> Duration {
+            let started = Instant::now();
+            // SAFETY: the test checks runtime AVX2 support and uses bounded,
+            // finite inputs with geometry matched to the allocated buffers.
+            unsafe {
+                super::project_q4_avx2_range(packed, scales, input, columns, group_size, 0, output)
+            }
+            .expect("AVX2 Q4 projection");
+            black_box(output);
+            started.elapsed()
+        }
+
+        for _ in 0..4 {
+            measure_scalar(
+                &packed,
+                &scales,
+                &input,
+                columns,
+                group_size,
+                &mut scalar_output,
+            );
+            measure_avx2(
+                &packed,
+                &scales,
+                &input,
+                columns,
+                group_size,
+                &mut avx2_output,
+            );
+        }
+
+        let mut scalar_samples = Vec::with_capacity(51);
+        let mut avx2_samples = Vec::with_capacity(51);
+        for sample in 0..51 {
+            if sample % 2 == 0 {
+                scalar_samples.push(measure_scalar(
+                    &packed,
+                    &scales,
+                    &input,
+                    columns,
+                    group_size,
+                    &mut scalar_output,
+                ));
+                avx2_samples.push(measure_avx2(
+                    &packed,
+                    &scales,
+                    &input,
+                    columns,
+                    group_size,
+                    &mut avx2_output,
+                ));
+            } else {
+                avx2_samples.push(measure_avx2(
+                    &packed,
+                    &scales,
+                    &input,
+                    columns,
+                    group_size,
+                    &mut avx2_output,
+                ));
+                scalar_samples.push(measure_scalar(
+                    &packed,
+                    &scales,
+                    &input,
+                    columns,
+                    group_size,
+                    &mut scalar_output,
+                ));
+            }
+        }
+        scalar_samples.sort_unstable();
+        avx2_samples.sort_unstable();
+        let scalar_p50 = scalar_samples[25].as_nanos();
+        let scalar_p95 = scalar_samples[48].as_nanos();
+        let avx2_p50 = avx2_samples[25].as_nanos();
+        let avx2_p95 = avx2_samples[48].as_nanos();
+        let maximum_absolute_error = scalar_output
+            .iter()
+            .zip(&avx2_output)
+            .map(|(scalar, avx2)| f64::from((*scalar - *avx2).abs()))
+            .fold(0.0f64, f64::max);
+        println!(
+            "grouped-q4-avx2 rows={rows} columns={columns} group_size={group_size} samples=51 scalar_p50_ns={scalar_p50} scalar_p95_ns={scalar_p95} avx2_p50_ns={avx2_p50} avx2_p95_ns={avx2_p95} p50_speedup={:.3} max_abs_error={maximum_absolute_error}",
+            scalar_p50 as f64 / avx2_p50 as f64
+        );
+        assert!(maximum_absolute_error <= 2.0e-5);
+    }
+
     #[test]
     fn large_q4_projection_matches_scalar_reference_across_parallel_row_chunks() {
         let rows = super::MIN_PARALLEL_Q4_ROWS;
@@ -3383,7 +5453,22 @@ mod tests {
 
         let actual = project_q4(&packed, &scales, &input, rows, columns, group_size)
             .expect("large Q4 row-parallel projection");
+        let fused = project_q4_argmax(&packed, &scales, &input, rows, columns, group_size)
+            .expect("large Q4 row-parallel fused argmax");
         let expected = scalar_reference(&packed, &scales, &input, rows, columns, group_size);
+        let expected_argmax = actual
+            .iter()
+            .copied()
+            .enumerate()
+            .fold(None, |best: Option<(usize, f32)>, candidate| {
+                if best.is_none_or(|prior| candidate.1 > prior.1) {
+                    Some(candidate)
+                } else {
+                    best
+                }
+            })
+            .expect("projected rows");
+        assert_eq!(fused, expected_argmax);
         for (actual, expected) in actual.iter().zip(expected) {
             let tolerance = 3.0e-5 + expected.abs() * 3.0e-5;
             assert!(
@@ -3585,6 +5670,59 @@ mod tests {
     }
 
     #[test]
+    fn q4_batch_projection_parallel_rows_match_individual_projections() {
+        let rows = 256usize;
+        let columns = 512usize;
+        let group_size = 127usize;
+        let batch_size = 4usize;
+        let elements = rows * columns;
+        let packed = (0..elements.div_ceil(2))
+            .map(|index| (index.wrapping_mul(31) ^ 0x6d) as u8)
+            .collect::<Vec<_>>();
+        let scales = (0..elements.div_ceil(group_size))
+            .map(|index| 0.009 + (index % 13) as f32 * 0.0007)
+            .collect::<Vec<_>>();
+        let input = (0..batch_size * columns)
+            .map(|index| ((index.wrapping_mul(23) % 193) as f32 - 96.0) * 0.002)
+            .collect::<Vec<_>>();
+        let mut output = vec![f32::NAN; batch_size * rows];
+        let mut scratch = vec![f32::NAN; columns * batch_size];
+
+        project_q4_batch_into(
+            &packed,
+            &scales,
+            &input,
+            rows,
+            columns,
+            group_size,
+            batch_size,
+            &mut scratch,
+            &mut output,
+        )
+        .expect("row-parallel Q4 batch projection");
+
+        for batch in 0..batch_size {
+            let expected = project_q4(
+                &packed,
+                &scales,
+                &input[batch * columns..(batch + 1) * columns],
+                rows,
+                columns,
+                group_size,
+            )
+            .expect("individual Q4 projection");
+            for (observed, reference) in output[batch * rows..(batch + 1) * rows]
+                .iter()
+                .zip(expected)
+            {
+                let tolerance = 5.0e-5 + reference.abs() * 5.0e-5;
+                assert!((observed - reference).abs() <= tolerance);
+            }
+        }
+        assert!(scratch.iter().all(|value| *value == 0.0));
+    }
+
+    #[test]
     fn q4_batch_projection_clears_outputs_and_scratch_after_invalid_input() {
         let mut output = [7.0; 2];
         let mut scratch = [9.0; 3];
@@ -3734,6 +5872,515 @@ mod tests {
             .is_err()
         );
         assert_eq!(selected[0], 0.0);
+    }
+
+    #[test]
+    fn q4_fused_argmax_matches_projection_and_keeps_lowest_row_on_ties() {
+        for (rows, columns, group_size) in [(5, 7, 9), (3, 257, 16), (4, 65, 31)] {
+            let elements: usize = rows * columns;
+            let quantized = (0..elements)
+                .map(|index| ((index * 17 + 5) % 15) as u8)
+                .collect::<Vec<_>>();
+            let packed = quantized
+                .chunks(2)
+                .map(|pair| pair[0] | (pair.get(1).copied().unwrap_or(8) << 4))
+                .collect::<Vec<_>>();
+            let scales = (0..elements.div_ceil(group_size))
+                .map(|group| 0.001 + group as f32 * 0.0003)
+                .collect::<Vec<_>>();
+            let input = (0..columns)
+                .map(|column| ((column as f32 - 23.0) * 0.071).sin())
+                .collect::<Vec<_>>();
+            let projected = project_q4(&packed, &scales, &input, rows, columns, group_size)
+                .expect("dense Q4 reference");
+            let expected = projected
+                .iter()
+                .copied()
+                .enumerate()
+                .fold(None, |best: Option<(usize, f32)>, candidate| {
+                    if best.is_none_or(|prior| candidate.1 > prior.1) {
+                        Some(candidate)
+                    } else {
+                        best
+                    }
+                })
+                .expect("projected rows");
+            assert_eq!(
+                project_q4_argmax(&packed, &scales, &input, rows, columns, group_size)
+                    .expect("fused Q4 argmax"),
+                expected
+            );
+        }
+
+        let tied =
+            project_q4_argmax(&[0x88, 0x88], &[0.25; 2], &[1.0], 3, 1, 2).expect("tied Q4 rows");
+        assert_eq!(tied, (0, 0.0));
+        assert!(project_q4_argmax(&[0x88], &[1.0], &[f32::NAN], 1, 1, 1).is_err());
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn q4_neon_two_row_tiles_match_the_independent_row_kernel() {
+        let rows = 9usize;
+        let columns = 256usize;
+        let group_size = 128usize;
+        let elements = rows * columns;
+        let packed = (0..elements.div_ceil(2))
+            .map(|index| (index.wrapping_mul(37) ^ 0x93) as u8)
+            .collect::<Vec<_>>();
+        let scales = (0..elements.div_ceil(group_size))
+            .map(|index| 0.001 + (index % 19) as f32 * 0.0007)
+            .collect::<Vec<_>>();
+        let input = (0..columns)
+            .map(|index| ((index.wrapping_mul(23) % 251) as f32 - 125.0) * 0.001)
+            .collect::<Vec<_>>();
+
+        for (first_row, row_count) in [(0, 9), (1, 7), (2, 5), (8, 1)] {
+            let mut expected = vec![f32::NAN; row_count];
+            let mut actual = vec![f32::NAN; row_count];
+            // SAFETY: this fixture has validated matrix geometry, finite
+            // activations, and in-range output slices for both kernels.
+            unsafe {
+                super::project_q4_neon_range_reference(
+                    &packed,
+                    &scales,
+                    &input,
+                    columns,
+                    group_size,
+                    first_row,
+                    &mut expected,
+                )
+                .expect("reference NEON rows");
+                super::project_q4_neon_range(
+                    &packed,
+                    &scales,
+                    &input,
+                    columns,
+                    group_size,
+                    first_row,
+                    &mut actual,
+                )
+                .expect("paired NEON rows");
+            }
+            assert_eq!(
+                actual,
+                expected,
+                "rows {first_row}..{}",
+                first_row + row_count
+            );
+        }
+
+        let rows = 7usize;
+        let columns = 19usize;
+        let group_size = 11usize;
+        let elements = rows * columns;
+        let packed = (0..elements.div_ceil(2))
+            .map(|index| (index.wrapping_mul(29) ^ 0x5b) as u8)
+            .collect::<Vec<_>>();
+        let scales = (0..elements.div_ceil(group_size))
+            .map(|index| 0.02 + index as f32 * 0.001)
+            .collect::<Vec<_>>();
+        let input = (0..columns)
+            .map(|index| ((index as f32 - 7.0) * 0.031).sin())
+            .collect::<Vec<_>>();
+        let mut expected = vec![0.0; rows];
+        let mut fallback = vec![0.0; rows];
+        // SAFETY: both calls use the same validated odd-row reference fixture;
+        // the optimized dispatcher intentionally falls back for this shape.
+        unsafe {
+            super::project_q4_neon_range_reference(
+                &packed,
+                &scales,
+                &input,
+                columns,
+                group_size,
+                0,
+                &mut expected,
+            )
+            .expect("odd-shape reference NEON rows");
+            super::project_q4_neon_range(
+                &packed,
+                &scales,
+                &input,
+                columns,
+                group_size,
+                0,
+                &mut fallback,
+            )
+            .expect("odd-shape row fallback");
+        }
+        assert_eq!(fallback, expected);
+    }
+
+    #[test]
+    fn persistent_q4_projection_pool_matches_scoped_workers_under_concurrent_calls() {
+        let rows = 512usize;
+        let columns = 4096usize;
+        let group_size = 128usize;
+        let elements = rows * columns;
+        let packed = Arc::new(
+            (0..elements.div_ceil(2))
+                .map(|index| {
+                    let low = ((index * 2 * 13 + 5) % 15) as u8;
+                    let high = ((index * 2 * 13 + 18) % 15) as u8;
+                    low | (high << 4)
+                })
+                .collect::<Vec<_>>(),
+        );
+        let scales = Arc::new(
+            (0..elements.div_ceil(group_size))
+                .map(|index| 0.005 + (index % 31) as f32 * 0.0001)
+                .collect::<Vec<_>>(),
+        );
+        let input = (0..columns)
+            .map(|index| ((index * 17 % 251) as f32 - 125.0) * 0.001)
+            .collect::<Vec<_>>();
+        let mut expected = vec![0.0; rows];
+        project_q4_into(
+            &packed,
+            &scales,
+            &input,
+            rows,
+            columns,
+            group_size,
+            &mut expected,
+        )
+        .expect("scoped reference projection");
+
+        std::thread::scope(|scope| {
+            let mut calls = Vec::new();
+            for _ in 0..4 {
+                let packed = Arc::clone(&packed);
+                let scales = Arc::clone(&scales);
+                let input = input.clone();
+                calls.push(scope.spawn(move || {
+                    let mut actual = vec![f32::NAN; rows];
+                    project_q4_into_pooled(
+                        packed,
+                        scales,
+                        &input,
+                        rows,
+                        columns,
+                        group_size,
+                        &mut actual,
+                    )
+                    .expect("persistent pooled projection");
+                    actual
+                }));
+            }
+            for call in calls {
+                assert_eq!(
+                    call.join().expect("projection caller remains healthy"),
+                    expected
+                );
+            }
+        });
+
+        let mut rejected = vec![1.0; rows];
+        assert!(
+            project_q4_into_pooled(
+                Arc::clone(&packed),
+                Arc::clone(&scales),
+                &[f32::NAN; 4096],
+                rows,
+                columns,
+                group_size,
+                &mut rejected,
+            )
+            .is_err()
+        );
+        assert!(rejected.iter().all(|value| *value == 0.0));
+    }
+
+    #[test]
+    #[ignore = "release-only representative Qwen MLP scoped versus persistent Q4 projection measurement"]
+    fn qwen_mlp_q4_projection_worker_pool_latency_measurement() {
+        use std::time::Instant;
+
+        let rows = 11_008usize;
+        let columns = 2_560usize;
+        let group_size = 128usize;
+        let elements = rows * columns;
+        let packed = Arc::new(
+            (0..elements.div_ceil(2))
+                .map(|index| {
+                    let low = ((index * 2 * 13 + 5) % 15) as u8;
+                    let high = ((index * 2 * 13 + 18) % 15) as u8;
+                    low | (high << 4)
+                })
+                .collect::<Vec<_>>(),
+        );
+        let scales = Arc::new(
+            (0..elements.div_ceil(group_size))
+                .map(|index| 0.005 + (index % 31) as f32 * 0.0001)
+                .collect::<Vec<_>>(),
+        );
+        let input = (0..columns)
+            .map(|index| ((index * 17 % 251) as f32 - 125.0) * 0.001)
+            .collect::<Vec<_>>();
+        let mut scoped_output = vec![0.0; rows];
+        let mut pooled_output = vec![0.0; rows];
+        project_q4_into(
+            &packed,
+            &scales,
+            &input,
+            rows,
+            columns,
+            group_size,
+            &mut scoped_output,
+        )
+        .expect("scoped Qwen MLP warmup");
+        let startup_started = Instant::now();
+        project_q4_into_pooled(
+            Arc::clone(&packed),
+            Arc::clone(&scales),
+            &input,
+            rows,
+            columns,
+            group_size,
+            &mut pooled_output,
+        )
+        .expect("pooled Qwen MLP warmup");
+        let pool_warmup_ns = startup_started.elapsed().as_nanos();
+        assert_eq!(scoped_output, pooled_output);
+
+        let mut scoped_samples = Vec::with_capacity(60);
+        let mut pooled_samples = Vec::with_capacity(60);
+        for iteration in 0..120 {
+            let started = Instant::now();
+            if iteration % 2 == 0 {
+                project_q4_into(
+                    &packed,
+                    &scales,
+                    &input,
+                    rows,
+                    columns,
+                    group_size,
+                    &mut scoped_output,
+                )
+                .expect("scoped Qwen MLP projection");
+                scoped_samples.push(started.elapsed().as_nanos());
+            } else {
+                project_q4_into_pooled(
+                    Arc::clone(&packed),
+                    Arc::clone(&scales),
+                    &input,
+                    rows,
+                    columns,
+                    group_size,
+                    &mut pooled_output,
+                )
+                .expect("pooled Qwen MLP projection");
+                pooled_samples.push(started.elapsed().as_nanos());
+            }
+        }
+        assert_eq!(scoped_output, pooled_output);
+        scoped_samples.sort_unstable();
+        pooled_samples.sort_unstable();
+        let scoped_p50 = scoped_samples[scoped_samples.len() / 2];
+        let pooled_p50 = pooled_samples[pooled_samples.len() / 2];
+        let scoped_p95 = scoped_samples[(scoped_samples.len() * 95).div_ceil(100) - 1];
+        let pooled_p95 = pooled_samples[(pooled_samples.len() * 95).div_ceil(100) - 1];
+        println!(
+            "Qwen MLP Q4 projection rows={rows} columns={columns} samples={} scoped_p50_us={} scoped_p95_us={} pooled_p50_us={} pooled_p95_us={} pool_warmup_ms={:.3} pooled_speedup_p50={:.3}",
+            scoped_samples.len(),
+            scoped_p50 / 1_000,
+            scoped_p95 / 1_000,
+            pooled_p50 / 1_000,
+            pooled_p95 / 1_000,
+            pool_warmup_ns as f64 / 1_000_000.0,
+            scoped_p50 as f64 / pooled_p50 as f64,
+        );
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    #[ignore = "release-only two-row Q4 activation reuse measurement"]
+    fn qwen_mlp_q4_two_row_activation_reuse_latency_measurement() {
+        use std::time::Instant;
+
+        let rows = 11_008usize;
+        let columns = 2_560usize;
+        let group_size = 128usize;
+        let elements = rows * columns;
+        let packed = (0..elements.div_ceil(2))
+            .map(|index| (index.wrapping_mul(37) ^ 0x93) as u8)
+            .collect::<Vec<_>>();
+        let scales = (0..elements.div_ceil(group_size))
+            .map(|index| 0.001 + (index % 19) as f32 * 0.0007)
+            .collect::<Vec<_>>();
+        let input = (0..columns)
+            .map(|index| ((index.wrapping_mul(23) % 251) as f32 - 125.0) * 0.001)
+            .collect::<Vec<_>>();
+        let workers = super::inference_cpu_worker_limit().min(rows);
+        let mut row_output = vec![0.0; rows];
+        let mut paired_output = vec![0.0; rows];
+
+        let project = |paired: bool, output: &mut [f32]| {
+            run_q4_workers(output, workers, |first_row, output_chunk| {
+                // SAFETY: the release fixture validates every kernel bound;
+                // each worker owns a distinct output-row segment.
+                unsafe {
+                    if paired {
+                        super::project_q4_neon_range(
+                            &packed,
+                            &scales,
+                            &input,
+                            columns,
+                            group_size,
+                            first_row,
+                            output_chunk,
+                        )
+                    } else {
+                        super::project_q4_neon_range_reference(
+                            &packed,
+                            &scales,
+                            &input,
+                            columns,
+                            group_size,
+                            first_row,
+                            output_chunk,
+                        )
+                    }
+                }
+            })
+            .expect("bounded workers start")
+            .expect("valid Qwen MLP projection");
+        };
+
+        project(false, &mut row_output);
+        project(true, &mut paired_output);
+        assert_eq!(paired_output, row_output);
+
+        let mut row_samples = Vec::with_capacity(61);
+        let mut paired_samples = Vec::with_capacity(61);
+        for iteration in 0..122 {
+            let started = Instant::now();
+            if iteration % 2 == 0 {
+                project(false, &mut row_output);
+                row_samples.push(started.elapsed().as_nanos());
+                assert_eq!(paired_output, row_output);
+            } else {
+                project(true, &mut paired_output);
+                paired_samples.push(started.elapsed().as_nanos());
+                assert_eq!(paired_output, row_output);
+            }
+        }
+        row_samples.sort_unstable();
+        paired_samples.sort_unstable();
+        let percentile = |samples: &[u128], numerator: usize| {
+            samples[(samples.len() * numerator).div_ceil(100) - 1]
+        };
+        let row_p50 = row_samples[row_samples.len() / 2];
+        let paired_p50 = paired_samples[paired_samples.len() / 2];
+        println!(
+            "Qwen MLP Q4 paired activation reuse rows={rows} columns={columns} workers={workers} samples={} row_p50_us={} row_p95_us={} paired_p50_us={} paired_p95_us={} p50_speedup={:.3}",
+            row_samples.len(),
+            row_p50 / 1_000,
+            percentile(&row_samples, 95) / 1_000,
+            paired_p50 / 1_000,
+            percentile(&paired_samples, 95) / 1_000,
+            row_p50 as f64 / paired_p50 as f64,
+        );
+    }
+
+    #[test]
+    #[ignore = "release-only full-vocabulary Q4 dense versus fused output-head benchmark"]
+    fn qwen_output_head_fused_argmax_latency_measurement() {
+        use std::time::Instant;
+
+        let rows = 151_936usize;
+        let columns = 2_560usize;
+        let group_size = 128usize;
+        let elements = rows * columns;
+        let packed = (0..elements.div_ceil(2))
+            .map(|index| (index.wrapping_mul(37) ^ 0x97) as u8)
+            .collect::<Vec<_>>();
+        let scales = (0..elements.div_ceil(group_size))
+            .map(|index| 0.0125 + (index % 17) as f32 * 0.0001)
+            .collect::<Vec<_>>();
+        let input = (0..columns)
+            .map(|index| ((index.wrapping_mul(29) % 251) as f32 - 125.0) * 0.001)
+            .collect::<Vec<_>>();
+        let mut logits = vec![0.0; rows];
+        project_q4_into(
+            &packed,
+            &scales,
+            &input,
+            rows,
+            columns,
+            group_size,
+            &mut logits,
+        )
+        .expect("dense output-head warmup");
+        let dense_winner = logits
+            .iter()
+            .copied()
+            .enumerate()
+            .fold(None, |best: Option<(usize, f32)>, candidate| {
+                if best.is_none_or(|prior| candidate.1 > prior.1) {
+                    Some(candidate)
+                } else {
+                    best
+                }
+            })
+            .expect("dense output rows");
+        let fused_winner = project_q4_argmax(&packed, &scales, &input, rows, columns, group_size)
+            .expect("fused output-head warmup");
+        assert_eq!(dense_winner, fused_winner);
+
+        let mut dense_samples = Vec::with_capacity(51);
+        let mut fused_samples = Vec::with_capacity(51);
+        for iteration in 0..102 {
+            let started = Instant::now();
+            if iteration % 2 == 0 {
+                project_q4_into(
+                    &packed,
+                    &scales,
+                    &input,
+                    rows,
+                    columns,
+                    group_size,
+                    &mut logits,
+                )
+                .expect("dense output-head projection");
+                let winner = logits
+                    .iter()
+                    .copied()
+                    .enumerate()
+                    .fold(None, |best: Option<(usize, f32)>, candidate| {
+                        if best.is_none_or(|prior| candidate.1 > prior.1) {
+                            Some(candidate)
+                        } else {
+                            best
+                        }
+                    })
+                    .expect("dense output rows");
+                dense_samples.push(started.elapsed().as_nanos());
+                assert_eq!(winner, fused_winner);
+            } else {
+                let winner = project_q4_argmax(&packed, &scales, &input, rows, columns, group_size)
+                    .expect("fused output-head argmax");
+                fused_samples.push(started.elapsed().as_nanos());
+                assert_eq!(winner, dense_winner);
+            }
+        }
+        dense_samples.sort_unstable();
+        fused_samples.sort_unstable();
+        let percentile = |samples: &[u128], numerator: usize| {
+            samples[(samples.len() * numerator).div_ceil(100) - 1]
+        };
+        let dense_p50 = dense_samples[dense_samples.len() / 2];
+        let fused_p50 = fused_samples[fused_samples.len() / 2];
+        println!(
+            "Qwen output head rows={rows} columns={columns} samples={} dense_p50_us={} dense_p95_us={} fused_p50_us={} fused_p95_us={} p50_speedup={:.3}",
+            dense_samples.len(),
+            dense_p50 / 1_000,
+            percentile(&dense_samples, 95) / 1_000,
+            fused_p50 / 1_000,
+            percentile(&fused_samples, 95) / 1_000,
+            dense_p50 as f64 / fused_p50 as f64,
+        );
     }
 
     #[test]

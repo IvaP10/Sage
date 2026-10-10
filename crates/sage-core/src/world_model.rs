@@ -132,6 +132,10 @@ pub enum EvidenceOrigin {
     Application,
     Browser,
     DeviceAdvertisement,
+    /// Evidence that a capability is implemented by a sealed Sage executor.
+    /// This is source registration, not an observation of user data or an
+    /// experimental UI action.
+    SageCode,
     User,
     Model,
 }
@@ -452,6 +456,9 @@ pub struct WorldRelation {
 pub enum CapabilityEvidenceState {
     HypothesisOnly,
     PassivelyObserved,
+    /// The operation is backed by an exact first-party Sage code contract.
+    /// It has not been inferred from a UI or promoted by experimentation.
+    SageCodeRegistered,
     ReversiblyExperimented,
 }
 
@@ -462,6 +469,41 @@ pub struct CapabilityAssessment {
     /// Descriptive evidence strength. This is deliberately not a claim that
     /// the capability is safe or authorized for execution.
     pub evidence_state: CapabilityEvidenceState,
+    /// A target- and control-scoped summary of safe-probe restoration receipts.
+    /// It is descriptive evidence only and never changes execution authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restoration_evidence: Option<RestorationEvidence>,
+}
+
+/// A short-window estimate of whether Sage's bounded experiment restored the
+/// exact prior control value. This does not estimate task success or causal
+/// effect quality. The Wilson interval exposes uncertainty at low sample sizes.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RestorationEvidence {
+    pub verified_restorations: u64,
+    pub failed_or_unverified_attempts: u64,
+    pub unsettled_attempts: u64,
+    pub empirical_restoration_rate: Option<f64>,
+    pub wilson_95_interval: Option<[f64; 2]>,
+}
+
+fn wilson_interval(successes: u64, failures: u64) -> Option<[f64; 2]> {
+    let trials = successes.saturating_add(failures);
+    if trials == 0 {
+        return None;
+    }
+
+    // 1.959963984540054 is the 97.5th percentile of the standard normal.
+    let z = 1.959_963_984_540_054_f64;
+    let n = trials as f64;
+    let observed = successes as f64 / n;
+    let z_squared = z * z;
+    let denominator = 1.0 + z_squared / n;
+    let center = (observed + z_squared / (2.0 * n)) / denominator;
+    let margin =
+        z * ((observed * (1.0 - observed) / n + z_squared / (4.0 * n * n)).sqrt()) / denominator;
+    Some([(center - margin).max(0.0), (center + margin).min(1.0)])
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1318,6 +1360,13 @@ impl LocalStore {
                             .collect::<BTreeSet<_>>();
                         evidence.extend(ids);
                         capability_to_store.evidence_ids = evidence.into_iter().collect();
+                        // A fresh passive scan may refresh a verified capability's
+                        // descriptive evidence, but must not downgrade the executor
+                        // established by this exact, current restoration receipt.
+                        // Without this merge, ordinary rediscovery would silently
+                        // turn every learned control back into a hypothesis.
+                        capability_to_store.executor_id =
+                            Some("set_application_control".into());
                     }
                 }
             }
@@ -1380,6 +1429,7 @@ impl LocalStore {
                 let descriptor: CapabilityDescriptor = serde_json::from_str(&serialized)?;
                 descriptor.validate()?;
                 let mut saw_passive = false;
+                let mut all_evidence_from_sage_code = true;
                 let mut saw_probe = false;
                 let mut all_evidence_current = true;
                 for evidence_id in &descriptor.evidence_ids {
@@ -1392,7 +1442,8 @@ impl LocalStore {
                         .optional()?;
                     if let Some(origin) = origin {
                         let parsed: EvidenceOrigin = serde_json::from_str(&origin)?;
-                        saw_passive |= parsed != EvidenceOrigin::Model;
+                        saw_passive |= !matches!(parsed, EvidenceOrigin::Model | EvidenceOrigin::SageCode);
+                        all_evidence_from_sage_code &= parsed == EvidenceOrigin::SageCode;
                     } else {
                         all_evidence_current = false;
                     }
@@ -1408,12 +1459,31 @@ impl LocalStore {
                 }
                 let evidence_state = if saw_probe {
                     CapabilityEvidenceState::ReversiblyExperimented
+                } else if all_evidence_from_sage_code {
+                    CapabilityEvidenceState::SageCodeRegistered
                 } else if saw_passive {
                     CapabilityEvidenceState::PassivelyObserved
                 } else {
                     CapabilityEvidenceState::HypothesisOnly
                 };
-                assessments.push(CapabilityAssessment { descriptor, evidence_state });
+                let restoration_evidence = match (
+                    descriptor.interface_control_id.as_deref(),
+                    descriptor.interface_probe_kind,
+                ) {
+                    (Some(control_id), Some(kind)) => Some(restoration_evidence(
+                        db,
+                        system_id,
+                        &fingerprint,
+                        control_id,
+                        kind,
+                    )?),
+                    _ => None,
+                };
+                assessments.push(CapabilityAssessment {
+                    descriptor,
+                    evidence_state,
+                    restoration_evidence,
+                });
             }
             Ok(assessments)
         })
@@ -2170,6 +2240,58 @@ fn value_digest(value: &FactValue) -> CoreResult<String> {
     Ok(format!("{:x}", Sha256::digest(canonical)))
 }
 
+fn restoration_evidence(
+    db: &rusqlite::Connection,
+    system_id: Uuid,
+    fingerprint: &str,
+    control_id: &str,
+    kind: ProbeKind,
+) -> CoreResult<RestorationEvidence> {
+    let now = Utc::now();
+    let cutoff = (now - Duration::days(OBSERVATION_RETENTION_DAYS)).to_rfc3339();
+    let now_text = now.to_rfc3339();
+    let system_id = system_id.to_string();
+    let kind = kind.name();
+    let verified_restorations: u64 = db.query_row(
+        "SELECT COUNT(*) FROM world_transitions t \
+         WHERE t.system_id=?1 AND t.control_id=?2 AND t.probe_kind=?3 AND t.confirmed_at>=?4 \
+         AND EXISTS(SELECT 1 FROM world_observations b \
+                    JOIN world_observations c ON c.id=t.changed_observation \
+                    JOIN world_observations r ON r.id=t.restored_observation \
+                    WHERE b.id=t.before_observation AND b.system_id=?1 AND c.system_id=?1 AND r.system_id=?1 \
+                    AND b.fingerprint=?5 AND c.fingerprint=?5 AND r.fingerprint=?5 \
+                    AND b.expires_at>?6 AND c.expires_at>?6 AND r.expires_at>?6)",
+        params![&system_id, control_id, kind, cutoff, fingerprint, &now_text],
+        |row| row.get(0),
+    )?;
+    let failed_or_unverified_attempts: u64 = db.query_row(
+        "SELECT COUNT(*) FROM world_probe_leases p \
+         JOIN world_learning_sessions s ON s.id=p.session_id \
+         WHERE s.system_id=?1 AND s.fingerprint=?2 AND p.control_id=?3 AND p.probe_kind=?4 \
+         AND p.state='failed' AND p.issued_at>=?5",
+        params![&system_id, fingerprint, control_id, kind, cutoff],
+        |row| row.get(0),
+    )?;
+    let unsettled_attempts: u64 = db.query_row(
+        "SELECT COUNT(*) FROM world_probe_leases p \
+         JOIN world_learning_sessions s ON s.id=p.session_id \
+         WHERE s.system_id=?1 AND s.fingerprint=?2 AND p.control_id=?3 AND p.probe_kind=?4 \
+         AND p.state='dispatched' AND p.issued_at>=?5",
+        params![&system_id, fingerprint, control_id, kind, cutoff],
+        |row| row.get(0),
+    )?;
+    let interval = wilson_interval(verified_restorations, failed_or_unverified_attempts);
+    let settled = verified_restorations.saturating_add(failed_or_unverified_attempts);
+    Ok(RestorationEvidence {
+        verified_restorations,
+        failed_or_unverified_attempts,
+        unsettled_attempts,
+        empirical_restoration_rate: (settled > 0)
+            .then_some(verified_restorations as f64 / settled as f64),
+        wilson_95_interval: interval,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2455,6 +2577,16 @@ mod tests {
                 .as_deref(),
             Some("set_application_control")
         );
+        let restoration_evidence = store.capability_assessments(session.system_id).unwrap()[0]
+            .restoration_evidence
+            .unwrap();
+        assert_eq!(restoration_evidence.verified_restorations, 1);
+        assert_eq!(restoration_evidence.failed_or_unverified_attempts, 0);
+        assert_eq!(restoration_evidence.unsettled_attempts, 0);
+        assert_eq!(restoration_evidence.empirical_restoration_rate, Some(1.0));
+        let [lower, upper] = restoration_evidence.wilson_95_interval.unwrap();
+        assert!(lower > 0.20 && lower < 0.21);
+        assert_eq!(upper, 1.0);
         let mut refreshed_scan = store
             .observations_for_system(session.system_id, None)
             .unwrap()
@@ -2472,6 +2604,13 @@ mod tests {
         assert_eq!(
             store.capability_assessments(session.system_id).unwrap()[0].evidence_state,
             CapabilityEvidenceState::ReversiblyExperimented
+        );
+        assert_eq!(
+            store.capability_assessments(session.system_id).unwrap()[0]
+                .descriptor
+                .executor_id
+                .as_deref(),
+            Some("set_application_control")
         );
         let settled = store.learning_session(session.id).unwrap().unwrap();
         assert_eq!(settled.state, LearningSessionState::InterruptedNeedsReview);
@@ -2510,6 +2649,14 @@ mod tests {
         store
             .record_probe_observations(lease.id, &observations, now)
             .unwrap();
+        let pending = store.capability_assessments(session.system_id).unwrap()[0]
+            .restoration_evidence
+            .unwrap();
+        assert_eq!(pending.verified_restorations, 0);
+        assert_eq!(pending.failed_or_unverified_attempts, 0);
+        assert_eq!(pending.unsettled_attempts, 1);
+        assert_eq!(pending.empirical_restoration_rate, None);
+        assert_eq!(pending.wilson_95_interval, None);
         assert!(
             store
                 .complete_probe(
@@ -2537,5 +2684,15 @@ mod tests {
                 .executor_id,
             None
         );
+        let failed = store.capability_assessments(session.system_id).unwrap()[0]
+            .restoration_evidence
+            .unwrap();
+        assert_eq!(failed.verified_restorations, 0);
+        assert_eq!(failed.failed_or_unverified_attempts, 1);
+        assert_eq!(failed.unsettled_attempts, 0);
+        assert_eq!(failed.empirical_restoration_rate, Some(0.0));
+        let [lower, upper] = failed.wilson_95_interval.unwrap();
+        assert_eq!(lower, 0.0);
+        assert!(upper > 0.79 && upper < 0.80);
     }
 }

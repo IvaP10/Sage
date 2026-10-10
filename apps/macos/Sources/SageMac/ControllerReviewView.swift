@@ -5,6 +5,7 @@ struct ControllerReviewView: View {
     let busy: Bool
     let status: String
     let review: () -> Void
+    let run: () -> Void
     let later: () -> Void
 
     private var steps: [ControllerDraftStep] { draft.steps ?? [] }
@@ -20,7 +21,7 @@ struct ControllerReviewView: View {
                     .foregroundStyle(.secondary)
             }
 
-            Text("Review the exact saved procedure below. Sage will passively inspect the current app and check every semantic control. It will not activate controls, run this procedure, or grant future permission.")
+            Text("Review compares the saved procedure with a fresh passive observation. It does not activate controls or grant future permission. Each run is a separate task and asks for fresh approval before every effect.")
                 .font(.system(size: 13))
                 .fixedSize(horizontal: false, vertical: true)
 
@@ -72,6 +73,10 @@ struct ControllerReviewView: View {
             HStack {
                 Button("Later", action: later)
                     .keyboardShortcut(.cancelAction)
+                if draft.status == "reviewed" {
+                    Button("Run once", action: run)
+                        .disabled(busy || !hasCompletePreview)
+                }
                 Spacer()
                 Button(draft.status == "reviewed" ? "Revalidate current app" : "Review and rebind", action: review)
                     .keyboardShortcut(.defaultAction)

@@ -201,7 +201,7 @@ final class SageCoreClient: @unchecked Sendable {
         }
         let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.0"
         let clientFeatures = challenge.supportedFeatures
-            .filter { ["world_model_v1", "application_control_v1", "procedure_execution_v1"].contains($0) }
+            .filter { ["world_model_v1", "application_control_v1", "procedure_execution_v1", "native_file_stream_v1", "lan_device_discovery_v1", "lan_renderer_observation_v1"].contains($0) }
             .sorted()
         var authentication = Sage_Ipc_V2_ClientAuthenticate()
         authentication.clientKind = .macos
@@ -268,6 +268,33 @@ final class SageCoreClient: @unchecked Sendable {
         guard stateLock.withLock({ negotiatedFeatures.contains("world_model_v1") }) else {
             throw SageClientError.authenticationFailed(
                 "This Sage Core connection does not support world-model commands"
+            )
+        }
+        if ["run_goal", "run_controller", "run_stream_procedure", "run_file_stream_copy"].contains(request.operation),
+           !stateLock.withLock({ negotiatedFeatures.contains("procedure_execution_v1") }) {
+            throw SageClientError.authenticationFailed(
+                "This Sage Core connection does not support procedure execution"
+            )
+        }
+        if ["run_stream_procedure", "run_file_stream_copy"].contains(request.operation),
+           !stateLock.withLock({ negotiatedFeatures.contains("native_file_stream_v1") }) {
+            throw SageClientError.authenticationFailed(
+                "This Sage Core connection does not support native file streaming"
+            )
+        }
+        if request.operation == "discover_upnp_media_renderers",
+           !stateLock.withLock({ negotiatedFeatures.contains("lan_device_discovery_v1") }) {
+            throw SageClientError.authenticationFailed(
+                "This Sage Core connection does not support private-LAN device discovery"
+            )
+        }
+        if ["observe_upnp_transport", "observe_upnp_protocol_info"].contains(request.operation),
+           !stateLock.withLock({
+               negotiatedFeatures.contains("lan_device_discovery_v1")
+                   && negotiatedFeatures.contains("lan_renderer_observation_v1")
+           }) {
+            throw SageClientError.authenticationFailed(
+                "This Sage Core connection does not support renderer-state observations"
             )
         }
         var command = Sage_Ipc_V2_UiCommand()

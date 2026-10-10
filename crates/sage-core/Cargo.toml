@@ -8,7 +8,15 @@ publish.workspace = true
 
 [features]
 default = []
-qwen35-evaluation = ["dep:sage-kernels", "dep:sage-metal", "dep:sage-model-package", "dep:sage-qwen-tokenizer", "sage-qwen-tokenizer/core-test-support", "dep:sysinfo"]
+qwen35-worker-verification = ["dep:sage-model-package"]
+qwen35-worker-load = ["qwen35-worker-verification"]
+qwen35-worker-generate = [
+    "qwen35-worker-load",
+    "dep:sage-qwen-tokenizer",
+    "dep:sage-qwen35-runtime",
+    "dep:sage-constrained-generation",
+]
+qwen35-evaluation = ["qwen35-worker-verification", "dep:sage-qwen-tokenizer", "dep:sage-qwen35-runtime", "dep:sage-constrained-generation", "sage-qwen35-runtime/core-test-support", "sage-qwen-tokenizer/core-test-support"]
 
 [lib]
 name = "sage_core"
@@ -32,10 +40,14 @@ prost.workspace = true
 reqwest.workspace = true
 rusqlite.workspace = true
 sage-protocol = { path = "../sage-protocol" }
+sage-inference-protocol = { path = "../sage-inference-protocol" }
+sage-worker-fd = { path = "../sage-worker-fd" }
+sage-peer = { path = "../sage-peer" }
 sage-model-package = { path = "../sage-model-package", optional = true }
-sage-kernels = { path = "../sage-kernels", optional = true }
-sage-metal = { path = "../sage-metal", optional = true }
+sage-qwen35-runtime = { path = "../sage-qwen35-runtime", optional = true }
+sage-constrained-generation = { path = "../sage-constrained-generation", optional = true }
 sage-qwen-tokenizer = { path = "../sage-qwen-tokenizer", optional = true }
+sage-upnp-av = { path = "../sage-upnp-av" }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -49,7 +61,6 @@ url.workspace = true
 zeroize.workspace = true
 notify.workspace = true
 
-sysinfo = { workspace = true, optional = true }
 cap-std.workspace = true
 cap-fs-ext.workspace = true
 

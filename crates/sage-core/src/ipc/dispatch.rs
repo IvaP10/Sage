@@ -12,6 +12,7 @@ pub(crate) struct CommandDispatcher {
     core: Arc<SageCore>,
     regular: mpsc::Sender<wire::UiCommand>,
     control: mpsc::Sender<wire::UiCommand>,
+    observation: mpsc::Sender<wire::UiCommand>,
     preparation: watch::Sender<Option<wire::UiCommand>>,
     connected: Arc<AtomicBool>,
     intent_revisions: std::sync::Mutex<std::collections::HashMap<uuid::Uuid, u64>>,
@@ -22,6 +23,7 @@ impl CommandDispatcher {
     pub fn new(core: Arc<SageCore>, responses: mpsc::Sender<wire::frame::Payload>) -> Self {
         let (regular, regular_rx) = mpsc::channel(16);
         let (control, control_rx) = mpsc::channel(8);
+        let (observation, observation_rx) = mpsc::channel(1);
         let (preparation, preparation_rx) = watch::channel(None);
         let connected = Arc::new(AtomicBool::new(true));
         let streamed_prefixes = Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
@@ -39,6 +41,13 @@ impl CommandDispatcher {
             responses.clone(),
             streamed_prefixes.clone(),
         ));
+        tokio::spawn(run_lane(
+            core.clone(),
+            connected.clone(),
+            observation_rx,
+            responses.clone(),
+            streamed_prefixes.clone(),
+        ));
         tokio::spawn(run_preparation(
             core.clone(),
             connected.clone(),
@@ -49,6 +58,7 @@ impl CommandDispatcher {
             core,
             regular,
             control,
+            observation,
             preparation,
             connected,
             intent_revisions: Default::default(),
@@ -164,6 +174,8 @@ impl CommandDispatcher {
                 )
             ) {
             &self.control
+        } else if is_lan_observation_command(&command) {
+            &self.observation
         } else {
             &self.regular
         };
@@ -201,6 +213,14 @@ impl CommandDispatcher {
         }
         Ok(())
     }
+}
+
+fn is_lan_observation_command(command: &wire::UiCommand) -> bool {
+    matches!(
+        command.command.as_ref(),
+        Some(wire::ui_command::Command::WorldModelCommand(world_model))
+            if matches!(world_model.operation.as_str(), "discover_upnp_media_renderers" | "observe_upnp_transport" | "observe_upnp_protocol_info")
+    )
 }
 
 async fn run_preparation(
@@ -381,6 +401,57 @@ mod tests {
             })),
         }
     }
+
+    #[test]
+    fn lan_renderer_discovery_and_reads_use_the_bounded_observation_lane() {
+        let lan_discovery = wire::UiCommand {
+            request_id: Uuid::new_v4().to_string(),
+            command: Some(wire::ui_command::Command::WorldModelCommand(
+                wire::WorldModelCommand {
+                    operation: "discover_upnp_media_renderers".into(),
+                    ..Default::default()
+                },
+            )),
+        };
+        assert!(is_lan_observation_command(&lan_discovery));
+
+        let renderer_state = wire::UiCommand {
+            request_id: Uuid::new_v4().to_string(),
+            command: Some(wire::ui_command::Command::WorldModelCommand(
+                wire::WorldModelCommand {
+                    operation: "observe_upnp_transport".into(),
+                    ..Default::default()
+                },
+            )),
+        };
+        assert!(is_lan_observation_command(&renderer_state));
+
+        let renderer_protocols = wire::UiCommand {
+            request_id: Uuid::new_v4().to_string(),
+            command: Some(wire::ui_command::Command::WorldModelCommand(
+                wire::WorldModelCommand {
+                    operation: "observe_upnp_protocol_info".into(),
+                    ..Default::default()
+                },
+            )),
+        };
+        assert!(is_lan_observation_command(&renderer_protocols));
+
+        let application_discovery = wire::UiCommand {
+            request_id: Uuid::new_v4().to_string(),
+            command: Some(wire::ui_command::Command::WorldModelCommand(
+                wire::WorldModelCommand {
+                    operation: "discover_current_application".into(),
+                    ..Default::default()
+                },
+            )),
+        };
+        assert!(!is_lan_observation_command(&application_discovery));
+        assert!(!is_lan_observation_command(&stop(
+            Uuid::new_v4().to_string()
+        )));
+    }
+
     #[tokio::test]
     async fn stop_signals_even_when_control_commands_and_responses_are_saturated() {
         let data = tempfile::tempdir().unwrap();

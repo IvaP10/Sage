@@ -1,0 +1,31 @@
+[package]
+name = "sage-qwen35-runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+default = []
+core-test-support = []
+
+[dependencies]
+sage-inference-math = { path = "../sage-inference-math" }
+sage-host-memory = { path = "../sage-host-memory" }
+sage-kernels = { path = "../sage-kernels" }
+sage-metal = { path = "../sage-metal" }
+sage-model-package = { path = "../sage-model-package" }
+sage-qwen-tokenizer = { path = "../sage-qwen-tokenizer" }
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+ed25519-dalek.workspace = true
+sha2.workspace = true
+
+[lib]
+name = "sage_qwen35_runtime"
+path = "src/lib.rs"

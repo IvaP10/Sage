@@ -7,7 +7,7 @@ Host: Mac15,3, Apple M3, arm64, 8 GB RAM, macOS 27.0. This is the available deve
 Command:
 
 ```sh
-cargo test -p sage-core --features qwen35-evaluation qwen_hidden_q4_projection_latency_measurement --release --locked -- --ignored --nocapture --test-threads=1
+cargo test --offline -p sage-inference-math --lib qwen_hidden_q4_projection_latency_measurement --release --locked -- --ignored --nocapture --test-threads=1
 ```
 
 | Route | p50 | p95 |

@@ -250,6 +250,90 @@ pub fn bind_live_reference_kind(
     observation
 }
 
+/// Refresh explicit task context while keeping the original observable target
+/// bound. A different foreground item invalidates the reference instead of
+/// silently redirecting an in-flight request to whatever is active now.
+pub fn refresh_live_reference(
+    previous: &ContextObservation,
+    observations: Vec<ContextObservation>,
+    kind: &'static str,
+) -> ContextObservation {
+    if previous
+        .state
+        .get("target_changed")
+        .and_then(Value::as_bool)
+        == Some(true)
+        || previous.state.get("available").and_then(Value::as_bool) != Some(true)
+    {
+        return previous.clone();
+    }
+
+    let next = bind_live_reference_kind(select_live_reference(observations), kind);
+    if same_reference_target(previous, &next, kind) {
+        return next;
+    }
+
+    let mut invalidated = unavailable_reference(false);
+    invalidated.source = previous.source.clone();
+    invalidated.state = json!({
+        "available": false,
+        "target_changed": true,
+        "reference_kind": kind,
+        "reason": "The foreground reference changed or could not be revalidated during this task. Confirm the intended item."
+    });
+    invalidated
+}
+
+fn same_reference_target(
+    previous: &ContextObservation,
+    next: &ContextObservation,
+    kind: &str,
+) -> bool {
+    if next.state.get("available").and_then(Value::as_bool) != Some(true)
+        || previous.source != next.source
+    {
+        return false;
+    }
+
+    let same_required = |key: &str| {
+        let old = previous.state.get(key);
+        let new = next.state.get(key);
+        old.is_some_and(nonempty_identity) && old == new
+    };
+    let same_optional = |key: &str| previous.state.get(key) == next.state.get(key);
+
+    let stable = match kind {
+        // Native selection APIs do not expose a portable element token. Bind
+        // the observed text and accessibility anchor as well as app/window,
+        // so a different selection fails closed.
+        "selection" => {
+            same_required("active_application")
+                && same_required("active_window")
+                && same_required("selected_text")
+                && same_optional("selection")
+        }
+        // The browser document token includes tab, frame, document and
+        // navigation generation; page text may change within that document.
+        "page" => same_required("browser_target"),
+        "file" => same_required("active_application") && same_required("current_resource"),
+        "window" => same_required("active_application") && same_required("active_window"),
+        "application" => same_required("active_application"),
+        _ => false,
+    };
+
+    stable && same_optional("browser_target")
+}
+
+fn nonempty_identity(value: &Value) -> bool {
+    match value {
+        Value::String(value) => !value.trim().is_empty(),
+        Value::Object(value) => !value.is_empty(),
+        Value::Array(value) => !value.is_empty(),
+        Value::Null => false,
+        _ => true,
+    }
+}
+
 pub fn requests_page_text(text: &str) -> bool {
     let lower = text.to_lowercase();
     let refers_to_other_kind = [
@@ -785,6 +869,134 @@ mod tests {
             reference_summary(&selected),
             "Using a current reference from Google Chrome"
         );
+    }
+
+    #[test]
+    fn continuous_reference_refresh_stays_on_the_original_browser_document() {
+        let now = chrono::Utc::now().timestamp_millis();
+        let target = json!({
+            "tab_id": 7,
+            "window_id": 3,
+            "frame_id": 0,
+            "document_id": "document-a",
+            "navigation_generation": 1,
+            "origin": "https://example.test",
+            "url": "https://example.test/article"
+        });
+        let previous = bind_live_reference_kind(
+            ContextObservation {
+                source: "current_reference_browser".into(),
+                observed_at_unix_ms: now,
+                state: json!({
+                    "available": true,
+                    "active_application": "com.google.Chrome",
+                    "application_name": "Google Chrome",
+                    "browser_target": target,
+                    "page_text": "The page before its content update"
+                }),
+            },
+            "page",
+        );
+        let native = ContextObservation {
+            source: "native".into(),
+            observed_at_unix_ms: now + 1,
+            state: json!({
+                "available": true,
+                "active_application": "com.google.Chrome",
+                "application_name": "Google Chrome"
+            }),
+        };
+        let browser = ContextObservation {
+            source: "browser".into(),
+            observed_at_unix_ms: now + 1,
+            state: json!({
+                "available": true,
+                "browser_target": target,
+                "page_text": "Fresh page text from the same document"
+            }),
+        };
+        let refreshed = refresh_live_reference(&previous, vec![native.clone(), browser], "page");
+        assert_eq!(refreshed.state["available"], true);
+        assert_eq!(
+            refreshed.state["page_text"],
+            "Fresh page text from the same document"
+        );
+
+        let changed_browser = ContextObservation {
+            source: "browser".into(),
+            observed_at_unix_ms: now + 2,
+            state: json!({
+                "available": true,
+                "browser_target": {
+                    "tab_id": 7,
+                    "window_id": 3,
+                    "frame_id": 0,
+                    "document_id": "document-b",
+                    "navigation_generation": 2,
+                    "origin": "https://example.test",
+                    "url": "https://example.test/another-article"
+                },
+                "page_text": "Text from a different document"
+            }),
+        };
+        let invalidated =
+            refresh_live_reference(&refreshed, vec![native.clone(), changed_browser], "page");
+        assert_eq!(invalidated.state["available"], false);
+        assert_eq!(invalidated.state["target_changed"], true);
+        assert!(
+            !serde_json::to_string(&invalidated.state)
+                .unwrap()
+                .contains("Text from a different document")
+        );
+
+        let rebound = refresh_live_reference(
+            &invalidated,
+            vec![
+                native,
+                ContextObservation {
+                    source: "browser".into(),
+                    observed_at_unix_ms: now + 3,
+                    state: json!({
+                        "available": true,
+                        "browser_target": target,
+                        "page_text": "The original document returned"
+                    }),
+                },
+            ],
+            "page",
+        );
+        assert_eq!(rebound.state["available"], false);
+        assert_eq!(rebound.state["target_changed"], true);
+    }
+
+    #[test]
+    fn continuous_selection_refresh_invalidates_changed_selected_text() {
+        let now = chrono::Utc::now().timestamp_millis();
+        let previous = ContextObservation {
+            source: "current_reference_native".into(),
+            observed_at_unix_ms: now,
+            state: json!({
+                "available": true,
+                "active_application": "com.example.Editor",
+                "active_window": "Draft",
+                "selected_text": "the original selection",
+                "selection": {"role": "text_field", "label": "Body"}
+            }),
+        };
+        let changed = ContextObservation {
+            source: "native".into(),
+            observed_at_unix_ms: now + 1,
+            state: json!({
+                "available": true,
+                "active_application": "com.example.Editor",
+                "active_window": "Draft",
+                "selected_text": "a different selection",
+                "selection": {"role": "text_field", "label": "Body"}
+            }),
+        };
+        let invalidated = refresh_live_reference(&previous, vec![changed], "selection");
+        assert_eq!(invalidated.state["available"], false);
+        assert_eq!(invalidated.state["target_changed"], true);
     }
 
     #[test]

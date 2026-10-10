@@ -4,10 +4,20 @@ use std::slice;
 use std::sync::{Arc, OnceLock};
 use zeroize::Zeroize;
 
+const Q4_METAL_BATCH_TILE_DEFAULT: usize = 4;
+const Q4_METAL_BATCH_TILE_SIZES: [usize; 3] = [1, 2, 4];
+
 unsafe extern "C" {
     fn sage_metal_context_create(error: *mut c_char, capacity: usize) -> *mut c_void;
     fn sage_metal_context_release(context: *mut c_void);
     fn sage_metal_buffer_create(
+        context: *mut c_void,
+        bytes: *const u8,
+        length: usize,
+        error: *mut c_char,
+        capacity: usize,
+    ) -> *mut c_void;
+    fn sage_metal_buffer_create_private(
         context: *mut c_void,
         bytes: *const u8,
         length: usize,
@@ -33,6 +43,10 @@ unsafe extern "C" {
         rows: u32,
         columns: u32,
         group_size: u32,
+        batch_size: u32,
+        batch_tile_size: u32,
+        rows_per_threadgroup: u32,
+        gpu_duration_ns: *mut u64,
         error: *mut c_char,
         capacity: usize,
     ) -> i32;
@@ -56,16 +70,17 @@ pub struct MetalBuffer {
     context: Arc<MetalContext>,
 }
 
-/// Per-matrix activation storage reused by every Q4 projection. Metal buffers
-/// use shared storage on Apple Silicon; the host copies only the current
-/// activation into the retained input buffer and reads the result from the
-/// retained output buffer after the command completes.
+/// Bounded activation storage reused by Q4 projections. Metal buffers use
+/// shared storage on Apple Silicon; the host copies one activation batch in
+/// and reads its batch-major result after the command completes.
 #[derive(Debug)]
 pub struct MetalQ4Workspace {
     input: MetalBuffer,
     output: MetalBuffer,
     rows: usize,
     columns: usize,
+    batch_size: usize,
+    batch_tile_size: usize,
 }
 
 impl MetalQ4Workspace {
@@ -125,6 +140,36 @@ impl MetalContext {
         })
     }
 
+    /// Upload immutable model bytes into GPU-private storage through a
+    /// zeroized shared staging buffer. The result cannot be read by the CPU.
+    pub fn buffer_private(self: &Arc<Self>, bytes: &[u8]) -> Result<MetalBuffer, String> {
+        if bytes.is_empty() {
+            return Err("Sage Metal private buffers cannot be empty".into());
+        }
+        let mut error = [0_i8; 512];
+        let raw = unsafe {
+            sage_metal_buffer_create_private(
+                self.raw.as_ptr(),
+                bytes.as_ptr(),
+                bytes.len(),
+                error.as_mut_ptr(),
+                error.len(),
+            )
+        };
+        let raw = NonNull::new(raw)
+            .ok_or_else(|| error_message(&error, "Metal private buffer upload failed"))?;
+        let byte_len = unsafe { sage_metal_buffer_length(raw.as_ptr()) };
+        if byte_len != bytes.len() {
+            unsafe { sage_metal_buffer_release(raw.as_ptr()) };
+            return Err("Metal returned a private buffer with an unexpected length".into());
+        }
+        Ok(MetalBuffer {
+            raw,
+            byte_len,
+            context: Arc::clone(self),
+        })
+    }
+
     fn buffer_with_length(self: &Arc<Self>, length: usize) -> Result<MetalBuffer, String> {
         if length == 0 {
             return Err("Sage Metal buffers cannot be empty".into());
@@ -155,13 +200,54 @@ impl MetalContext {
         rows: usize,
         columns: usize,
     ) -> Result<MetalQ4Workspace, String> {
-        let input_bytes = columns
+        self.q4_batch_workspace(rows, columns, 1)
+    }
+
+    /// Allocate a reusable workspace for one exact Q4 matrix shape and batch.
+    /// The batch limit is shared with Sage's first-party CPU kernel contract.
+    pub fn q4_batch_workspace(
+        self: &Arc<Self>,
+        rows: usize,
+        columns: usize,
+        batch_size: usize,
+    ) -> Result<MetalQ4Workspace, String> {
+        self.q4_batch_workspace_with_tile(rows, columns, batch_size, Q4_METAL_BATCH_TILE_DEFAULT)
+    }
+
+    /// Allocate a batch workspace with a measured number of inputs sharing
+    /// each Q4 weight load. This tuning control is intended for release
+    /// evaluation; normal inference uses the measured default tile of four.
+    pub fn q4_batch_workspace_with_tile(
+        self: &Arc<Self>,
+        rows: usize,
+        columns: usize,
+        batch_size: usize,
+        batch_tile_size: usize,
+    ) -> Result<MetalQ4Workspace, String> {
+        let input_values = columns
+            .checked_mul(batch_size)
+            .ok_or_else(|| "Metal Q4 input workspace size overflow".to_owned())?;
+        let output_values = rows
+            .checked_mul(batch_size)
+            .ok_or_else(|| "Metal Q4 output workspace size overflow".to_owned())?;
+        let input_bytes = input_values
             .checked_mul(std::mem::size_of::<f32>())
             .ok_or_else(|| "Metal Q4 input workspace size overflow".to_owned())?;
-        let output_bytes = rows
+        let output_bytes = output_values
             .checked_mul(std::mem::size_of::<f32>())
             .ok_or_else(|| "Metal Q4 output workspace size overflow".to_owned())?;
-        if rows == 0 || columns == 0 || rows > u32::MAX as usize || columns > u32::MAX as usize {
+        if rows == 0
+            || columns == 0
+            || batch_size == 0
+            || batch_size > sage_kernels::Q4_BATCH_MAX_SIZE
+            || !Q4_METAL_BATCH_TILE_SIZES.contains(&batch_tile_size)
+            || input_values > sage_kernels::Q4_BATCH_MAX_IO_ELEMENTS
+            || output_values > sage_kernels::Q4_BATCH_MAX_IO_ELEMENTS
+            || rows > 1_048_576
+            || rows > u32::MAX as usize
+            || columns > u32::MAX as usize
+            || batch_size > u32::MAX as usize
+        {
             return Err("Metal Q4 workspace geometry is invalid".into());
         }
         let input = self.buffer_with_length(input_bytes)?;
@@ -171,6 +257,8 @@ impl MetalContext {
             output,
             rows,
             columns,
+            batch_size,
+            batch_tile_size,
         })
     }
 
@@ -189,12 +277,122 @@ impl MetalContext {
         output: &mut [f32],
         workspace: &mut MetalQ4Workspace,
     ) -> Result<(), String> {
+        self.project_q4_batch_into(
+            weights, scales, rows, columns, group_size, 1, input, output, workspace,
+        )
+    }
+
+    /// Run a synchronous single-input projection and return the GPU execution
+    /// interval reported by Metal, excluding host submission and completion waits.
+    #[allow(clippy::too_many_arguments)]
+    pub fn project_q4_profiled(
+        &self,
+        weights: &MetalBuffer,
+        scales: &MetalBuffer,
+        rows: usize,
+        columns: usize,
+        group_size: usize,
+        input: &[f32],
+        output: &mut [f32],
+        workspace: &mut MetalQ4Workspace,
+    ) -> Result<u64, String> {
+        let mut gpu_duration_ns = 0;
+        self.project_q4_batch_into_internal(
+            weights,
+            scales,
+            rows,
+            columns,
+            group_size,
+            1,
+            input,
+            output,
+            workspace,
+            1,
+            Some(&mut gpu_duration_ns),
+        )?;
+        Ok(gpu_duration_ns)
+    }
+
+    /// Run the four-row, shared-input Q4 kernel and return its GPU execution
+    /// interval. This remains an evaluation path until it wins end-to-end.
+    #[allow(clippy::too_many_arguments)]
+    pub fn project_q4_rows4_profiled(
+        &self,
+        weights: &MetalBuffer,
+        scales: &MetalBuffer,
+        rows: usize,
+        columns: usize,
+        group_size: usize,
+        input: &[f32],
+        output: &mut [f32],
+        workspace: &mut MetalQ4Workspace,
+    ) -> Result<u64, String> {
+        let mut gpu_duration_ns = 0;
+        self.project_q4_batch_into_internal(
+            weights,
+            scales,
+            rows,
+            columns,
+            group_size,
+            1,
+            input,
+            output,
+            workspace,
+            4,
+            Some(&mut gpu_duration_ns),
+        )?;
+        Ok(gpu_duration_ns)
+    }
+
+    /// Project a batch of row-major activations and retain a batch-major
+    /// result. The Q4 weight matrix is submitted once for the whole batch.
+    #[allow(clippy::too_many_arguments)]
+    pub fn project_q4_batch_into(
+        &self,
+        weights: &MetalBuffer,
+        scales: &MetalBuffer,
+        rows: usize,
+        columns: usize,
+        group_size: usize,
+        batch_size: usize,
+        input: &[f32],
+        output: &mut [f32],
+        workspace: &mut MetalQ4Workspace,
+    ) -> Result<(), String> {
+        self.project_q4_batch_into_internal(
+            weights, scales, rows, columns, group_size, batch_size, input, output, workspace, 1,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn project_q4_batch_into_internal(
+        &self,
+        weights: &MetalBuffer,
+        scales: &MetalBuffer,
+        rows: usize,
+        columns: usize,
+        group_size: usize,
+        batch_size: usize,
+        input: &[f32],
+        output: &mut [f32],
+        workspace: &mut MetalQ4Workspace,
+        rows_per_threadgroup: u32,
+        gpu_duration_ns: Option<&mut u64>,
+    ) -> Result<(), String> {
         let result = (|| {
+            let input_elements = batch_size.checked_mul(columns);
+            let output_elements = batch_size.checked_mul(rows);
             if rows == 0
                 || columns == 0
                 || group_size == 0
-                || input.len() != columns
-                || output.len() != rows
+                || batch_size == 0
+                || batch_size > sage_kernels::Q4_BATCH_MAX_SIZE
+                || input_elements.is_none_or(|count| count > sage_kernels::Q4_BATCH_MAX_IO_ELEMENTS)
+                || output_elements
+                    .is_none_or(|count| count > sage_kernels::Q4_BATCH_MAX_IO_ELEMENTS)
+                || input_elements != Some(input.len())
+                || output_elements != Some(output.len())
                 || input.iter().any(|value| !value.is_finite())
             {
                 return Err("Metal Q4 projection geometry or input is invalid".into());
@@ -218,9 +416,12 @@ impl MetalContext {
                 || scales.byte_len != required_scales
                 || workspace.rows != rows
                 || workspace.columns != columns
+                || workspace.batch_size != batch_size
                 || rows > u32::MAX as usize
+                || rows > 1_048_576
                 || columns > u32::MAX as usize
                 || group_size > u32::MAX as usize
+                || batch_size > u32::MAX as usize
             {
                 return Err("Metal Q4 projection geometry or storage is invalid".into());
             }
@@ -240,6 +441,10 @@ impl MetalContext {
                     rows as u32,
                     columns as u32,
                     group_size as u32,
+                    batch_size as u32,
+                    workspace.batch_tile_size as u32,
+                    rows_per_threadgroup,
+                    gpu_duration_ns.map_or(std::ptr::null_mut(), |duration| duration as *mut u64),
                     error.as_mut_ptr(),
                     error.len(),
                 )

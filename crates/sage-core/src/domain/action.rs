@@ -67,6 +67,14 @@ pub enum ExpectedOutcome {
         producer_node: String,
         maximum_bytes: u64,
     },
+    FileReadMatchesStream {
+        path: PathBuf,
+        channel_id: String,
+        producer_node: String,
+        output_port: String,
+        consumer_node: String,
+        maximum_bytes: u64,
+    },
     CommandExit {
         code: i32,
     },

@@ -263,6 +263,51 @@ pub fn prepared_preview(proposal: &ActionProposal) -> CoreResult<String> {
             control_id,
         ));
     }
+    if let Action::ReadFile { path, max_bytes } = &proposal.action
+        && proposal.metadata.contains_key("procedure_stream_output")
+    {
+        let channel = proposal
+            .metadata
+            .get("procedure_stream_channel_id")
+            .filter(|channel| !channel.trim().is_empty() && channel.len() <= 96)
+            .ok_or_else(|| {
+                CoreError::PermissionRequired(
+                    "The streamed file output has no exact channel for approval".into(),
+                )
+            })?;
+        let consumer = proposal
+            .metadata
+            .get("procedure_stream_consumer_node")
+            .filter(|node| !node.trim().is_empty() && node.len() <= 96)
+            .ok_or_else(|| {
+                CoreError::PermissionRequired(
+                    "The streamed file output has no exact consumer for approval".into(),
+                )
+            })?;
+        let output_port = proposal
+            .metadata
+            .get("procedure_stream_output")
+            .filter(|port| !port.trim().is_empty() && port.len() <= 96)
+            .ok_or_else(|| {
+                CoreError::PermissionRequired(
+                    "The streamed file output has no exact port for approval".into(),
+                )
+            })?;
+        let maximum_bytes = proposal
+            .metadata
+            .get("procedure_stream_max_bytes")
+            .and_then(|bytes| bytes.parse::<u64>().ok())
+            .filter(|bytes| (1..=*max_bytes).contains(bytes))
+            .ok_or_else(|| {
+                CoreError::PermissionRequired(
+                    "The streamed file output has no valid byte limit for approval".into(),
+                )
+            })?;
+        return Ok(format!(
+            "Read {} and stream its bytes to procedure node {consumer}\nOutput port: {output_port}\nChannel: {channel}\nMaximum stream size: {maximum_bytes} bytes",
+            path.display(),
+        ));
+    }
     if let Action::WriteFile {
         path,
         content,

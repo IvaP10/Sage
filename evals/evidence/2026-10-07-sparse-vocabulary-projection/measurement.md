@@ -11,7 +11,7 @@ The microbenchmark compares the full Q4 output-head projection with projection o
 Command:
 
 ```sh
-cargo test -p sage-core --features qwen35-evaluation qwen_sparse_output_head_latency_measurement --release -- --ignored --nocapture
+cargo test --offline -p sage-inference-math --release --lib qwen_sparse_output_head_latency_measurement -- --ignored --nocapture
 ```
 
 ## Results
@@ -30,7 +30,7 @@ For this constrained synthetic workload, projecting only the allowed rows was ab
 A second benchmark swept larger allowed sets over three independent release runs, with 31 alternating samples per path and size. The table reports the median of the three run-level medians; large-set p95 varies with host scheduling.
 
 ```sh
-cargo test -p sage-core --features qwen35-evaluation qwen_sparse_output_head_crossover_measurement --release -- --ignored --nocapture
+cargo test --offline -p sage-inference-math --release --lib qwen_sparse_output_head_crossover_measurement -- --ignored --nocapture
 ```
 
 | Allowed rows | Dense p50 | Selected p50 | Dense p95 | Selected p95 |

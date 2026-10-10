@@ -1,0 +1,11 @@
+[package]
+name = "sage-host-memory"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+name = "sage_host_memory"
+path = "src/lib.rs"

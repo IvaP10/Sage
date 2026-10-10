@@ -20,6 +20,29 @@ pub mod safetensors;
 
 pub type PackageResult<T> = Result<T, PackageError>;
 
+mod compiled_trust {
+    include!(concat!(env!("OUT_DIR"), "/trusted_qwen35_package_keys.rs"));
+}
+
+/// Return the Qwen package public keys embedded by Sage's trusted build.
+///
+/// The build-time `SAGE_QWEN35_PACKAGE_TRUSTED_KEYS` setting is a newline-
+/// separated list of `key-id=64-lowercase-hex` entries. Runtime environment
+/// variables and package-supplied keys never alter this trust set. An empty
+/// build setting produces an empty set, which admits no signed package.
+pub fn application_trusted_qwen35_package_keys() -> PackageResult<BTreeMap<String, VerifyingKey>> {
+    compiled_trust::TRUSTED_QWEN35_PACKAGE_KEYS
+        .iter()
+        .map(|(key_id, encoded_key)| {
+            VerifyingKey::from_bytes(encoded_key)
+                .map(|key| ((*key_id).to_owned(), key))
+                .map_err(|_| {
+                    PackageError::Invalid("compiled Qwen package trust key is invalid".into())
+                })
+        })
+        .collect()
+}
+
 #[derive(Debug, Error)]
 pub enum PackageError {
     #[error("invalid signed model package: {0}")]
@@ -465,6 +488,19 @@ mod tests {
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect()
+    }
+
+    #[test]
+    fn compiled_application_trust_set_contains_only_valid_bounded_keys() {
+        let keys = application_trusted_qwen35_package_keys().unwrap();
+        assert!(keys.len() <= 16);
+        assert!(keys.keys().all(|key_id| {
+            !key_id.is_empty()
+                && key_id.len() <= 128
+                && key_id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        }));
     }
 
     #[test]

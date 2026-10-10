@@ -10,8 +10,6 @@ use sage_core::secrets::{OsSecretStore, SecretBytes, SecretStore, load_or_create
 use sage_core::{CoreError, CoreResult, SageCore};
 use tracing_subscriber::EnvFilter;
 
-mod inference_worker_process;
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -35,15 +33,16 @@ async fn main() -> anyhow::Result<()> {
         secret_store.as_ref(),
     )?;
     let authenticator = Arc::new(IpcAuthenticator::new(secret));
-    // Keep the first-party helper process owned by Core for its full lifetime.
-    // It currently reports that no model is admitted, so this does not enable
-    // generation or replace the fail-closed provider below.
-    let _inference_worker = match inference_worker_process::start_bundled().await {
-        Ok(Some(worker)) => {
+    // Supervise only the restricted helper process. It currently reports that
+    // no model is admitted, so this does not enable generation or replace the
+    // fail-closed provider below.
+    let _inference_worker_supervisor = match sage_core::inference_worker_process::supervise_bundled(
+    ) {
+        Ok(Some(supervisor)) => {
             tracing::info!(
-                "first-party inference worker completed its bounded startup handshake and is awaiting an admitted model"
+                "first-party inference worker supervision started; model generation remains unavailable"
             );
-            Some(worker)
+            Some(supervisor)
         }
         Ok(None) => None,
         Err(error) => {

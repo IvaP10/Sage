@@ -53,19 +53,19 @@ impl Footprint {
                 Action::ReadFile { path, .. },
                 PreparedTarget::File {
                     path: prepared_path,
-                    ..
+                    before,
                 },
             ) if path == prepared_path => {
-                add(file_key(path), Access::Shared);
+                add(file_key(path, before.as_ref()), Access::Shared);
             }
             (
                 Action::ListDirectory { path, .. },
                 PreparedTarget::File {
                     path: prepared_path,
-                    ..
+                    before,
                 },
             ) if path == prepared_path => {
-                add(file_key(path), Access::Shared);
+                add(file_key(path, before.as_ref()), Access::Shared);
                 add(namespace_key(path), Access::Exclusive);
             }
             (
@@ -75,7 +75,7 @@ impl Footprint {
                     before,
                 },
             ) if path == prepared_path => {
-                add(file_key(path), Access::Exclusive);
+                add(file_key(path, before.as_ref()), Access::Exclusive);
                 if before.is_none() {
                     add(add_parent_namespace(path)?, Access::Shared);
                 }
@@ -84,10 +84,10 @@ impl Footprint {
                 Action::CreateFolder { path },
                 PreparedTarget::File {
                     path: prepared_path,
-                    ..
+                    before,
                 },
             ) if path == prepared_path => {
-                add(file_key(path), Access::Exclusive);
+                add(file_key(path, before.as_ref()), Access::Exclusive);
                 add(add_parent_namespace(path)?, Access::Shared);
             }
             (
@@ -134,8 +134,11 @@ impl Footprint {
     }
 }
 
-fn file_key(path: &std::path::Path) -> String {
-    format!("file:{}", path.to_string_lossy())
+fn file_key(path: &std::path::Path, identity: Option<&crate::contracts::FileIdentity>) -> String {
+    match identity.map(|identity| identity.key.as_str()) {
+        Some(key) if !key.is_empty() => format!("file-identity:{key}"),
+        _ => format!("file-path:{}", path.to_string_lossy()),
+    }
 }
 
 fn namespace_key(path: &std::path::Path) -> String {
@@ -418,6 +421,43 @@ mod tests {
         );
         drop((writer_lease, other_lease));
         arbiter.acquire_action(&reader).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn aliases_with_the_same_verified_file_identity_share_one_lock() {
+        let directory = PathBuf::from(if cfg!(windows) { r"C:\work" } else { "/work" });
+        let writer_path = directory.join("Shared.txt");
+        let alias_path = directory.join("SHARED.txt");
+        let writer = write(&writer_path, true);
+        let reader = prepared(
+            Action::ReadFile {
+                path: alias_path.clone(),
+                max_bytes: 128,
+            },
+            PreparedTarget::File {
+                path: alias_path,
+                before: Some(FileIdentity {
+                    key: "file-id".into(),
+                    size: 4,
+                    modified: "fixture".into(),
+                    directory: false,
+                }),
+            },
+            &[Effect::Read],
+        );
+        let arbiter = EffectArbiter::default();
+        let writer_lease = arbiter.acquire_action(&writer).await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), arbiter.acquire_action(&reader))
+                .await
+                .is_err(),
+            "a read through a path alias must wait for the same file's writer"
+        );
+        drop(writer_lease);
+        tokio::time::timeout(Duration::from_millis(100), arbiter.acquire_action(&reader))
+            .await
+            .expect("the alias read should proceed after the writer settles")
+            .unwrap();
     }
 
     #[tokio::test]

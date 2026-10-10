@@ -13,7 +13,7 @@ Date: 7 October 2026
 ## Command
 
 ```sh
-cargo test --release -p sage-core --features qwen35-evaluation --lib inference_cpu::tests::qwen_hidden_q4_projection_latency_measurement -- --ignored --exact --nocapture
+cargo test --offline --release -p sage-inference-math --lib tests::qwen_hidden_q4_projection_latency_measurement -- --ignored --exact --nocapture
 ```
 
 The test compares both fast paths with Sage's scalar f64-accumulation Q4 reference, warms all paths twice, then alternates 21 measurements per path. CPU samples include projection and output allocation. Each Metal sample includes input/output buffer and command-buffer creation, kernel submission, and completion wait; Q4 weights and scales are uploaded once into shared Metal storage before timing. The NEON kernel expands eight packed bytes into sixteen signed nibbles per vector block, applies four independent accumulators, and handles odd row/group boundaries with bounded scalar edges.
@@ -34,7 +34,7 @@ The test compares both fast paths with Sage's scalar f64-accumulation Q4 referen
 
 All runs passed numerical parity at relative tolerance `1e-3` plus an absolute tolerance of `1e-3`; separate kernel tests cover odd rows and crossing groups at tighter tolerance. The latest SIMD-unpack run measured NEON p50/p95 about 7.5× lower than the scalar reference. The first scalar-unpack NEON version was only about 1.5× faster, so it was replaced after measurement. The current CPU fixture also outperformed this Metal dispatch path, whose p95 included command submission and I/O buffer setup.
 
-The reproducible command is `cargo test --release -p sage-core --features qwen35-evaluation --lib inference_cpu::tests::qwen_hidden_q4_projection_latency_measurement -- --ignored --exact --nocapture --test-threads=1`. An earlier fused-f32 scalar experiment measured slower than the f64 reference and was removed. These microbenchmarks are short and synthetic; they do not establish a full-model speedup.
+The current reproduction command is `cargo test --offline --release -p sage-inference-math --lib tests::qwen_hidden_q4_projection_latency_measurement -- --ignored --exact --nocapture --test-threads=1`; the benchmark moved out of Core with the inference math crate. An earlier fused-f32 scalar experiment measured slower than the f64 reference and was removed. These microbenchmarks are short and synthetic; they do not establish a full-model speedup.
 
 ## Attention kernels
 
@@ -73,7 +73,7 @@ The NEON implementation now keeps its 128-block accumulator and 512-value correc
 
 ## KV allocation behavior
 
-`KvCache::new` now leaves key and value backing vectors empty. The cache reserves the validated prompt prefix before text or mixed image/text prefill, then doubles capacity as generated tokens exceed the existing prefix. Reallocation copies into a bounded replacement and zeroes the old allocation before releasing it. The focused test `inference_cpu::tests::kv_cache_reserves_only_observed_context_and_grows_geometrically` verifies zero constructor capacity, the 16-position initial allocation, doubling, context-limit rejection, and clear behavior.
+`KvCache::new` now leaves key and value backing vectors empty. The cache reserves the validated prompt prefix before text or mixed image/text prefill, then doubles capacity as generated tokens exceed the existing prefix. Reallocation copies into a bounded replacement and zeroes the old allocation before releasing it. The focused test `sage-inference-math::tests::kv_cache_reserves_only_observed_context_and_grows_geometrically` verifies zero constructor capacity, the 16-position initial allocation, doubling, context-limit rejection, and clear behavior.
 
 For the pinned geometry, the former eager allocation at the full 8K bound was 8192 positions × 4 KV heads × 256 values × 2 (K and V) × 4 bytes × 8 full-attention layers = 512 MiB. Decoder construction now allocates zero KV bytes. Each observed prompt position reserves 64 KiB across those eight layers, so prompts of 1–15 tokens reserve 64–960 KiB; larger prompts reserve their exact validated prefix. This is an allocation-bound calculation confirmed by capacity tests, not an OS resident-memory measurement. The maximum-context governor estimate remains conservative, and an actual checkpoint run is still required to evaluate peak memory and latency.
 

@@ -8,7 +8,6 @@ use crate::error::{CoreError, CoreResult};
 pub enum InteractionTier {
     StructuredIntegration,
     Accessibility,
-    BrowserDom,
     UserInteraction,
 }
 
@@ -17,7 +16,6 @@ pub struct ImplementationCandidate {
     pub tier: InteractionTier,
     pub executor: ExecutionDomain,
     pub operation: String,
-    pub requires_fresh_observation: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -78,13 +76,6 @@ impl ActionCompiler {
                         InteractionTier::StructuredIntegration,
                         ExecutionDomain::Browser,
                         "browser integration",
-                    ));
-                }
-                if availability.browser_dom {
-                    candidates.push(candidate(
-                        InteractionTier::BrowserDom,
-                        ExecutionDomain::Browser,
-                        "DOM operation",
                     ));
                 }
             }
@@ -152,6 +143,68 @@ fn candidate(
         tier,
         executor,
         operation: operation.into(),
-        requires_fresh_observation: true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ActionCompiler, ExecutorAvailability, InteractionTier};
+    use crate::domain::{Action, ActionProposal, ExecutionDomain, ExpectedOutcome, Provenance};
+    use uuid::Uuid;
+
+    #[test]
+    fn navigation_compiles_only_the_registered_browser_route() {
+        let url = "https://example.com/docs";
+        let compiled = ActionCompiler
+            .compile(
+                ActionProposal {
+                    id: Uuid::new_v4(),
+                    task_id: Uuid::new_v4(),
+                    action: Action::NavigateUrl {
+                        url: url.into(),
+                        new_tab: false,
+                    },
+                    expected_outcome: ExpectedOutcome::UserAnswered,
+                    target_resource: url.into(),
+                    provenance: Provenance::user(),
+                    metadata: Default::default(),
+                },
+                &ExecutorAvailability::default(),
+            )
+            .expect("registered browser navigation route");
+
+        assert_eq!(compiled.candidates.len(), 1);
+        assert_eq!(
+            compiled.candidates[0].tier,
+            InteractionTier::StructuredIntegration
+        );
+        assert_eq!(compiled.candidates[0].executor, ExecutionDomain::Browser);
+        assert_eq!(compiled.candidates[0].operation, "browser integration");
+    }
+
+    #[test]
+    fn navigation_is_unavailable_without_the_browser_adapter() {
+        let availability = ExecutorAvailability {
+            browser_dom: false,
+            ..ExecutorAvailability::default()
+        };
+        let error = ActionCompiler
+            .compile(
+                ActionProposal {
+                    id: Uuid::new_v4(),
+                    task_id: Uuid::new_v4(),
+                    action: Action::NavigateUrl {
+                        url: "https://example.com".into(),
+                        new_tab: false,
+                    },
+                    expected_outcome: ExpectedOutcome::UserAnswered,
+                    target_resource: "https://example.com".into(),
+                    provenance: Provenance::user(),
+                    metadata: Default::default(),
+                },
+                &availability,
+            )
+            .expect_err("browser navigation requires a connected browser adapter");
+        assert!(error.to_string().contains("no safe implementation"));
     }
 }

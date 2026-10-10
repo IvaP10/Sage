@@ -4,18 +4,39 @@ use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use sage_peer::{
+    ComputePlan, ComputeUnitSpec, PartitionCheckpoint, PartitionResult, PeerError, PeerId,
+    UnitOutput,
+};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
 use crate::domain::{Task, TaskStatus};
 use crate::error::{CoreError, CoreResult};
 use crate::events::CoreEvent;
 
 const MAX_PROCEDURE_CHECKPOINT_BYTES: usize = 4 * 1024 * 1024;
+const MAX_TASK_CHECKPOINT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_CONTROLLER_RECORD_BYTES: usize = 256 * 1024;
 const MAX_CONTROLLERS_PER_SYSTEM: u64 = 128;
+const MAX_PEER_CHECKPOINT_OUTPUTS: usize = 65_536;
+const MAX_PEER_CHECKPOINT_BYTES: u64 = 256 * 1024 * 1024;
+const PEER_CHECKPOINT_CHUNK_BYTES: usize = 1024 * 1024;
+
+struct PeerCheckpointHeader {
+    plan_digest: Vec<u8>,
+    plan_digest_len: i64,
+    peer_id: Vec<u8>,
+    peer_id_len: i64,
+    result_digest: Vec<u8>,
+    result_digest_len: i64,
+    output_count: i64,
+    total_output_bytes: i64,
+}
+
 type StoredWorldObservationRow = (
     String,
     String,
@@ -345,6 +366,279 @@ impl LocalStore {
                     "INSERT INTO schema_migrations VALUES(9, CURRENT_TIMESTAMP)",
                     [],
                 )?;
+            }
+            let timing_migration: bool = connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=11)",
+                [],
+                |row| row.get(0),
+            )?;
+            if !timing_migration {
+                connection.execute_batch(
+                    "CREATE TABLE IF NOT EXISTS execution_timings (
+                        operation TEXT PRIMARY KEY,
+                        ewma_micros INTEGER NOT NULL,
+                        attempts INTEGER NOT NULL,
+                        successes INTEGER NOT NULL,
+                        failures INTEGER NOT NULL,
+                        updated_at TEXT NOT NULL
+                    );
+                    INSERT INTO schema_migrations(version, applied_at)
+                    VALUES (11, CURRENT_TIMESTAMP);",
+                )?;
+            }
+            let peer_checkpoint_migration: bool = connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=12)",
+                [],
+                |row| row.get(0),
+            )?;
+            if !peer_checkpoint_migration {
+                let tx = connection.transaction()?;
+                tx.execute_batch(
+                    "CREATE TABLE IF NOT EXISTS peer_partition_checkpoints (
+                        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+                        job_id BLOB NOT NULL CHECK(length(job_id)=16),
+                        partition_index INTEGER NOT NULL CHECK(partition_index BETWEEN 0 AND 65535),
+                        plan_digest BLOB NOT NULL CHECK(length(plan_digest)=32),
+                        peer_id BLOB NOT NULL CHECK(length(peer_id)=32),
+                        result_digest BLOB NOT NULL CHECK(length(result_digest)=32),
+                        output_count INTEGER NOT NULL CHECK(output_count BETWEEN 1 AND 65536),
+                        total_output_bytes INTEGER NOT NULL CHECK(total_output_bytes BETWEEN 0 AND 268435456),
+                        saved_at TEXT NOT NULL,
+                        PRIMARY KEY(job_id, partition_index)
+                    ) WITHOUT ROWID;
+                    CREATE INDEX IF NOT EXISTS peer_partition_checkpoints_by_peer
+                        ON peer_partition_checkpoints(peer_id);
+                    CREATE INDEX IF NOT EXISTS peer_partition_checkpoints_by_task
+                        ON peer_partition_checkpoints(task_id);
+                    CREATE TABLE IF NOT EXISTS peer_partition_checkpoint_outputs (
+                        job_id BLOB NOT NULL,
+                        partition_index INTEGER NOT NULL,
+                        ordinal INTEGER NOT NULL CHECK(ordinal BETWEEN 0 AND 65535),
+                        unit_index INTEGER NOT NULL CHECK(unit_index BETWEEN 0 AND 4294967295),
+                        input_digest BLOB NOT NULL CHECK(length(input_digest)=32),
+                        output_bytes INTEGER NOT NULL CHECK(output_bytes BETWEEN 0 AND 268435456),
+                        chunk_count INTEGER NOT NULL CHECK(chunk_count BETWEEN 0 AND 256),
+                        PRIMARY KEY(job_id, partition_index, ordinal),
+                        UNIQUE(job_id, partition_index, unit_index),
+                        FOREIGN KEY(job_id, partition_index)
+                            REFERENCES peer_partition_checkpoints(job_id, partition_index)
+                            ON DELETE CASCADE
+                    ) WITHOUT ROWID;
+                    CREATE TABLE IF NOT EXISTS peer_partition_checkpoint_chunks (
+                        job_id BLOB NOT NULL,
+                        partition_index INTEGER NOT NULL,
+                        ordinal INTEGER NOT NULL,
+                        chunk_index INTEGER NOT NULL CHECK(chunk_index BETWEEN 0 AND 255),
+                        content BLOB NOT NULL CHECK(length(content) BETWEEN 1 AND 1048576),
+                        PRIMARY KEY(job_id, partition_index, ordinal, chunk_index),
+                        FOREIGN KEY(job_id, partition_index, ordinal)
+                            REFERENCES peer_partition_checkpoint_outputs(job_id, partition_index, ordinal)
+                            ON DELETE CASCADE
+                    ) WITHOUT ROWID;
+                    DROP TRIGGER IF EXISTS cleanup_retired_task_private_data;
+                    CREATE TRIGGER cleanup_retired_task_private_data
+                    AFTER INSERT ON retired_task_data
+                    BEGIN
+                        DELETE FROM private_artifacts WHERE task_id=NEW.task_id;
+                        DELETE FROM procedure_checkpoints WHERE task_id=NEW.task_id;
+                        DELETE FROM peer_partition_checkpoints WHERE task_id=NEW.task_id;
+                    END;
+                    DELETE FROM peer_partition_checkpoints
+                        WHERE task_id IN (SELECT task_id FROM retired_task_data);
+                    INSERT INTO schema_migrations(version, applied_at)
+                    VALUES (12, CURRENT_TIMESTAMP);",
+                )?;
+                tx.commit()?;
+            }
+            let task_checkpoint_migration: bool = connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=13)",
+                [],
+                |row| row.get(0),
+            )?;
+            if !task_checkpoint_migration {
+                let tx = connection.transaction()?;
+                tx.execute_batch(
+                    "CREATE TABLE IF NOT EXISTS task_checkpoints (
+                        task_id TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
+                        revision INTEGER NOT NULL CHECK(revision BETWEEN 1 AND 9223372036854775807),
+                        checkpoint_sha256 TEXT NOT NULL CHECK(length(checkpoint_sha256)=64),
+                        checkpoint_json TEXT NOT NULL CHECK(length(checkpoint_json)<=4194304),
+                        updated_at TEXT NOT NULL
+                    );
+                    CREATE TRIGGER IF NOT EXISTS reject_retired_task_checkpoints_insert
+                    BEFORE INSERT ON task_checkpoints
+                    WHEN EXISTS(SELECT 1 FROM retired_task_data WHERE task_id=NEW.task_id)
+                    BEGIN SELECT RAISE(ABORT,'Task checkpoint retention was revoked'); END;
+                    CREATE TRIGGER IF NOT EXISTS reject_retired_task_checkpoints_update
+                    BEFORE UPDATE ON task_checkpoints
+                    WHEN EXISTS(SELECT 1 FROM retired_task_data WHERE task_id=NEW.task_id)
+                    BEGIN SELECT RAISE(ABORT,'Task checkpoint retention was revoked'); END;
+                    DROP TRIGGER IF EXISTS cleanup_retired_task_private_data;
+                    CREATE TRIGGER cleanup_retired_task_private_data
+                    AFTER INSERT ON retired_task_data
+                    BEGIN
+                        DELETE FROM private_artifacts WHERE task_id=NEW.task_id;
+                        DELETE FROM procedure_checkpoints WHERE task_id=NEW.task_id;
+                        DELETE FROM task_checkpoints WHERE task_id=NEW.task_id;
+                        DELETE FROM peer_partition_checkpoints WHERE task_id=NEW.task_id;
+                    END;
+                    DELETE FROM task_checkpoints
+                        WHERE task_id IN (SELECT task_id FROM retired_task_data);
+                    INSERT INTO schema_migrations(version, applied_at)
+                    VALUES (13, CURRENT_TIMESTAMP);",
+                )?;
+                tx.commit()?;
+            }
+            let task_handoff_migration: bool = connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=14)",
+                [],
+                |row| row.get(0),
+            )?;
+            if !task_handoff_migration {
+                let tx = connection.transaction()?;
+                tx.execute_batch(
+                    "CREATE TABLE IF NOT EXISTS incoming_task_handoffs (
+                        transfer_id BLOB PRIMARY KEY CHECK(length(transfer_id)=16),
+                        task_id TEXT NOT NULL,
+                        source_peer BLOB NOT NULL CHECK(length(source_peer)=32),
+                        destination_peer BLOB NOT NULL CHECK(length(destination_peer)=32),
+                        source_device_id TEXT NOT NULL,
+                        destination_device_id TEXT NOT NULL,
+                        source_owner_generation INTEGER NOT NULL CHECK(source_owner_generation BETWEEN 1 AND 9223372036854775806),
+                        checkpoint_sha256 TEXT NOT NULL CHECK(length(checkpoint_sha256)=64),
+                        checkpoint_json TEXT NOT NULL CHECK(length(checkpoint_json)<=4194304),
+                        received_at TEXT NOT NULL,
+                        UNIQUE(task_id,destination_device_id)
+                    ) WITHOUT ROWID;
+                    DROP TRIGGER IF EXISTS cleanup_retired_task_private_data;
+                    CREATE TRIGGER cleanup_retired_task_private_data
+                    AFTER INSERT ON retired_task_data
+                    BEGIN
+                        DELETE FROM private_artifacts WHERE task_id=NEW.task_id;
+                        DELETE FROM procedure_checkpoints WHERE task_id=NEW.task_id;
+                        DELETE FROM task_checkpoints WHERE task_id=NEW.task_id;
+                        DELETE FROM peer_partition_checkpoints WHERE task_id=NEW.task_id;
+                        DELETE FROM incoming_task_handoffs WHERE task_id=NEW.task_id;
+                    END;
+                    DELETE FROM incoming_task_handoffs
+                        WHERE task_id IN (SELECT task_id FROM retired_task_data);
+                    INSERT INTO schema_migrations(version, applied_at)
+                    VALUES (14, CURRENT_TIMESTAMP);",
+                )?;
+                tx.commit()?;
+            }
+            let outgoing_task_handoff_migration: bool = connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=15)",
+                [],
+                |row| row.get(0),
+            )?;
+            if !outgoing_task_handoff_migration {
+                let tx = connection.transaction()?;
+                tx.execute_batch(
+                    "CREATE TABLE IF NOT EXISTS outgoing_task_handoffs (
+                        transfer_id BLOB PRIMARY KEY CHECK(length(transfer_id)=16),
+                        task_id TEXT NOT NULL,
+                        source_peer BLOB NOT NULL CHECK(length(source_peer)=32),
+                        destination_peer BLOB NOT NULL CHECK(length(destination_peer)=32),
+                        source_device_id TEXT NOT NULL,
+                        destination_device_id TEXT NOT NULL,
+                        source_owner_generation INTEGER NOT NULL CHECK(source_owner_generation BETWEEN 1 AND 9223372036854775806),
+                        checkpoint_sha256 TEXT NOT NULL CHECK(length(checkpoint_sha256)=64),
+                        checkpoint_json TEXT NOT NULL CHECK(length(checkpoint_json)<=4194304),
+                        staged_at TEXT NOT NULL,
+                        UNIQUE(task_id,destination_device_id)
+                    ) WITHOUT ROWID;
+                    DROP TRIGGER IF EXISTS cleanup_retired_task_private_data;
+                    CREATE TRIGGER cleanup_retired_task_private_data
+                    AFTER INSERT ON retired_task_data
+                    BEGIN
+                        DELETE FROM private_artifacts WHERE task_id=NEW.task_id;
+                        DELETE FROM procedure_checkpoints WHERE task_id=NEW.task_id;
+                        DELETE FROM task_checkpoints WHERE task_id=NEW.task_id;
+                        DELETE FROM peer_partition_checkpoints WHERE task_id=NEW.task_id;
+                        DELETE FROM incoming_task_handoffs WHERE task_id=NEW.task_id;
+                        DELETE FROM outgoing_task_handoffs WHERE task_id=NEW.task_id;
+                    END;
+                    DELETE FROM outgoing_task_handoffs
+                        WHERE task_id IN (SELECT task_id FROM retired_task_data);
+                    INSERT INTO schema_migrations(version, applied_at)
+                    VALUES (15, CURRENT_TIMESTAMP);",
+                )?;
+                tx.commit()?;
+            }
+            let task_handoff_claim_migration: bool = connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=16)",
+                [],
+                |row| row.get(0),
+            )?;
+            if !task_handoff_claim_migration {
+                let tx = connection.transaction()?;
+                tx.execute_batch(
+                    "CREATE TABLE IF NOT EXISTS task_handoff_execution_claims (
+                        claim_id TEXT PRIMARY KEY CHECK(length(claim_id)=36),
+                        transfer_id BLOB NOT NULL UNIQUE REFERENCES incoming_task_handoffs(transfer_id) ON DELETE CASCADE,
+                        task_id TEXT NOT NULL UNIQUE REFERENCES tasks(id) ON DELETE CASCADE,
+                        destination_peer BLOB NOT NULL CHECK(length(destination_peer)=32),
+                        destination_device_id TEXT NOT NULL,
+                        owner_generation INTEGER NOT NULL CHECK(owner_generation BETWEEN 2 AND 9223372036854775807),
+                        checkpoint_sha256 TEXT NOT NULL CHECK(length(checkpoint_sha256)=64),
+                        claimed_at TEXT NOT NULL
+                    );
+                    CREATE INDEX IF NOT EXISTS task_handoff_claims_by_owner
+                        ON task_handoff_execution_claims(task_id,destination_device_id,owner_generation);
+                    DROP TRIGGER IF EXISTS cleanup_retired_task_private_data;
+                    CREATE TRIGGER cleanup_retired_task_private_data
+                    AFTER INSERT ON retired_task_data
+                    BEGIN
+                        DELETE FROM private_artifacts WHERE task_id=NEW.task_id;
+                        DELETE FROM procedure_checkpoints WHERE task_id=NEW.task_id;
+                        DELETE FROM task_checkpoints WHERE task_id=NEW.task_id;
+                        DELETE FROM peer_partition_checkpoints WHERE task_id=NEW.task_id;
+                        DELETE FROM incoming_task_handoffs WHERE task_id=NEW.task_id;
+                        DELETE FROM outgoing_task_handoffs WHERE task_id=NEW.task_id;
+                        DELETE FROM task_handoff_execution_claims WHERE task_id=NEW.task_id;
+                    END;
+                    DELETE FROM task_handoff_execution_claims
+                        WHERE task_id IN (SELECT task_id FROM retired_task_data);
+                    INSERT INTO schema_migrations(version, applied_at)
+                    VALUES (16, CURRENT_TIMESTAMP);",
+                )?;
+                tx.commit()?;
+            }
+            let task_handoff_artifact_migration: bool = connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=17)",
+                [],
+                |row| row.get(0),
+            )?;
+            if !task_handoff_artifact_migration {
+                let tx = connection.transaction()?;
+                tx.execute_batch(
+                    "CREATE TABLE IF NOT EXISTS outgoing_task_handoff_artifacts (
+                        transfer_id BLOB NOT NULL REFERENCES outgoing_task_handoffs(transfer_id) ON DELETE CASCADE,
+                        task_id TEXT NOT NULL,
+                        artifact_id TEXT NOT NULL,
+                        sha256 TEXT NOT NULL CHECK(length(sha256)=64),
+                        size_bytes INTEGER NOT NULL CHECK(size_bytes BETWEEN 0 AND 16777216),
+                        content BLOB NOT NULL CHECK(length(content)=size_bytes),
+                        PRIMARY KEY(transfer_id,artifact_id)
+                    ) WITHOUT ROWID;
+                    CREATE TABLE IF NOT EXISTS incoming_task_handoff_artifacts (
+                        transfer_id BLOB NOT NULL REFERENCES incoming_task_handoffs(transfer_id) ON DELETE CASCADE,
+                        task_id TEXT NOT NULL,
+                        artifact_id TEXT NOT NULL,
+                        sha256 TEXT NOT NULL CHECK(length(sha256)=64),
+                        size_bytes INTEGER NOT NULL CHECK(size_bytes BETWEEN 0 AND 16777216),
+                        content BLOB NOT NULL CHECK(length(content)=size_bytes),
+                        PRIMARY KEY(transfer_id,artifact_id)
+                    ) WITHOUT ROWID;
+                    CREATE INDEX IF NOT EXISTS outgoing_handoff_artifacts_by_task
+                        ON outgoing_task_handoff_artifacts(task_id);
+                    CREATE INDEX IF NOT EXISTS incoming_handoff_artifacts_by_task
+                        ON incoming_task_handoff_artifacts(task_id);
+                    INSERT INTO schema_migrations(version, applied_at)
+                    VALUES (17, CURRENT_TIMESTAMP);",
+                )?;
+                tx.commit()?;
             }
             Ok(())
         })
@@ -884,7 +1178,11 @@ impl LocalStore {
                 now,
             )?;
             transaction.commit()?;
-            Ok(crate::agency::RevalidatedStoredController { record, rebinding })
+            Ok(crate::agency::RevalidatedStoredController {
+                record,
+                rebinding,
+                observation,
+            })
         })
     }
 
@@ -1069,6 +1367,308 @@ impl LocalStore {
             Ok(())
         })?;
         Ok(Some(checkpoint))
+    }
+
+    /// Persist a transfer-safe task checkpoint in the encrypted local store.
+    /// The expected revision fences concurrent writers. A changed execution
+    /// owner is accepted only as the exact next-generation transfer from the
+    /// previously stored settled checkpoint; this is a local durable fence,
+    /// not a network handoff or a grant to resume on another device.
+    pub fn save_task_checkpoint(
+        &self,
+        checkpoint: &crate::agency::TaskCheckpoint,
+        expected_revision: u64,
+    ) -> CoreResult<u64> {
+        self.with_connection(|connection| {
+            let transaction = connection.transaction()?;
+            let next_revision = Self::save_task_checkpoint_in_transaction(
+                &transaction,
+                checkpoint,
+                expected_revision,
+            )?;
+            transaction.commit()?;
+            Ok(next_revision)
+        })
+    }
+
+    /// Reject broker dispatch when a durable task checkpoint has been paused
+    /// or transferred beyond its initial owner generation. A destination must
+    /// explicitly install the checkpoint and establish a fresh execution
+    /// claim before its task can become runnable.
+    pub(crate) fn validate_task_checkpoint_dispatch_owner(
+        connection: &Connection,
+        task_id: Uuid,
+    ) -> CoreResult<()> {
+        let stored: Option<(String, String)> = connection
+            .query_row(
+                "SELECT checkpoint_sha256,checkpoint_json FROM task_checkpoints WHERE task_id=?1",
+                [task_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((stored_digest, checkpoint_json)) = stored else {
+            return Ok(());
+        };
+        if checkpoint_json.len() > MAX_TASK_CHECKPOINT_BYTES
+            || format!("{:x}", Sha256::digest(checkpoint_json.as_bytes())) != stored_digest
+        {
+            return Err(CoreError::VerificationFailed(
+                "Stored task checkpoint digest or size is invalid".into(),
+            ));
+        }
+        let checkpoint: crate::agency::TaskCheckpoint = serde_json::from_str(&checkpoint_json)?;
+        checkpoint.validate()?;
+        if checkpoint.task_id != task_id {
+            return Err(CoreError::VerificationFailed(
+                "Stored task checkpoint belongs to another task".into(),
+            ));
+        }
+        let owner_claimed = if checkpoint.execution_owner.generation == 1 {
+            true
+        } else {
+            connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM task_handoff_execution_claims WHERE task_id=?1 AND destination_device_id=?2 AND owner_generation=?3)",
+                rusqlite::params![
+                    task_id.to_string(),
+                    checkpoint.execution_owner.device_id.to_string(),
+                    checkpoint.execution_owner.generation as i64,
+                ],
+                |row| row.get::<_, bool>(0),
+            )?
+        };
+        if !owner_claimed
+            || checkpoint.state != crate::agency::CheckpointState::Settled
+            || !checkpoint.dispatched_effects_settled
+            || !checkpoint.pending_obligations.is_empty()
+        {
+            return Err(CoreError::PermissionRequired(
+                "Task dispatch is fenced by a paused or transferred checkpoint; install it and reauthorize destination resources before resuming".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn save_task_checkpoint_in_transaction(
+        transaction: &Transaction<'_>,
+        checkpoint: &crate::agency::TaskCheckpoint,
+        expected_revision: u64,
+    ) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
+        checkpoint.validate()?;
+        if expected_revision > i64::MAX as u64 {
+            return Err(Box::new(CoreError::Storage(
+                "Task checkpoint revision is exhausted".into(),
+            )));
+        }
+        let checkpoint_json = serde_json::to_string(checkpoint)?;
+        if checkpoint_json.len() > MAX_TASK_CHECKPOINT_BYTES {
+            return Err(Box::new(CoreError::Storage(
+                "Task checkpoint exceeds its serialized size limit".into(),
+            )));
+        }
+        let checkpoint_sha256 = format!("{:x}", Sha256::digest(checkpoint_json.as_bytes()));
+        let mut ownership_transfer = None;
+        let task_exists: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM tasks WHERE id=?1)",
+            [checkpoint.task_id.to_string()],
+            |row| row.get(0),
+        )?;
+        if !task_exists {
+            return Err(Box::new(CoreError::Storage(
+                "Task checkpoint task does not exist".into(),
+            )));
+        }
+        let retention_revoked: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM retired_task_data WHERE task_id=?1)",
+            [checkpoint.task_id.to_string()],
+            |row| row.get(0),
+        )?;
+        if retention_revoked {
+            return Err(Box::new(CoreError::Storage(
+                "Task checkpoint retention was revoked".into(),
+            )));
+        }
+
+        let previous: Option<(i64, String, String)> = transaction
+                .query_row(
+                    "SELECT revision,checkpoint_sha256,checkpoint_json FROM task_checkpoints WHERE task_id=?1",
+                    [checkpoint.task_id.to_string()],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()?;
+        match previous {
+            None if expected_revision != 0 => {
+                return Err(Box::new(CoreError::Storage(
+                    "Initial task checkpoint revision is invalid".into(),
+                )));
+            }
+            None if checkpoint.execution_owner.generation != 1 => {
+                let eligible_claim: bool = transaction.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM task_handoff_execution_claims WHERE task_id=?1 AND destination_device_id=?2 AND owner_generation=?3 AND checkpoint_sha256=?4)",
+                    rusqlite::params![
+                        checkpoint.task_id.to_string(),
+                        checkpoint.execution_owner.device_id.to_string(),
+                        checkpoint.execution_owner.generation as i64,
+                        checkpoint_sha256,
+                    ],
+                    |row| row.get(0),
+                )?;
+                if !eligible_claim
+                    || checkpoint.state != crate::agency::CheckpointState::Paused
+                    || !checkpoint.dispatched_effects_settled
+                    || !checkpoint.pending_obligations.is_empty()
+                {
+                    return Err(Box::new(CoreError::PermissionRequired(
+                        "A transferred task checkpoint requires a matching durable destination claim".into(),
+                    )));
+                }
+            }
+            Some((revision, stored_digest, stored_json)) => {
+                if revision < 1 || revision as u64 != expected_revision {
+                    return Err(Box::new(CoreError::Storage(
+                        "Task checkpoint revision changed".into(),
+                    )));
+                }
+                if stored_json.len() > MAX_TASK_CHECKPOINT_BYTES
+                    || format!("{:x}", Sha256::digest(stored_json.as_bytes())) != stored_digest
+                {
+                    return Err(Box::new(CoreError::VerificationFailed(
+                        "Stored task checkpoint digest or size is invalid".into(),
+                    )));
+                }
+                let previous_checkpoint: crate::agency::TaskCheckpoint =
+                    serde_json::from_str(&stored_json)?;
+                previous_checkpoint.validate()?;
+                if previous_checkpoint.task_id != checkpoint.task_id {
+                    return Err(Box::new(CoreError::VerificationFailed(
+                        "Stored task checkpoint belongs to another task".into(),
+                    )));
+                }
+                if previous_checkpoint.execution_owner != checkpoint.execution_owner {
+                    ownership_transfer = Some((
+                        previous_checkpoint.execution_owner.device_id,
+                        checkpoint.execution_owner.device_id,
+                        checkpoint.execution_owner.generation,
+                    ));
+                    let mut expected_transfer = previous_checkpoint;
+                    expected_transfer.transfer_ownership(checkpoint.execution_owner.device_id)?;
+                    if serde_json::to_value(&expected_transfer)?
+                        != serde_json::to_value(checkpoint)?
+                    {
+                        return Err(Box::new(CoreError::PermissionRequired(
+                                "Task handoff must preserve settled progress and advance only the owner fence".into(),
+                            )));
+                    }
+                }
+            }
+            None => {}
+        }
+
+        let next_revision = expected_revision
+            .checked_add(1)
+            .ok_or_else(|| CoreError::Storage("Task checkpoint revision is exhausted".into()))?;
+        if next_revision > i64::MAX as u64 {
+            return Err(Box::new(CoreError::Storage(
+                "Task checkpoint revision is exhausted".into(),
+            )));
+        }
+        let updated_at = Utc::now().to_rfc3339();
+        let changed = transaction.execute(
+                "INSERT INTO task_checkpoints(task_id,revision,checkpoint_sha256,checkpoint_json,updated_at) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(task_id) DO UPDATE SET revision=excluded.revision,checkpoint_sha256=excluded.checkpoint_sha256,checkpoint_json=excluded.checkpoint_json,updated_at=excluded.updated_at WHERE task_checkpoints.revision=?6",
+                params![
+                    checkpoint.task_id.to_string(),
+                    next_revision as i64,
+                    checkpoint_sha256,
+                    checkpoint_json,
+                    updated_at,
+                    expected_revision as i64,
+                ],
+            )?;
+        if changed != 1 {
+            return Err(Box::new(CoreError::Storage(
+                "Task checkpoint revision changed".into(),
+            )));
+        }
+        if let Some((source, destination, generation)) = ownership_transfer {
+            write_audit(
+                transaction,
+                Some(checkpoint.task_id),
+                None,
+                "task_checkpoint_owner_transferred",
+                &serde_json::json!({
+                    "source_device_id": source,
+                    "destination_device_id": destination,
+                    "owner_generation": generation,
+                    "checkpoint_revision": next_revision,
+                }),
+            )?;
+        }
+        Ok(next_revision)
+    }
+
+    /// Load a size-bounded, digest-checked task checkpoint from one SQLite
+    /// snapshot. Its descriptive progress is not runnable until a separate
+    /// destination flow re-resolves resources and obtains fresh authority.
+    pub fn load_task_checkpoint(
+        &self,
+        task_id: Uuid,
+    ) -> CoreResult<Option<(crate::agency::TaskCheckpoint, u64)>> {
+        if task_id.is_nil() {
+            return Err(CoreError::InvalidAction(
+                "Task checkpoint requires a task identity".into(),
+            ));
+        }
+        let stored = self.with_connection(|connection| {
+            let transaction = connection.transaction()?;
+            let lengths: Option<i64> = transaction
+                .query_row(
+                    "SELECT length(checkpoint_json) FROM task_checkpoints WHERE task_id=?1",
+                    [task_id.to_string()],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let Some(length) = lengths else {
+                transaction.commit()?;
+                return Ok(None);
+            };
+            if length < 0 || length as usize > MAX_TASK_CHECKPOINT_BYTES {
+                return Err(Box::new(CoreError::VerificationFailed(
+                    "Stored task checkpoint exceeds its size limit".into(),
+                )));
+            }
+            let row = transaction.query_row(
+                "SELECT revision,checkpoint_sha256,checkpoint_json FROM task_checkpoints WHERE task_id=?1",
+                [task_id.to_string()],
+                |row| Ok((row.get::<_, i64>(0)?,row.get::<_, String>(1)?,row.get::<_, String>(2)?)),
+            )?;
+            let task_exists: bool = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM tasks WHERE id=?1)",
+                [task_id.to_string()],
+                |row| row.get(0),
+            )?;
+            transaction.commit()?;
+            Ok(Some((row, task_exists)))
+        })?;
+        let Some(((revision, stored_digest, checkpoint_json), task_exists)) = stored else {
+            return Ok(None);
+        };
+        if !task_exists || revision < 1 || checkpoint_json.len() > MAX_TASK_CHECKPOINT_BYTES {
+            return Err(CoreError::VerificationFailed(
+                "Stored task checkpoint identity or revision is invalid".into(),
+            ));
+        }
+        if format!("{:x}", Sha256::digest(checkpoint_json.as_bytes())) != stored_digest {
+            return Err(CoreError::VerificationFailed(
+                "Stored task checkpoint digest does not match its content".into(),
+            ));
+        }
+        let checkpoint: crate::agency::TaskCheckpoint = serde_json::from_str(&checkpoint_json)?;
+        checkpoint.validate()?;
+        if checkpoint.task_id != task_id {
+            return Err(CoreError::VerificationFailed(
+                "Stored task checkpoint belongs to another task".into(),
+            ));
+        }
+        Ok(Some((checkpoint, revision as u64)))
     }
 
     pub(crate) fn task_data_is_retired(&self, task_id: Uuid) -> CoreResult<bool> {
@@ -1371,6 +1971,489 @@ impl LocalStore {
                 .map(|value| serde_json::from_str(&value))
                 .transpose()
                 .map_err(Into::into)
+        })
+    }
+
+    /// Check the durable local task and owner fence before peer input bytes
+    /// can be serialized or sent. A live peer lease cannot revive a stopped,
+    /// terminal, transferred, or locked local task.
+    pub fn validate_peer_compute_task_dispatch(&self, task_id: Uuid) -> CoreResult<()> {
+        if self.is_locked() {
+            return Err(CoreError::PermissionRequired(
+                "Protected storage must be unlocked before peer compute".into(),
+            ));
+        }
+        if task_id.is_nil() {
+            return Err(CoreError::InvalidAction(
+                "Peer compute requires an exact local task".into(),
+            ));
+        }
+
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| CoreError::Storage("database lock poisoned".into()))?;
+        let task_json: Option<String> = connection
+            .query_row(
+                "SELECT task_json FROM tasks WHERE id=?1",
+                [task_id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(task_json) = task_json else {
+            return Err(CoreError::TaskNotFound(task_id.to_string()));
+        };
+        let task: Task = serde_json::from_str(&task_json)?;
+        if task.id != task_id {
+            return Err(CoreError::VerificationFailed(
+                "Peer compute task identity does not match its storage key".into(),
+            ));
+        }
+        if task.status != TaskStatus::Running {
+            return Err(CoreError::PermissionRequired(
+                "Peer compute requires a currently running task".into(),
+            ));
+        }
+        let scope_stopped: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM control_scopes WHERE id=?1 AND stopped_at IS NOT NULL)",
+            [task.control_scope().to_string()],
+            |row| row.get(0),
+        )?;
+        if scope_stopped {
+            return Err(CoreError::Cancelled);
+        }
+        let retention_revoked: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM retired_task_data WHERE task_id=?1)",
+            [task_id.to_string()],
+            |row| row.get(0),
+        )?;
+        if retention_revoked {
+            return Err(CoreError::PermissionRequired(
+                "Peer compute is unavailable after task data was forgotten".into(),
+            ));
+        }
+        Self::validate_task_checkpoint_dispatch_owner(&connection, task_id)
+    }
+
+    /// Persist a previously verified peer partition in the encrypted local
+    /// database. Output bytes are inserted as bounded 1 MiB chunks in one
+    /// transaction; duplicate identical checkpoints are idempotent.
+    pub fn save_peer_partition_checkpoint(
+        &self,
+        task_id: Uuid,
+        checkpoint: &PartitionCheckpoint,
+    ) -> CoreResult<()> {
+        if self.is_locked() {
+            return Err(CoreError::Storage(
+                "Protected storage must be unlocked to save peer results".into(),
+            ));
+        }
+        let outputs = checkpoint.outputs();
+        if outputs.is_empty() || outputs.len() > MAX_PEER_CHECKPOINT_OUTPUTS {
+            return Err(CoreError::Storage(
+                "Peer checkpoint output count is outside its bound".into(),
+            ));
+        }
+        let total_output_bytes = outputs
+            .iter()
+            .try_fold(0_u64, |total, output| {
+                total.checked_add(output.bytes().len() as u64)
+            })
+            .filter(|total| *total <= MAX_PEER_CHECKPOINT_BYTES)
+            .ok_or_else(|| {
+                CoreError::Storage("Peer checkpoint exceeds its output byte bound".into())
+            })?;
+        let output_count = i64::try_from(outputs.len())
+            .map_err(|_| CoreError::Storage("Peer checkpoint output count overflow".into()))?;
+
+        self.with_connection(|connection| {
+            let tx = connection.transaction()?;
+            let inserted = tx.execute(
+                "INSERT OR IGNORE INTO peer_partition_checkpoints(
+                    task_id,job_id,partition_index,plan_digest,peer_id,result_digest,
+                    output_count,total_output_bytes,saved_at
+                 ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+                params![
+                    task_id.to_string(),
+                    checkpoint.job_id().as_slice(),
+                    i64::from(checkpoint.partition_index()),
+                    checkpoint.plan_digest().as_slice(),
+                    checkpoint.peer().as_bytes().as_slice(),
+                    checkpoint.result_digest().as_slice(),
+                    output_count,
+                    i64::try_from(total_output_bytes)
+                        .map_err(|_| { PeerError::InvalidComputeResult })?,
+                    Utc::now().to_rfc3339(),
+                ],
+            )?;
+            if inserted == 0 {
+                let existing: (String, Vec<u8>, Vec<u8>, Vec<u8>, i64, i64) = tx.query_row(
+                    "SELECT task_id,plan_digest,peer_id,result_digest,output_count,total_output_bytes
+                     FROM peer_partition_checkpoints WHERE job_id=?1 AND partition_index=?2",
+                    params![
+                        checkpoint.job_id().as_slice(),
+                        i64::from(checkpoint.partition_index())
+                    ],
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                            row.get(5)?,
+                        ))
+                    },
+                )?;
+                if existing.0 == task_id.to_string()
+                    && existing.1.as_slice() == checkpoint.plan_digest()
+                    && existing.2.as_slice() == checkpoint.peer().as_bytes()
+                    && existing.3.as_slice() == checkpoint.result_digest()
+                    && existing.4 == output_count
+                    && existing.5 == total_output_bytes as i64
+                {
+                    return Ok(());
+                }
+                return Err(PeerError::DuplicateJob.into());
+            }
+
+            for (ordinal, output) in outputs.iter().enumerate() {
+                let output_bytes = output.bytes();
+                let chunk_count = output_bytes.len().div_ceil(PEER_CHECKPOINT_CHUNK_BYTES);
+                tx.execute(
+                    "INSERT INTO peer_partition_checkpoint_outputs(
+                        job_id,partition_index,ordinal,unit_index,input_digest,
+                        output_bytes,chunk_count
+                     ) VALUES(?1,?2,?3,?4,?5,?6,?7)",
+                    params![
+                        checkpoint.job_id().as_slice(),
+                        i64::from(checkpoint.partition_index()),
+                        i64::try_from(ordinal).map_err(|_| PeerError::InvalidComputeResult)?,
+                        i64::from(output.index()),
+                        output.input_digest().as_slice(),
+                        i64::try_from(output_bytes.len())
+                            .map_err(|_| PeerError::InvalidComputeResult)?,
+                        i64::try_from(chunk_count).map_err(|_| PeerError::InvalidComputeResult)?,
+                    ],
+                )?;
+                for (chunk_index, chunk) in
+                    output_bytes.chunks(PEER_CHECKPOINT_CHUNK_BYTES).enumerate()
+                {
+                    tx.execute(
+                        "INSERT INTO peer_partition_checkpoint_chunks(
+                            job_id,partition_index,ordinal,chunk_index,content
+                         ) VALUES(?1,?2,?3,?4,?5)",
+                        params![
+                            checkpoint.job_id().as_slice(),
+                            i64::from(checkpoint.partition_index()),
+                            i64::try_from(ordinal).map_err(|_| PeerError::InvalidComputeResult)?,
+                            i64::try_from(chunk_index)
+                                .map_err(|_| PeerError::InvalidComputeResult)?,
+                            chunk,
+                        ],
+                    )?;
+                }
+            }
+            tx.commit()?;
+            Ok(())
+        })
+    }
+
+    /// Load a stored partition only after rebuilding its bounded output
+    /// buffers and rerunning the caller's task-specific verifier against the
+    /// current plan. The encrypted database is treated as untrusted input.
+    pub fn load_peer_partition_checkpoint(
+        &self,
+        task_id: Uuid,
+        plan: &ComputePlan,
+        partition_index: u16,
+        mut verify_unit: impl FnMut(&ComputeUnitSpec, &[u8]) -> bool,
+    ) -> CoreResult<Option<PartitionCheckpoint>> {
+        if self.is_locked() {
+            return Err(CoreError::Storage(
+                "Protected storage must be unlocked to load peer results".into(),
+            ));
+        }
+
+        self.with_connection(|connection| {
+            let header: Option<PeerCheckpointHeader> = connection
+                .query_row(
+                    "SELECT CASE WHEN length(plan_digest)=32 THEN plan_digest ELSE X'' END,
+                            length(plan_digest),
+                            CASE WHEN length(peer_id)=32 THEN peer_id ELSE X'' END,
+                            length(peer_id),
+                            CASE WHEN length(result_digest)=32 THEN result_digest ELSE X'' END,
+                            length(result_digest),
+                            output_count,total_output_bytes
+                     FROM peer_partition_checkpoints
+                     WHERE task_id=?1 AND job_id=?2 AND partition_index=?3",
+                    params![
+                        task_id.to_string(),
+                        plan.job_id().as_slice(),
+                        i64::from(partition_index)
+                    ],
+                    |row| {
+                        Ok(PeerCheckpointHeader {
+                            plan_digest: row.get(0)?,
+                            plan_digest_len: row.get(1)?,
+                            peer_id: row.get(2)?,
+                            peer_id_len: row.get(3)?,
+                            result_digest: row.get(4)?,
+                            result_digest_len: row.get(5)?,
+                            output_count: row.get(6)?,
+                            total_output_bytes: row.get(7)?,
+                        })
+                    },
+                )
+                .optional()?;
+            let Some(header) = header else {
+                return Ok(None);
+            };
+            if header.plan_digest_len != 32
+                || header.peer_id_len != 32
+                || header.result_digest_len != 32
+                || header.plan_digest.as_slice() != plan.plan_digest()
+                || !(1..=MAX_PEER_CHECKPOINT_OUTPUTS as i64).contains(&header.output_count)
+                || !(0..=MAX_PEER_CHECKPOINT_BYTES as i64).contains(&header.total_output_bytes)
+            {
+                return Err(PeerError::InvalidComputeResult.into());
+            }
+            let peer_id = <[u8; 32]>::try_from(header.peer_id.as_slice())
+                .map(PeerId::from_bytes)
+                .map_err(|_| PeerError::InvalidComputeResult)?;
+            let expected_result_digest = <[u8; 32]>::try_from(header.result_digest.as_slice())
+                .map_err(|_| PeerError::InvalidComputeResult)?;
+            let output_count = usize::try_from(header.output_count)
+                .map_err(|_| PeerError::InvalidComputeResult)?;
+            let total_bytes = usize::try_from(header.total_output_bytes)
+                .map_err(|_| PeerError::InvalidComputeResult)?;
+
+            let mut metadata_statement = connection.prepare(
+                "SELECT ordinal,unit_index,
+                        CASE WHEN length(input_digest)=32 THEN input_digest ELSE X'' END,
+                        length(input_digest),output_bytes,chunk_count
+                 FROM peer_partition_checkpoint_outputs
+                 WHERE job_id=?1 AND partition_index=?2 ORDER BY ordinal",
+            )?;
+            let metadata_rows = metadata_statement.query_map(
+                params![plan.job_id().as_slice(), i64::from(partition_index)],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, Vec<u8>>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, i64>(4)?,
+                        row.get::<_, i64>(5)?,
+                    ))
+                },
+            )?;
+            let mut metadata = Vec::new();
+            metadata
+                .try_reserve_exact(output_count)
+                .map_err(|error| Box::new(error) as Box<dyn std::error::Error + Send + Sync>)?;
+            for row in metadata_rows {
+                metadata.push(row?);
+            }
+            drop(metadata_statement);
+            if metadata.len() != output_count {
+                return Err(PeerError::InvalidComputeResult.into());
+            }
+
+            let mut outputs = Vec::new();
+            outputs
+                .try_reserve_exact(output_count)
+                .map_err(|error| Box::new(error) as Box<dyn std::error::Error + Send + Sync>)?;
+            let mut assembled_bytes = 0_usize;
+            for (
+                expected_ordinal,
+                (ordinal, unit_index, digest_bytes, digest_len, output_bytes, chunk_count),
+            ) in metadata.into_iter().enumerate()
+            {
+                if ordinal != expected_ordinal as i64
+                    || digest_len != 32
+                    || !(0..=MAX_PEER_CHECKPOINT_BYTES as i64).contains(&output_bytes)
+                {
+                    return Err(PeerError::InvalidComputeResult.into());
+                }
+                let output_bytes =
+                    usize::try_from(output_bytes).map_err(|_| PeerError::InvalidComputeResult)?;
+                let expected_chunks = output_bytes.div_ceil(PEER_CHECKPOINT_CHUNK_BYTES);
+                if chunk_count != expected_chunks as i64 {
+                    return Err(PeerError::InvalidComputeResult.into());
+                }
+                assembled_bytes = assembled_bytes
+                    .checked_add(output_bytes)
+                    .filter(|total| *total <= MAX_PEER_CHECKPOINT_BYTES as usize)
+                    .ok_or(PeerError::InvalidComputeResult)?;
+                let unit_index =
+                    u32::try_from(unit_index).map_err(|_| PeerError::InvalidComputeResult)?;
+                let input_digest = <[u8; 32]>::try_from(digest_bytes.as_slice())
+                    .map_err(|_| PeerError::InvalidComputeResult)?;
+                let mut content = Zeroizing::new(Vec::new());
+                content
+                    .try_reserve_exact(output_bytes)
+                    .map_err(|error| Box::new(error) as Box<dyn std::error::Error + Send + Sync>)?;
+
+                let mut chunk_statement = connection.prepare(
+                    "SELECT chunk_index,
+                            CASE WHEN length(content) BETWEEN 1 AND 1048576
+                                 THEN content ELSE X'' END,
+                            length(content)
+                     FROM peer_partition_checkpoint_chunks
+                     WHERE job_id=?1 AND partition_index=?2 AND ordinal=?3
+                     ORDER BY chunk_index",
+                )?;
+                let mut chunk_rows = chunk_statement.query(params![
+                    plan.job_id().as_slice(),
+                    i64::from(partition_index),
+                    expected_ordinal as i64,
+                ])?;
+                let mut next_byte = 0_usize;
+                for expected_chunk in 0..expected_chunks {
+                    let row = chunk_rows.next()?.ok_or(PeerError::InvalidComputeResult)?;
+                    let chunk_index = row.get::<_, i64>(0)?;
+                    let chunk = Zeroizing::new(row.get::<_, Vec<u8>>(1)?);
+                    let stored_chunk_bytes = row.get::<_, i64>(2)?;
+                    let expected_chunk_bytes =
+                        (output_bytes - next_byte).min(PEER_CHECKPOINT_CHUNK_BYTES);
+                    if chunk_index != expected_chunk as i64
+                        || stored_chunk_bytes != expected_chunk_bytes as i64
+                        || chunk.len() != expected_chunk_bytes
+                    {
+                        return Err(PeerError::InvalidComputeResult.into());
+                    }
+                    content.extend_from_slice(&chunk);
+                    next_byte += expected_chunk_bytes;
+                }
+                if chunk_rows.next()?.is_some() || content.len() != output_bytes {
+                    return Err(PeerError::InvalidComputeResult.into());
+                }
+                drop(chunk_rows);
+                drop(chunk_statement);
+                outputs.push(UnitOutput::from_zeroizing(
+                    unit_index,
+                    input_digest,
+                    content,
+                )?);
+            }
+            if assembled_bytes != total_bytes {
+                return Err(PeerError::InvalidComputeResult.into());
+            }
+            let result = PartitionResult::new(
+                *plan.job_id(),
+                *plan.plan_digest(),
+                partition_index,
+                outputs,
+            )?;
+            let verified =
+                plan.verify_partition_result(partition_index, peer_id, result, &mut verify_unit)?;
+            if verified.result_digest() != &expected_result_digest {
+                return Err(PeerError::InvalidComputeResult.into());
+            }
+            Ok(Some(verified.checkpoint()))
+        })
+    }
+
+    /// Remove every encrypted peer result attributed to a forgotten device.
+    pub fn delete_peer_partition_checkpoints(&self, peer_id: PeerId) -> CoreResult<u64> {
+        if self.is_locked() {
+            return Err(CoreError::Storage(
+                "Protected storage must be unlocked to remove peer results".into(),
+            ));
+        }
+        self.with_connection(|connection| {
+            let tx = connection.transaction()?;
+            let deleted = tx.execute(
+                "DELETE FROM peer_partition_checkpoints WHERE peer_id=?1",
+                [peer_id.as_bytes().as_slice()],
+            )?;
+            tx.commit()?;
+            Ok(deleted as u64)
+        })
+    }
+
+    pub(crate) fn record_execution_timing(
+        &self,
+        operation: &str,
+        elapsed_micros: u64,
+        succeeded: bool,
+    ) -> CoreResult<()> {
+        if operation.is_empty()
+            || operation.len() > 64
+            || !operation
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+        {
+            return Err(CoreError::Storage(
+                "Invalid low-cardinality execution timing key".into(),
+            ));
+        }
+        if self.is_locked() {
+            return Ok(());
+        }
+        let sample = elapsed_micros.clamp(1, 60_000_000) as i64;
+        let success = i64::from(succeeded);
+        let failure = i64::from(!succeeded);
+        self.with_connection(|connection| {
+            connection.execute(
+                "INSERT INTO execution_timings(operation,ewma_micros,attempts,successes,failures,updated_at)
+                 VALUES(?1,?2,1,?3,?4,?5)
+                 ON CONFLICT(operation) DO UPDATE SET
+                   ewma_micros=(execution_timings.ewma_micros * 7 + excluded.ewma_micros) / 8,
+                   attempts=CASE WHEN execution_timings.attempts < 1000000
+                                 THEN execution_timings.attempts + 1
+                                 ELSE (execution_timings.attempts / 2) + 1 END,
+                   successes=CASE WHEN execution_timings.attempts < 1000000
+                                  THEN execution_timings.successes + excluded.successes
+                                  ELSE (execution_timings.successes / 2) + excluded.successes END,
+                   failures=CASE WHEN execution_timings.attempts < 1000000
+                                 THEN execution_timings.failures + excluded.failures
+                                 ELSE (execution_timings.failures / 2) + excluded.failures END,
+                   updated_at=excluded.updated_at",
+                params![operation, sample, success, failure, Utc::now().to_rfc3339()],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub(crate) fn load_execution_timings(
+        &self,
+    ) -> CoreResult<Vec<crate::scheduling::PersistedTiming>> {
+        self.with_connection(|connection| {
+            let mut statement = connection.prepare(
+                "SELECT operation,ewma_micros,attempts,successes,failures
+                 FROM execution_timings ORDER BY updated_at DESC LIMIT 64",
+            )?;
+            let rows = statement.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                ))
+            })?;
+            let mut records = Vec::new();
+            for row in rows {
+                let (operation, ewma_micros, attempts, successes, failures) = row?;
+                let (Ok(ewma_micros), Ok(attempts), Ok(successes), Ok(failures)) = (
+                    u64::try_from(ewma_micros),
+                    u64::try_from(attempts),
+                    u64::try_from(successes),
+                    u64::try_from(failures),
+                ) else {
+                    continue;
+                };
+                records.push(crate::scheduling::PersistedTiming {
+                    operation,
+                    ewma_micros,
+                    attempts,
+                    successes,
+                    failures,
+                });
+            }
+            Ok(records)
         })
     }
 
@@ -1956,6 +3039,124 @@ fn validate_procedure_checkpoint_receipts(
                 ));
             }
         }
+        if node_has_stream {
+            let channels = procedure
+                .streams
+                .iter()
+                .filter(|stream| {
+                    stream.producer_node == *node_id || stream.consumer_node == *node_id
+                })
+                .collect::<Vec<_>>();
+            let [channel] = channels.as_slice() else {
+                return Err(CoreError::VerificationFailed(
+                    "The native file stream action must have exactly one declared channel".into(),
+                ));
+            };
+            let producer_descriptor = descriptors_by_node
+                .get(channel.producer_node.as_str())
+                .ok_or_else(|| {
+                    CoreError::VerificationFailed(
+                        "File stream producer capability is not current".into(),
+                    )
+                })?;
+            let consumer_descriptor = descriptors_by_node
+                .get(channel.consumer_node.as_str())
+                .ok_or_else(|| {
+                    CoreError::VerificationFailed(
+                        "File stream consumer capability is not current".into(),
+                    )
+                })?;
+            let producer_port = producer_descriptor
+                .output_ports
+                .iter()
+                .find(|port| port.name == channel.producer_output)
+                .ok_or_else(|| {
+                    CoreError::VerificationFailed("File stream output port is not current".into())
+                })?;
+            let consumer_port = consumer_descriptor
+                .input_ports
+                .iter()
+                .find(|port| port.name == channel.consumer_input)
+                .ok_or_else(|| {
+                    CoreError::VerificationFailed("File stream input port is not current".into())
+                })?;
+            let maximum_bytes = producer_port
+                .max_bytes
+                .min(consumer_port.max_bytes)
+                .min(crate::execution::files::MAX_BYTES);
+            let metadata_value = |name: &str| {
+                proposal
+                    .metadata
+                    .get(name)
+                    .map(String::as_str)
+                    .unwrap_or_default()
+            };
+            let stream_contract_matches = match &proposal.action {
+                crate::domain::Action::ReadFile { path, max_bytes }
+                    if channel.producer_node == *node_id
+                        && producer_descriptor.executor_id.as_deref() == Some("read_file") =>
+                {
+                    matches!(
+                        &proposal.expected_outcome,
+                        crate::domain::ExpectedOutcome::FileReadMatchesStream {
+                            path: expected_path,
+                            channel_id,
+                            producer_node,
+                            output_port,
+                            consumer_node,
+                            maximum_bytes: expected_maximum,
+                        } if expected_path == path
+                            && channel_id == &channel.id
+                            && producer_node == &channel.producer_node
+                            && output_port == &channel.producer_output
+                            && consumer_node == &channel.consumer_node
+                            && *expected_maximum == maximum_bytes
+                    ) && *max_bytes >= maximum_bytes
+                        && metadata_value("procedure_stream_output") == channel.producer_output
+                        && metadata_value("procedure_stream_consumer_node") == channel.consumer_node
+                        && metadata_value("procedure_stream_channel_id") == channel.id
+                        && metadata_value("procedure_stream_max_bytes") == maximum_bytes.to_string()
+                        && metadata_value("procedure_stream_item_bytes")
+                            == channel.maximum_item_bytes.to_string()
+                        && producer_port.value_type == crate::world_model::PortType::Bytes
+                        && consumer_port.value_type == crate::world_model::PortType::Bytes
+                        && channel.maximum_item_bytes <= maximum_bytes
+                }
+                crate::domain::Action::WriteFile { path, content, .. }
+                    if channel.consumer_node == *node_id
+                        && consumer_descriptor.executor_id.as_deref() == Some("write_file") =>
+                {
+                    content.is_empty()
+                        && matches!(
+                            &proposal.expected_outcome,
+                            crate::domain::ExpectedOutcome::FileMatchesStream {
+                                path: expected_path,
+                                channel_id,
+                                producer_node,
+                                maximum_bytes: expected_maximum,
+                            } if expected_path == path
+                                && channel_id == &channel.id
+                                && producer_node == &channel.producer_node
+                                && *expected_maximum == maximum_bytes
+                        )
+                        && metadata_value("procedure_stream_input") == channel.consumer_input
+                        && metadata_value("procedure_stream_producer_node") == channel.producer_node
+                        && metadata_value("procedure_stream_channel_id") == channel.id
+                        && metadata_value("procedure_stream_max_bytes") == maximum_bytes.to_string()
+                        && producer_port.value_type == crate::world_model::PortType::Bytes
+                        && consumer_port.value_type == crate::world_model::PortType::Bytes
+                        && channel.maximum_item_bytes <= maximum_bytes
+                }
+                crate::domain::Action::ReadFile { .. }
+                | crate::domain::Action::WriteFile { .. } => false,
+                _ => true,
+            };
+            if !stream_contract_matches {
+                return Err(CoreError::VerificationFailed(
+                    "Streamed file action does not match its exact durable channel contract".into(),
+                ));
+            }
+        }
         let mut action_field_values = serde_json::to_value(&proposal.action)?
             .as_object()
             .cloned()
@@ -1983,7 +3184,60 @@ fn validate_procedure_checkpoint_receipts(
                 "Procedure inputs do not cover the exact registered task action".into(),
             ));
         }
+        let streamed_write_content_is_bound = matches!(
+            (&action.proposal.action, resolved_inputs.get("content")),
+            (
+                crate::domain::Action::WriteFile { content, .. },
+                Some(crate::agency::ResolvedProcedureInput::Stream {
+                    channel_id,
+                    source_port,
+                    target_port,
+                })
+            ) if content.is_empty()
+                && descriptor.executor_id.as_deref() == Some("write_file")
+                && source_port.value_type == crate::world_model::PortType::Bytes
+                && target_port.value_type == crate::world_model::PortType::Bytes
+                && procedure.streams.iter().any(|stream| {
+                    stream.id == *channel_id
+                        && stream.consumer_node == *node_id
+                        && stream.consumer_input == "content"
+                })
+        );
         let input_shape_matches = match &action.proposal.action {
+            crate::domain::Action::ReadFile { .. }
+                if descriptor.id == "sage.local.read_file"
+                    && descriptor.executor_id.as_deref() == Some("read_file") =>
+            {
+                let input_names = resolved_inputs
+                    .keys()
+                    .map(String::as_str)
+                    .collect::<BTreeSet<_>>();
+                let action_names = action_field_values
+                    .keys()
+                    .map(String::as_str)
+                    .collect::<BTreeSet<_>>();
+                input_names == BTreeSet::from(["path", "max_bytes"])
+                    && action_names == BTreeSet::from(["path", "max_bytes"])
+            }
+            crate::domain::Action::WriteFile { .. }
+                if descriptor.id == "sage.local.write_file"
+                    && descriptor.executor_id.as_deref() == Some("write_file") =>
+            {
+                let input_names = resolved_inputs
+                    .iter()
+                    .filter_map(|(name, input)| {
+                        (!matches!(input, crate::agency::ResolvedProcedureInput::Stream { .. }))
+                            .then_some(name.as_str())
+                    })
+                    .collect::<BTreeSet<_>>();
+                let action_names = action_field_values
+                    .keys()
+                    .map(String::as_str)
+                    .collect::<BTreeSet<_>>();
+                streamed_write_content_is_bound
+                    && input_names == BTreeSet::from(["path", "overwrite"])
+                    && action_names == BTreeSet::from(["path", "content", "overwrite"])
+            }
             crate::domain::Action::SetApplicationControl {
                 application,
                 system_id: action_system_id,
@@ -2013,9 +3267,14 @@ fn validate_procedure_checkpoint_receipts(
                     .collect::<BTreeSet<_>>();
                 let input_names = resolved_inputs
                     .iter()
-                    .filter_map(|(name, input)| {
-                        (!matches!(input, crate::agency::ResolvedProcedureInput::Stream { .. }))
-                            .then_some(name.as_str())
+                    .filter_map(|(name, input)| match input {
+                        crate::agency::ResolvedProcedureInput::Stream { .. }
+                            if streamed_write_content_is_bound && name == "content" =>
+                        {
+                            Some(name.as_str())
+                        }
+                        crate::agency::ResolvedProcedureInput::Stream { .. } => None,
+                        _ => Some(name.as_str()),
                     })
                     .collect::<BTreeSet<_>>();
                 let system_matches = system.as_ref().is_some_and(|(key, fingerprint)| {
@@ -2060,16 +3319,18 @@ fn validate_procedure_checkpoint_receipts(
                 "Procedure inputs and sealed capability identity do not cover the exact task action".into(),
             ));
         }
-        for (name, input) in resolved_inputs {
+        for (name, input) in &resolved_inputs {
             let value = match input {
                 crate::agency::ResolvedProcedureInput::Value { value, .. } => match value {
                     crate::agency::ProcedureValue::Text(value)
                     | crate::agency::ProcedureValue::Identifier(value) => {
-                        serde_json::Value::String(value)
+                        serde_json::Value::String(value.clone())
                     }
-                    crate::agency::ProcedureValue::Boolean(value) => serde_json::Value::Bool(value),
+                    crate::agency::ProcedureValue::Boolean(value) => {
+                        serde_json::Value::Bool(*value)
+                    }
                     crate::agency::ProcedureValue::Number(value) => {
-                        serde_json::Number::from_f64(value)
+                        serde_json::Number::from_f64(*value)
                             .map(serde_json::Value::Number)
                             .ok_or_else(|| {
                                 CoreError::VerificationFailed(
@@ -2085,7 +3346,29 @@ fn validate_procedure_checkpoint_receipts(
                     ));
                 }
             };
-            if action_field_values.get(&name) != Some(&value) {
+            let matches_action = match input {
+                crate::agency::ResolvedProcedureInput::Value {
+                    value: crate::agency::ProcedureValue::Number(expected),
+                    ..
+                } => match action_field_values.get(name) {
+                    Some(serde_json::Value::Number(actual)) if actual.as_u64().is_some() => {
+                        *expected >= 0.0
+                            && expected.fract() == 0.0
+                            && *expected < u64::MAX as f64
+                            && actual.as_u64() == Some(*expected as u64)
+                    }
+                    Some(serde_json::Value::Number(actual)) if actual.as_i64().is_some() => {
+                        expected.fract() == 0.0
+                            && *expected >= i64::MIN as f64
+                            && *expected < i64::MAX as f64
+                            && actual.as_i64() == Some(*expected as i64)
+                    }
+                    Some(serde_json::Value::Number(actual)) => actual.as_f64() == Some(*expected),
+                    _ => false,
+                },
+                _ => action_field_values.get(name) == Some(&value),
+            };
+            if !matches_action {
                 return Err(CoreError::VerificationFailed(
                     "Procedure input value differs from the exact prepared task action".into(),
                 ));
@@ -2622,6 +3905,35 @@ mod continuation_tests {
     }
 
     #[test]
+    fn executor_timings_persist_only_bounded_operation_aggregates() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("timings.db");
+        let key = SecretBytes::new(vec![37; 32]);
+        let store = LocalStore::open_encrypted(&path, &key).unwrap();
+        store
+            .record_execution_timing("read_file", 8_000, true)
+            .unwrap();
+        store
+            .record_execution_timing("read_file", 16_000, false)
+            .unwrap();
+        assert!(store.record_execution_timing("../secret", 1, true).is_err());
+
+        let reopened = LocalStore::open_encrypted(&path, &key).unwrap();
+        let records = reopened.load_execution_timings().unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].operation, "read_file");
+        assert_eq!(records[0].ewma_micros, 9_000);
+        assert_eq!(
+            (
+                records[0].attempts,
+                records[0].successes,
+                records[0].failures
+            ),
+            (2, 1, 1)
+        );
+    }
+
+    #[test]
     fn continuation_acceptance_rolls_back_parent_child_and_messages_together() {
         for table in ["messages", "events", "audit_log"] {
             let dir = tempfile::tempdir().unwrap();
@@ -2896,6 +4208,7 @@ mod procedure_checkpoint_tests {
             schema_version: 1,
             id: "checkpoint-test".into(),
             nodes: vec![ProcedureNode {
+                controller_binding: None,
                 id: "read".into(),
                 depends_on: BTreeSet::new(),
                 outputs: BTreeMap::from([(
@@ -3043,6 +4356,7 @@ mod procedure_checkpoint_tests {
                 updated_at: Utc::now(),
             },
             evidence_state: CapabilityEvidenceState::ReversiblyExperimented,
+            restoration_evidence: None,
         }
     }
 
@@ -3387,5 +4701,664 @@ mod procedure_checkpoint_tests {
             })
             .unwrap();
         assert!(store.load_procedure_checkpoint(task.id).is_err());
+    }
+}
+
+#[cfg(test)]
+mod peer_checkpoint_tests {
+    use super::*;
+    use crate::secrets::SecretBytes;
+    use sage_peer::{ComputeUnitSpec, DelegatedJobKind, DeviceIdentity};
+    use sha2::{Digest, Sha256};
+
+    fn fixture() -> (ComputePlan, Vec<Vec<u8>>, PeerId, PartitionCheckpoint) {
+        let outputs = vec![
+            vec![0x3d; 2 * PEER_CHECKPOINT_CHUNK_BYTES + 17],
+            b"small verified result".to_vec(),
+        ];
+        let units = outputs
+            .iter()
+            .enumerate()
+            .map(|(index, bytes)| {
+                ComputeUnitSpec::new(
+                    index as u32,
+                    Sha256::digest(bytes).into(),
+                    bytes.len() as u32,
+                    bytes.len() as u32,
+                )
+                .unwrap()
+            })
+            .collect();
+        let plan = ComputePlan::new(DelegatedJobKind::BatchAnalysis, [0x42; 32], units, 1).unwrap();
+        let peer = DeviceIdentity::from_seed([0x61; 32]).peer_id();
+        let partition_outputs = outputs
+            .iter()
+            .enumerate()
+            .map(|(index, bytes)| {
+                UnitOutput::new(index as u32, Sha256::digest(bytes).into(), bytes.clone()).unwrap()
+            })
+            .collect();
+        let result =
+            PartitionResult::new(*plan.job_id(), *plan.plan_digest(), 0, partition_outputs)
+                .unwrap();
+        let checkpoint = plan
+            .verify_partition_result(0, peer, result, |spec, output| {
+                <[u8; 32]>::from(Sha256::digest(output)) == *spec.input_digest()
+            })
+            .unwrap()
+            .checkpoint();
+        (plan, outputs, peer, checkpoint)
+    }
+
+    fn encrypted_store(path: &Path) -> LocalStore {
+        LocalStore::open_encrypted(path, &SecretBytes::new(vec![37; 32])).unwrap()
+    }
+
+    #[test]
+    fn peer_partition_checkpoint_is_encrypted_chunked_and_reverified_after_reopen() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("peer-checkpoints.db");
+        let (plan, outputs, peer, checkpoint) = fixture();
+        let store = encrypted_store(&path);
+        let mut task = Task::new("persist peer-compute results");
+        store.save_task(&mut task).unwrap();
+        let task_id = task.id;
+        store
+            .save_peer_partition_checkpoint(task_id, &checkpoint)
+            .unwrap();
+        // Same exact checkpoint is safe to retry after an uncertain caller
+        // response; a different digest for this job/partition is rejected.
+        store
+            .save_peer_partition_checkpoint(task_id, &checkpoint)
+            .unwrap();
+        drop(store);
+
+        assert!(!crate::vault::is_plaintext(&path).unwrap());
+        let reopened = encrypted_store(&path);
+        let restored = reopened
+            .load_peer_partition_checkpoint(task_id, &plan, 0, |spec, output| {
+                <[u8; 32]>::from(Sha256::digest(output)) == *spec.input_digest()
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(restored.peer(), peer);
+        assert_eq!(restored.result_digest(), checkpoint.result_digest());
+        assert_eq!(restored.outputs().len(), outputs.len());
+        for (restored, expected) in restored.outputs().iter().zip(outputs) {
+            assert_eq!(restored.bytes(), expected);
+        }
+        assert!(
+            reopened
+                .load_peer_partition_checkpoint(Uuid::new_v4(), &plan, 0, |_, _| true)
+                .unwrap()
+                .is_none(),
+            "a result is visible only to the task that owns its checkpoint"
+        );
+
+        let mut conflicting_outputs = vec![
+            UnitOutput::new(
+                0,
+                *checkpoint.outputs()[0].input_digest(),
+                vec![0x9a; checkpoint.outputs()[0].bytes().len()],
+            )
+            .unwrap(),
+            UnitOutput::new(
+                1,
+                *checkpoint.outputs()[1].input_digest(),
+                checkpoint.outputs()[1].bytes().to_vec(),
+            )
+            .unwrap(),
+        ];
+        let conflicting_result = PartitionResult::new(
+            *plan.job_id(),
+            *plan.plan_digest(),
+            0,
+            std::mem::take(&mut conflicting_outputs),
+        )
+        .unwrap();
+        let conflicting_checkpoint = plan
+            .verify_partition_result(0, peer, conflicting_result, |_, _| true)
+            .unwrap()
+            .checkpoint();
+        assert!(
+            reopened
+                .save_peer_partition_checkpoint(task_id, &conflicting_checkpoint)
+                .is_err(),
+            "a different result cannot replace an immutable job partition"
+        );
+
+        reopened
+            .with_connection(|connection| {
+                connection.execute(
+                    "UPDATE peer_partition_checkpoint_chunks
+                     SET content=zeroblob(length(content))
+                     WHERE job_id=?1 AND partition_index=0 AND ordinal=0 AND chunk_index=0",
+                    [plan.job_id().as_slice()],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(
+            reopened
+                .load_peer_partition_checkpoint(task_id, &plan, 0, |spec, output| {
+                    <[u8; 32]>::from(Sha256::digest(output)) == *spec.input_digest()
+                })
+                .is_err(),
+            "restoration must reject content that no longer passes the task verifier"
+        );
+        assert_eq!(reopened.delete_peer_partition_checkpoints(peer).unwrap(), 1);
+        assert!(
+            reopened
+                .load_peer_partition_checkpoint(task_id, &plan, 0, |_, _| true)
+                .unwrap()
+                .is_none()
+        );
+        reopened
+            .save_peer_partition_checkpoint(task_id, &checkpoint)
+            .unwrap();
+        reopened
+            .with_connection(|connection| {
+                connection.pragma_update(None, "ignore_check_constraints", true)?;
+                connection.execute(
+                    "UPDATE peer_partition_checkpoint_outputs
+                     SET input_digest=zeroblob(33)
+                     WHERE job_id=?1 AND partition_index=0 AND ordinal=0",
+                    [plan.job_id().as_slice()],
+                )?;
+                connection.pragma_update(None, "ignore_check_constraints", false)?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(
+            reopened
+                .load_peer_partition_checkpoint(task_id, &plan, 0, |_, _| true)
+                .is_err(),
+            "malformed digest metadata is rejected before it can become a checkpoint"
+        );
+        reopened
+            .with_connection(|connection| {
+                connection.pragma_update(None, "ignore_check_constraints", true)?;
+                connection.execute(
+                    "UPDATE peer_partition_checkpoints
+                     SET plan_digest=zeroblob(33)
+                     WHERE job_id=?1 AND partition_index=0",
+                    [plan.job_id().as_slice()],
+                )?;
+                connection.pragma_update(None, "ignore_check_constraints", false)?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(
+            reopened
+                .load_peer_partition_checkpoint(task_id, &plan, 0, |_, _| true)
+                .is_err(),
+            "oversized digest headers are rejected during bounded recovery"
+        );
+        reopened
+            .with_connection(|connection| {
+                connection.execute(
+                    "INSERT INTO retired_task_data(task_id,retired_at) VALUES(?1,?2)",
+                    params![task_id.to_string(), Utc::now().to_rfc3339()],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(
+            reopened
+                .load_peer_partition_checkpoint(task_id, &plan, 0, |_, _| true)
+                .unwrap()
+                .is_none(),
+            "task retention revocation must delete its checkpoint and chunks"
+        );
+    }
+
+    #[test]
+    fn peer_compute_dispatch_requires_a_running_unstopped_owned_task() {
+        let locked_store = LocalStore::deferred(Path::new(":memory:")).unwrap();
+        assert!(matches!(
+            locked_store.validate_peer_compute_task_dispatch(Uuid::new_v4()),
+            Err(CoreError::PermissionRequired(_))
+        ));
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("peer-dispatch-task.db");
+        let store = encrypted_store(&path);
+        let mut task = Task::new("dispatch a bounded peer partition");
+        task.status = TaskStatus::Running;
+        store.save_task(&mut task).unwrap();
+        store.validate_peer_compute_task_dispatch(task.id).unwrap();
+
+        task.status = TaskStatus::Paused;
+        store.save_task(&mut task).unwrap();
+        assert!(matches!(
+            store.validate_peer_compute_task_dispatch(task.id),
+            Err(CoreError::PermissionRequired(_))
+        ));
+
+        task.status = TaskStatus::Running;
+        store.save_task(&mut task).unwrap();
+        store.stop_control_scope(task.control_scope()).unwrap();
+        assert!(matches!(
+            store.validate_peer_compute_task_dispatch(task.id),
+            Err(CoreError::Cancelled)
+        ));
+
+        assert!(matches!(
+            store.validate_peer_compute_task_dispatch(Uuid::new_v4()),
+            Err(CoreError::TaskNotFound(_))
+        ));
+    }
+
+    #[test]
+    fn peer_checkpoint_schema_migrates_an_existing_v11_encrypted_database() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("peer-checkpoint-v11.db");
+        let (plan, outputs, peer, checkpoint) = fixture();
+        let store = encrypted_store(&path);
+        let mut task = Task::new("upgrade peer checkpoint storage");
+        store.save_task(&mut task).unwrap();
+        let task_id = task.id;
+
+        // Recreate the pre-v12 schema boundary while retaining the encrypted
+        // v11 database, task row, key, and migrations that a released build
+        // would encounter during the next startup.
+        store
+            .with_connection(|connection| {
+                connection.execute_batch(
+                    "DROP TRIGGER IF EXISTS cleanup_retired_task_private_data;
+                     DROP TRIGGER IF EXISTS reject_retired_task_checkpoints_insert;
+                     DROP TRIGGER IF EXISTS reject_retired_task_checkpoints_update;
+                     DROP TABLE IF EXISTS incoming_task_handoffs;
+                     DROP TABLE IF EXISTS outgoing_task_handoffs;
+                     DROP TABLE IF EXISTS task_checkpoints;
+                     DROP TABLE peer_partition_checkpoint_chunks;
+                     DROP TABLE peer_partition_checkpoint_outputs;
+                     DROP TABLE peer_partition_checkpoints;
+                     DROP TABLE IF EXISTS task_handoff_execution_claims;
+                     DELETE FROM schema_migrations WHERE version IN (12,13,14,15,16);",
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        drop(store);
+
+        let upgraded = encrypted_store(&path);
+        upgraded
+            .with_connection(|connection| {
+                let migration_applied: bool = connection.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=12)",
+                    [],
+                    |row| row.get(0),
+                )?;
+                let checkpoint_tables: i64 = connection.query_row(
+                    "SELECT count(*) FROM sqlite_master
+                     WHERE type='table' AND name IN (
+                         'peer_partition_checkpoints',
+                         'peer_partition_checkpoint_outputs',
+                         'peer_partition_checkpoint_chunks'
+                     )",
+                    [],
+                    |row| row.get(0),
+                )?;
+                assert!(migration_applied);
+                assert_eq!(checkpoint_tables, 3);
+                Ok(())
+            })
+            .unwrap();
+        upgraded
+            .save_peer_partition_checkpoint(task_id, &checkpoint)
+            .unwrap();
+        let restored = upgraded
+            .load_peer_partition_checkpoint(task_id, &plan, 0, |spec, output| {
+                <[u8; 32]>::from(Sha256::digest(output)) == *spec.input_digest()
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(restored.peer(), peer);
+        assert_eq!(restored.outputs().len(), outputs.len());
+    }
+
+    #[test]
+    fn locked_storage_never_accepts_or_returns_peer_result_bytes() {
+        let store = LocalStore::deferred(Path::new(":memory:")).unwrap();
+        let (plan, _, _, checkpoint) = fixture();
+        assert!(
+            store
+                .save_peer_partition_checkpoint(Uuid::new_v4(), &checkpoint)
+                .is_err()
+        );
+        assert!(
+            store
+                .load_peer_partition_checkpoint(Uuid::new_v4(), &plan, 0, |_, _| true)
+                .is_err()
+        );
+    }
+}
+
+#[cfg(test)]
+mod task_checkpoint_storage_tests {
+    use super::*;
+    use crate::agency::{CheckpointState, ExecutionOwner, TaskCheckpoint};
+    use crate::contracts::Effect;
+    use crate::goal_coordinator::{
+        CandidateBranch, CoordinationPlan, DelegatedSubgoal, DelegationScope, GoalCoordinator,
+        LogicalSpecialist,
+    };
+    use crate::secrets::SecretBytes;
+
+    fn store() -> LocalStore {
+        LocalStore::deferred(Path::new(":memory:")).unwrap()
+    }
+
+    fn encrypted_store(path: &Path) -> LocalStore {
+        LocalStore::open_encrypted(path, &SecretBytes::new(vec![53; 32])).unwrap()
+    }
+
+    fn checkpoint(task_id: Uuid) -> TaskCheckpoint {
+        TaskCheckpoint {
+            schema_version: 1,
+            task_id,
+            intent: "continue the verified task".into(),
+            procedure: None,
+            goal_coordination: None,
+            procedure_state: BTreeMap::new(),
+            artifacts: Vec::new(),
+            verified_results: Vec::new(),
+            receipt_ids: Vec::new(),
+            pending_obligations: Vec::new(),
+            state: CheckpointState::Settled,
+            execution_owner: ExecutionOwner {
+                device_id: Uuid::new_v4(),
+                generation: 1,
+            },
+            dispatched_effects_settled: true,
+        }
+    }
+
+    #[test]
+    fn task_checkpoint_round_trips_in_encrypted_store_and_fences_revisions() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("task-checkpoint.db");
+        let store = encrypted_store(&path);
+        let mut task = Task::new("persist a transferable task checkpoint");
+        store.save_task(&mut task).unwrap();
+
+        let checkpoint = checkpoint(task.id);
+        let serialized = serde_json::to_string(&checkpoint)
+            .unwrap()
+            .to_ascii_lowercase();
+        assert!(!serialized.contains("grant"));
+        assert!(!serialized.contains("credential"));
+        assert!(!serialized.contains("secret"));
+        assert_eq!(store.save_task_checkpoint(&checkpoint, 0).unwrap(), 1);
+        drop(store);
+
+        let store = encrypted_store(&path);
+        let (loaded, revision) = store.load_task_checkpoint(task.id).unwrap().unwrap();
+        assert_eq!(revision, 1);
+        assert_eq!(loaded.task_id, checkpoint.task_id);
+        assert_eq!(loaded.intent, checkpoint.intent);
+        assert_eq!(loaded.execution_owner, checkpoint.execution_owner);
+        assert!(store.save_task_checkpoint(&loaded, 0).is_err());
+        assert_eq!(store.save_task_checkpoint(&loaded, revision).unwrap(), 2);
+    }
+
+    #[test]
+    fn task_checkpoint_persists_and_revalidates_goal_coordination() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("goal-coordination.db");
+        let store = encrypted_store(&path);
+        let mut task = Task::new("persist reviewed goal coordination progress");
+        store.save_task(&mut task).unwrap();
+
+        let system_id = Uuid::from_u128(110);
+        let scope = DelegationScope {
+            capability_ids: BTreeSet::from(["sage.app.inspect".into()]),
+            system_ids: BTreeSet::from([system_id]),
+            effects: BTreeSet::from([Effect::Read]),
+            disclosure_scopes: BTreeSet::new(),
+            maximum_calls: 2,
+            maximum_output_bytes: 2048,
+        };
+        let plan = CoordinationPlan {
+            schema_version: 1,
+            goal_id: "persisted-goal".into(),
+            candidates: vec![CandidateBranch {
+                id: "local-read".into(),
+                rationale: "Use one reviewed local read".into(),
+                subgoals: vec![DelegatedSubgoal {
+                    id: "inspect".into(),
+                    specialist: LogicalSpecialist::Planner,
+                    instruction: "Inspect the selected local document".into(),
+                    success_condition: "Independent readback evidence exists".into(),
+                    dependencies: BTreeSet::new(),
+                    scope: scope.clone(),
+                }],
+            }],
+        };
+        let mut coordinator = GoalCoordinator::new(plan, scope, 1, 0).unwrap();
+        coordinator.select_branch("local-read").unwrap();
+        coordinator.mark_dispatched("inspect").unwrap();
+        coordinator
+            .record_verified("inspect", BTreeSet::from([Uuid::from_u128(111)]))
+            .unwrap();
+
+        let mut checkpoint = checkpoint(task.id);
+        checkpoint.goal_coordination = Some(coordinator.checkpoint());
+        let mut old_shape = serde_json::to_value(&checkpoint).unwrap();
+        old_shape
+            .as_object_mut()
+            .unwrap()
+            .remove("goal_coordination");
+        let legacy: TaskCheckpoint = serde_json::from_value(old_shape).unwrap();
+        assert!(legacy.goal_coordination.is_none());
+        assert_eq!(store.save_task_checkpoint(&checkpoint, 0).unwrap(), 1);
+        drop(store);
+
+        let store = encrypted_store(&path);
+        let (loaded, revision) = store.load_task_checkpoint(task.id).unwrap().unwrap();
+        assert_eq!(revision, 1);
+        let restored = GoalCoordinator::restore(loaded.goal_coordination.unwrap()).unwrap();
+        assert!(restored.is_complete());
+        assert_eq!(
+            restored.verified_evidence("inspect").unwrap(),
+            &BTreeSet::from([Uuid::from_u128(111)])
+        );
+    }
+
+    #[test]
+    fn task_checkpoint_owner_transfer_is_settled_only_and_fences_the_prior_owner() {
+        let store = store();
+        let mut task = Task::new("fence the source before handoff");
+        store.save_task(&mut task).unwrap();
+        let initial = checkpoint(task.id);
+        let source_owner = initial.execution_owner.clone();
+        assert_eq!(store.save_task_checkpoint(&initial, 0).unwrap(), 1);
+
+        let (mut transfer, revision) = store.load_task_checkpoint(task.id).unwrap().unwrap();
+        let destination = Uuid::new_v4();
+        let mut forged_transfer = transfer.clone();
+        forged_transfer
+            .transfer_ownership(destination)
+            .expect("settled source can prepare a candidate transfer");
+        forged_transfer.intent.push_str(" with changed progress");
+        assert!(
+            store
+                .save_task_checkpoint(&forged_transfer, revision)
+                .is_err(),
+            "ownership transfer cannot smuggle changed checkpoint progress"
+        );
+        transfer
+            .transfer_ownership(destination)
+            .expect("settled source can advance its local fence");
+        assert_eq!(store.save_task_checkpoint(&transfer, revision).unwrap(), 2);
+        store
+            .with_connection(|connection| {
+                let count: i64 = connection.query_row(
+                    "SELECT COUNT(*) FROM audit_log WHERE task_id=?1 AND event_type='task_checkpoint_owner_transferred'",
+                    [task.id.to_string()],
+                    |row| row.get(0),
+                )?;
+                assert_eq!(count, 1);
+                Ok(())
+            })
+            .unwrap();
+        let (stored, revision) = store.load_task_checkpoint(task.id).unwrap().unwrap();
+        assert_eq!(revision, 2);
+        assert_eq!(stored.state, CheckpointState::Paused);
+        assert_eq!(stored.execution_owner.generation, 2);
+        assert_ne!(stored.execution_owner.device_id, source_owner.device_id);
+
+        assert!(
+            store.save_task_checkpoint(&initial, revision).is_err(),
+            "the prior owner cannot overwrite the newer local generation"
+        );
+
+        let mut unsettled = stored;
+        unsettled.state = CheckpointState::Paused;
+        unsettled.dispatched_effects_settled = false;
+        assert!(unsettled.transfer_ownership(Uuid::new_v4()).is_err());
+    }
+
+    #[test]
+    fn first_install_of_transferred_checkpoint_requires_a_durable_destination_claim() {
+        let store = store();
+        let mut task = Task::new("reject an unclaimed destination checkpoint");
+        store.save_task(&mut task).unwrap();
+        let mut transferred = checkpoint(task.id);
+        transferred
+            .transfer_ownership(Uuid::new_v4())
+            .expect("settled checkpoint can prepare a transfer");
+        assert_eq!(transferred.execution_owner.generation, 2);
+        assert_eq!(transferred.state, CheckpointState::Paused);
+        assert!(store.save_task_checkpoint(&transferred, 0).is_err());
+    }
+
+    #[test]
+    fn task_checkpoint_load_rejects_tampering_and_retention_revocation_deletes_it() {
+        let store = store();
+        let mut task = Task::new("check checkpoint integrity");
+        store.save_task(&mut task).unwrap();
+        let checkpoint = checkpoint(task.id);
+        store.save_task_checkpoint(&checkpoint, 0).unwrap();
+        store
+            .with_connection(|connection| {
+                connection.execute(
+                    "UPDATE task_checkpoints SET checkpoint_json=?1 WHERE task_id=?2",
+                    params!["{}", task.id.to_string()],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(store.load_task_checkpoint(task.id).is_err());
+
+        store
+            .with_connection(|connection| {
+                connection.execute(
+                    "UPDATE task_checkpoints SET checkpoint_sha256=?1,checkpoint_json=?2 WHERE task_id=?3",
+                    params![
+                        format!("{:x}", Sha256::digest(b"{}")),
+                        "{}",
+                        task.id.to_string(),
+                    ],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(store.load_task_checkpoint(task.id).is_err());
+
+        store
+            .with_connection(|connection| {
+                connection.execute(
+                    "INSERT INTO retired_task_data(task_id,retired_at) VALUES(?1,?2)",
+                    params![task.id.to_string(), Utc::now().to_rfc3339()],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(store.load_task_checkpoint(task.id).unwrap().is_none());
+        assert!(store.save_task_checkpoint(&checkpoint, 1).is_err());
+    }
+
+    #[test]
+    fn task_checkpoint_migration_upgrades_an_existing_v12_database() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("task-checkpoint-v12.db");
+        let store = encrypted_store(&path);
+        let mut task = Task::new("upgrade task checkpoint schema");
+        store.save_task(&mut task).unwrap();
+        store
+            .with_connection(|connection| {
+                connection.execute_batch(
+                    "DROP TRIGGER IF EXISTS cleanup_retired_task_private_data;
+                     DROP TRIGGER IF EXISTS reject_retired_task_checkpoints_insert;
+                     DROP TRIGGER IF EXISTS reject_retired_task_checkpoints_update;
+                     DROP TABLE IF EXISTS task_checkpoints;
+                     DROP TABLE IF EXISTS incoming_task_handoffs;
+                     DROP TABLE IF EXISTS outgoing_task_handoffs;
+                     DROP TABLE IF EXISTS task_handoff_execution_claims;
+                     DELETE FROM schema_migrations WHERE version IN (13,14,15,16);",
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        drop(store);
+
+        let upgraded = encrypted_store(&path);
+        upgraded
+            .with_connection(|connection| {
+                let migration_applied: bool = connection.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=13)",
+                    [],
+                    |row| row.get(0),
+                )?;
+                let checkpoint_table: bool = connection.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='task_checkpoints')",
+                    [],
+                    |row| row.get(0),
+                )?;
+                let handoff_migration: bool = connection.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=14)",
+                    [],
+                    |row| row.get(0),
+                )?;
+                let handoff_table: bool = connection.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='incoming_task_handoffs')",
+                    [],
+                    |row| row.get(0),
+                )?;
+                let outgoing_handoff_migration: bool = connection.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=15)",
+                    [],
+                    |row| row.get(0),
+                )?;
+                let outgoing_handoff_table: bool = connection.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='outgoing_task_handoffs')",
+                    [],
+                    |row| row.get(0),
+                )?;
+                let claim_migration: bool = connection.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=16)",
+                    [],
+                    |row| row.get(0),
+                )?;
+                let claim_table: bool = connection.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='task_handoff_execution_claims')",
+                    [],
+                    |row| row.get(0),
+                )?;
+                assert!(migration_applied);
+                assert!(checkpoint_table);
+                assert!(handoff_migration);
+                assert!(handoff_table);
+                assert!(outgoing_handoff_migration);
+                assert!(outgoing_handoff_table);
+                assert!(claim_migration);
+                assert!(claim_table);
+                Ok(())
+            })
+            .unwrap();
+        let checkpoint = checkpoint(task.id);
+        assert_eq!(upgraded.save_task_checkpoint(&checkpoint, 0).unwrap(), 1);
     }
 }
